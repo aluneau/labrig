@@ -1,0 +1,13 @@
+"""API Router"""
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import vms, storage, networks, hosts, tasks, events
+
+api_router = APIRouter()
+
+api_router.include_router(vms.router, prefix="/vms", tags=["vms"])
+api_router.include_router(storage.router, prefix="/storage", tags=["storage"])
+api_router.include_router(networks.router, prefix="/networks", tags=["networks"])
+api_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
+api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
+api_router.include_router(events.router, prefix="/events", tags=["events"])

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+backend/venv/
+backend/data/
+backend/.env
+
+# Node
+node_modules/
+frontend/build/
+
+# Release / build outputs
+dist/
+opentofu_provider/terraform-provider-vmmanager
+
+# OpenTofu
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
+# Tests
+e2e/screenshots/

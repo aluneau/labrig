@@ -1,0 +1,53 @@
+version: '3.8'
+
+# Development compose file with hot reloading
+# Usage: podman-compose -f docker-compose.dev.yml up
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: vm-manager-backend-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app:ro
+      - vm_data_dev:/app/data
+      - /var/run/libvirt:/var/run/libvirt
+      - /var/lib/libvirt:/var/lib/libvirt
+      - /etc/libvirt:/etc/libvirt
+    environment:
+      - DATABASE_URL=sqlite:///data/vm_manager.db
+      - LIBVIRT_URI=qemu:///system
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+      - LOG_LEVEL=DEBUG
+    privileged: true
+    network_mode: host
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: vm-manager-frontend-dev
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+      - WDS_SOCKET_PORT=3000
+    depends_on:
+      - backend
+    stdin_open: true
+    tty: true
+
+volumes:
+  vm_data_dev:
+    driver: local

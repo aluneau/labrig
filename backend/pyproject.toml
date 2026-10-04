@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vm-manager-backend"
+version = "0.1.0"
+description = "VM Manager - A modern VM management platform"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.12.0",
+    "aiosqlite>=0.19.0",
+    "libvirt-python>=9.0.0",
+    "python-multipart>=0.0.6",
+    "httpx>=0.25.0",
+    "pyyaml>=6.0.1",
+    "jinja2>=3.1.2",
+    "websockets>=12.0",
+    "aiofiles>=23.2.1",
+    "psutil>=5.9.0",
+    "pycdlib>=1.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["app"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

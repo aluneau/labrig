@@ -1,0 +1,135 @@
+# VM Manager
+
+A web UI and REST API to manage KVM virtual machines through libvirt.
+
+- **VMs**: create from a cloud image (configured with cloud-init), an install ISO, or an empty disk;
+  start / shut down / reboot / pause / force off / delete; see IPs and disks.
+- **In-browser console** (noVNC) with Ctrl+Alt+Del, fullscreen, power buttons; the guest keyboard
+  layout is set by cloud-init (defaults to your browser language, e.g. AZERTY for `fr`).
+- **Live status**: libvirt events are pushed to the browser (Server-Sent Events), so a VM shutting
+  down, a download progressing or a network stopping updates on screen without refreshing.
+- **Cloud images**: one-click download of Ubuntu, Debian, AlmaLinux, Rocky and CentOS Stream images
+  (or any URL). A VM gets its own full copy, grown to the requested size, plus a generated NoCloud
+  seed ISO with its hostname, user, password and SSH keys.
+- **Storage**: pools, volumes, ISO upload or download from URL.
+- **Networks**: create NAT / routed / isolated networks, start/stop, autostart; edit subnet, DHCP range,
+  domain and forward mode; static DHCP reservations (applied live, "make static" from a lease); raw XML editor.
+- **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
+- **Tasks**: progress of background downloads, with cancel.
+
+libvirt is the source of truth: VMs, pools and networks created with `virsh` or virt-manager show up
+too. The SQLite database only keeps metadata (descriptions, cloud images, task history).
+
+## Architecture
+
+- **Backend**: FastAPI + SQLAlchemy + libvirt-python (`backend/`)
+- **Frontend**: React + PatternFly 5 (`frontend/`), served by the backend once built
+- **Hypervisor**: QEMU/KVM via `qemu:///system`
+
+The backend runs directly on the host. Running it in a container is what broke libvirt access
+before: it needs the libvirt socket, polkit authorization, and paths that QEMU (running as
+`libvirt-qemu`) can read.
+
+## Install
+
+Supported hosts: **Arch** (and derivatives: CachyOS, Manjaro…), **Fedora**, **RHEL / AlmaLinux / Rocky /
+CentOS Stream** 9 and 10, **Debian / Ubuntu**. Tested end to end on CachyOS, AlmaLinux 9 and 10 (SELinux
+enforcing, firewalld) and Debian 13 (ufw).
+
+```bash
+# from a release tarball (web UI prebuilt, only Python needed on the host)
+tar xzf vm-manager-<version>.tar.gz && cd vm-manager-<version>
+scripts/setup.sh                 # then open http://127.0.0.1:8000
+
+# from a git checkout: same, Node.js 20+ is used once to build the UI
+```
+
+`scripts/setup.sh` is idempotent (re-run it after an update). Run it as the user who will use VM Manager;
+it uses sudo for the system parts:
+
+1. installs libvirt, QEMU/KVM, OVMF, dnsmasq and the distro's libvirt Python bindings
+2. starts libvirt (modular daemons on Fedora/RHEL, `libvirtd` elsewhere)
+3. adds you to the `libvirt` group (the polkit rule that lets you manage VMs without a password)
+4. starts the `default` NAT network with autostart, and moves it to a free `192.168.X.0/24`
+   when `192.168.122.0/24` is already in use (LAN, VPN, nested lab…)
+5. firewall: with **ufw**, allows DHCP/DNS and forwarding on libvirt bridges (`virbr+`), otherwise VMs
+   boot without an IP; with **firewalld**, libvirt's own `libvirt` zone already covers it
+6. creates `backend/venv`, builds the UI if needed
+7. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
+
+| Option | |
+|---|---|
+| `--no-boot` | start libvirt and the service now but **don't enable them at boot** (gaming PC): `sudo systemctl start vm-manager` when needed |
+| `--no-service` | no systemd service, start with `./run.sh` |
+| `--listen 0.0.0.0 --port 8000` | reachable from the network (no login yet: trusted networks only; open the port yourself) |
+
+Service: `journalctl -u vm-manager -f`, `sudo systemctl stop vm-manager`.
+
+Release tarball: `scripts/package.sh` → `dist/vm-manager-<version>.tar.gz`.
+
+## Run without the service
+
+```bash
+./run.sh                 # http://127.0.0.1:8000  (UI + API, docs at /docs)
+./run.sh --dev           # backend with auto-reload on :8000
+cd frontend && npm start # UI with hot reload on :3000, proxies /api to :8000
+```
+
+## Configuration
+
+Environment variables or `backend/.env`:
+
+| Variable | Default | |
+|---|---|---|
+| `LIBVIRT_URI` | `qemu:///system` | |
+| `DEFAULT_POOL_NAME` / `DEFAULT_POOL_PATH` | `default` / `/var/lib/libvirt/images` | Pool for new disks, ISOs and cloud images; created if missing |
+| `DEFAULT_NETWORK` | `default` | Network for new VMs |
+| `VNC_LISTEN` | `127.0.0.1` | `0.0.0.0` exposes VM consoles (no password) to the LAN |
+| `DATABASE_URL` | `sqlite:///backend/data/vmanager.db` | |
+
+VNC servers listen on localhost; the web console reaches them through the backend's WebSocket bridge,
+so nothing else needs to be exposed.
+
+## OpenTofu
+
+```bash
+make -C opentofu_provider install
+cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
+cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
+```
+
+See `opentofu_provider/README.md` for all resources and arguments.
+
+## Tests
+
+`e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
+`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`).
+
+## API overview
+
+| | |
+|---|---|
+| `GET/POST /api/v1/vms`, `GET/PATCH/DELETE /api/v1/vms/{id}` | VMs (`?delete_disks=true` on delete) |
+| `POST /api/v1/vms/{id}/{start,stop,force_stop,reboot,suspend,resume}` | Power actions |
+| `GET /api/v1/storage/cloud-images`, `POST` (download), `GET …/distributions` | Cloud images |
+| `GET /api/v1/storage/isos`, `POST …/isos/upload`, `POST …/isos/download` | ISOs |
+| `/api/v1/storage/pools`, `/api/v1/storage/volumes` | Pools and volumes |
+| `/api/v1/networks`, `…/{id}/start`, `…/{id}/stop`, `…/{id}/autostart`, `…/{id}/leases` | Networks |
+| `GET /api/v1/tasks`, `POST /api/v1/tasks/{id}/cancel` | Background tasks |
+| `GET /api/v1/events` | Live events (Server-Sent Events) |
+| `WS /api/v1/vms/{id}/vnc` | VNC console (WebSocket) |
+| `GET /api/v1/networks/{id}/config`, `PUT /api/v1/networks/{id}`, `PUT …/xml`, `POST/PUT/DELETE …/hosts` | Network editing, DHCP reservations |
+| `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
+
+Full interactive docs: `/docs`.
+
+## Roadmap
+
+See [future-features.md](future-features.md): DHCP lease release, ISO/boot order/disks on existing VMs,
+start/stop libvirt from the UI, **lab groups** (isolated network + router VM for DNS/DHCP/BGP/WireGuard),
+then **Kubernetes / OpenShift** clusters on top of groups.
+
+## Containers
+
+`docker-compose.yml` is kept for reference but is not the supported way to run the backend (see
+Architecture). Use `scripts/setup.sh`.

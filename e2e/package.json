@@ -1,0 +1,16 @@
+{
+  "name": "vm-manager-e2e",
+  "private": true,
+  "description": "Browser tests driving the real UI against real libvirt (they create/delete VMs named e2e-*)",
+  "scripts": {
+    "smoke": "node smoke.js",
+    "lifecycle": "node lifecycle.js",
+    "full": "node full.js",
+    "network": "node netedit.js",
+    "iso": "node iso.js",
+    "keyboard": "node kbd.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1"
+  }
+}

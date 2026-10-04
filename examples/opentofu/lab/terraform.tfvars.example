@@ -1,0 +1,4 @@
+# cp terraform.tfvars.example terraform.tfvars
+ssh_public_key = "ssh-ed25519 AAAA... you@host"
+# password     = "change-me"
+# keyboard     = "us"
