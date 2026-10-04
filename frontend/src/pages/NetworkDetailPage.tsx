@@ -34,7 +34,7 @@ import {
 } from '@patternfly/react-core';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { DHCPHost, NetworkConfig, NetworkUpdate } from '../types';
-import { networkApi } from '../services/api';
+import { ApiError, networkApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatDate } from '../utils/format';
 import { StatusLabel } from '../components/common/StatusLabel';
@@ -266,14 +266,17 @@ export const NetworkDetailPage: React.FC = () => {
   const [tab, setTab] = useState<string | number>('settings');
   const [hostModal, setHostModal] = useState<{ editing: DHCPHost | null; prefill: Partial<DHCPHost> | null } | null>(null);
   const [toDelete, setToDelete] = useState<DHCPHost | null>(null);
+  const [gone, setGone] = useState(false);
 
   const load = useCallback(async () => {
+    if (gone) return;
     try {
       setConfig(await networkApi.config(networkId));
     } catch (err) {
-      setError(errorText(err));
+      if (err instanceof ApiError && err.status === 404) setGone(true); // deleted elsewhere
+      else setError(errorText(err));
     }
-  }, [networkId]);
+  }, [networkId, gone]);
 
   useEffect(() => {
     load();
@@ -283,6 +286,7 @@ export const NetworkDetailPage: React.FC = () => {
   }, [load]);
   useLiveEvents(['network', 'vm'], () => load());
 
+  if (gone) return <PageSection><Alert variant="info" isInline title="This network no longer exists">It was deleted. <Link to="/networks">Back to networks</Link></Alert></PageSection>;
   if (!config) return error ? <PageSection><Alert variant="danger" isInline title={error} /></PageSection> : <Bullseye><Spinner size="xl" /></Bullseye>;
 
   const net = config.network;

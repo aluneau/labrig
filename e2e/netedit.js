@@ -8,8 +8,9 @@ const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`,
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const problems = [];
-  page.on('console', (m) => { if (m.type() === 'error') problems.push(m.text().slice(0, 200)); });
-  page.on('response', (r) => { if (r.status() >= 400) problems.push(`http ${r.status()} ${r.request().method()} ${r.url()}`); });
+  let expect400 = false; // set while a step deliberately submits invalid input
+  page.on('console', (m) => { if (m.type() === 'error' && !(expect400 && /status of 400/.test(m.text()))) problems.push(m.text().slice(0, 200)); });
+  page.on('response', (r) => { if (r.status() >= 400 && !(expect400 && r.status() === 400)) problems.push(`http ${r.status()} ${r.request().method()} ${r.url()}`); });
   const step = async (name, fn) => { try { await fn(); log('OK  ', name); } catch (e) { log('FAIL', name, '→', e.message.split('\n')[0]); await page.screenshot({ path: `fail-${name.replace(/\W+/g, '_')}.png` }); throw e; } };
   try {
     await step('create network e2e-dhcp', async () => {
@@ -31,9 +32,11 @@ const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`,
       await page.screenshot({ path: 'net-settings.png' });
     });
     await step('invalid range shows error', async () => {
+      expect400 = true;
       await page.locator('#ns-start').fill('10.0.0.1');
       await page.getByRole('button', { name: 'Save', exact: true }).click();
       await page.getByText(/outside 192\.168\.179\.0\/24/).waitFor();
+      expect400 = false;
       await page.getByRole('button', { name: 'Reset' }).click();
     });
     await step('create VM on e2e-dhcp', async () => {
@@ -84,6 +87,7 @@ const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(1)}s]`,
   } catch { /* logged */ }
   // cleanup through the API
   const vms = await (await page.request.get(BASE + '/api/v1/vms')).json();
+  await page.goto('about:blank'); // leave the detail page before deleting what it shows
   for (const v of vms.filter((v) => v.name === 'e2e-dhcpvm')) await page.request.delete(`${BASE}/api/v1/vms/${v.id}?delete_disks=true`);
   const nets = await (await page.request.get(BASE + '/api/v1/networks')).json();
   for (const n of nets.filter((n) => n.name === 'e2e-dhcp')) await page.request.delete(`${BASE}/api/v1/networks/${n.id}`);
