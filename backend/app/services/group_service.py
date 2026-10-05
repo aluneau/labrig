@@ -822,10 +822,7 @@ class GroupService:
             return []  # agent not ready / no lease file yet
         members = {m.mac: m.name for m in spec.members if m.mac}
         reserved = {h.mac for h in spec.dhcp_hosts}
-        try:
-            vms = {i["mac"].lower(): i for i in libvirt_client.network_interfaces(network_name(spec.name))}
-        except libvirt.libvirtError:
-            vms = {}
+        vms = self._network_vms(network_name(spec.name))
         for lease in leases:
             mac = lease["mac"]
             lease["kind"] = "member" if mac in members else "reservation" if mac in reserved else "dynamic"
@@ -833,7 +830,20 @@ class GroupService:
             vm = vms.get(mac)
             lease["vm_name"] = vm["vm"] if vm else None
             lease["vm_running"] = bool(vm and vm["active"])
+            lease["vm_unknown"] = vms is None
         return leases
+
+    @staticmethod
+    def _network_vms(network: str) -> Optional[Dict[str, Dict[str, Any]]]:
+        """MAC -> {vm, active} for the VMs on a network; None if libvirt can't tell (a domain deleted
+        while listing them raises: retry a few times)"""
+        for attempt in range(3):
+            try:
+                return {i["mac"].lower(): i for i in libvirt_client.network_interfaces(network)}
+            except libvirt.libvirtError as e:
+                logger.info(f"Listing the VMs on {network} failed ({e}), retrying")
+                time.sleep(0.2)
+        return None
 
     def release_lease(self, db: Session, group_id: int, mac: str, force: bool = False) -> Optional[Dict[str, Any]]:
         """Drop a lease on the router: stop dnsmasq, delete the MAC's line from its lease file, start it.
@@ -850,6 +860,9 @@ class GroupService:
             lease = next((le for le in self.leases(group) if le["mac"] == mac), None)
             if lease is None:
                 raise LookupError(f"No DHCP lease for {mac} on the router of group '{spec.name}'")
+            logger.info(f"Release {mac} on {rtr}: lease {lease}, force={force}")
+            if lease.pop("vm_unknown") and not force:
+                raise RuntimeError("Could not list the VMs on the group network: try again")
             if lease["vm_running"] and not force:
                 raise LeaseInUse(f"VM '{lease['vm_name']}' is running with this MAC: it would renew the lease. "
                                  "Stop it first.")

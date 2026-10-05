@@ -29,6 +29,8 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
   DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
   plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
   is re-rendered and pushed through the QEMU guest agent); start/stop/delete the whole lab; export its spec.
+  Other VMs attached to the group network get dynamic leases from the router: **"Make static"** turns one
+  into a reservation (optionally with `<hostname>.<domain>`), and leases of stopped VMs can be released.
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -137,7 +139,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
-`devices.js`, `groups.js`).
+`devices.js`, `groups.js`, `group-dhcp.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 
 ## API overview
@@ -165,6 +167,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `GET/POST /api/v1/groups`, `GET/PUT/DELETE /api/v1/groups/{id}` (spec; `?delete_disks=`) | Lab groups (create runs as a task) |
 | `POST …/groups/{id}/{start,stop}`, `POST/DELETE …/members`, `POST/DELETE …/dns-records` | Group power (router first on start, last on stop), live members / records |
 | `GET …/groups/{id}/router/config`, `POST …/router/apply`, `GET …/export` | Rendered router config, re-push, spec YAML |
+| `GET/POST …/groups/{id}/dhcp-hosts`, `PUT/DELETE …/dhcp-hosts/{mac}` (`?release_lease=`) | Static reservations of non-member machines (live on the router) |
+| `GET …/groups/{id}/leases`, `DELETE …/leases/{mac}` (`?force=`) | Router leases (member / reservation / dynamic), release one |
 
 Full interactive docs: `/docs`.
 

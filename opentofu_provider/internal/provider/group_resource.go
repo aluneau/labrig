@@ -47,25 +47,32 @@ type dnsRecordModel struct {
 	CNAME types.String `tfsdk:"cname"`
 }
 
+type groupDHCPHostModel struct {
+	MAC      types.String `tfsdk:"mac"`
+	IP       types.String `tfsdk:"ip"`
+	Hostname types.String `tfsdk:"hostname"`
+}
+
 type groupModel struct {
-	ID            types.String       `tfsdk:"id"`
-	Name          types.String       `tfsdk:"name"`
-	CIDR          types.String       `tfsdk:"cidr"`
-	Domain        types.String       `tfsdk:"domain"`
-	Uplink        types.String       `tfsdk:"uplink"`
-	RouterImage   types.String       `tfsdk:"router_image"`
-	RouterMemory  types.Int64        `tfsdk:"router_memory"`
-	DNSForwarders types.List         `tfsdk:"dns_forwarders"`
-	CloudInit     *cloudInitModel    `tfsdk:"cloud_init"`
-	Running       types.Bool         `tfsdk:"running"`
-	Members       []groupMemberModel `tfsdk:"member"`
-	DNSRecords    []dnsRecordModel   `tfsdk:"dns_record"`
-	NetworkName   types.String       `tfsdk:"network_name"`
-	RouterIP      types.String       `tfsdk:"router_ip"`
-	RouterVMID    types.String       `tfsdk:"router_vm_id"`
-	MemberIPs     types.Map          `tfsdk:"member_ips"`
-	MemberMACs    types.Map          `tfsdk:"member_macs"`
-	MemberVMIDs   types.Map          `tfsdk:"member_vm_ids"`
+	ID            types.String         `tfsdk:"id"`
+	Name          types.String         `tfsdk:"name"`
+	CIDR          types.String         `tfsdk:"cidr"`
+	Domain        types.String         `tfsdk:"domain"`
+	Uplink        types.String         `tfsdk:"uplink"`
+	RouterImage   types.String         `tfsdk:"router_image"`
+	RouterMemory  types.Int64          `tfsdk:"router_memory"`
+	DNSForwarders types.List           `tfsdk:"dns_forwarders"`
+	CloudInit     *cloudInitModel      `tfsdk:"cloud_init"`
+	Running       types.Bool           `tfsdk:"running"`
+	Members       []groupMemberModel   `tfsdk:"member"`
+	DNSRecords    []dnsRecordModel     `tfsdk:"dns_record"`
+	DHCPHosts     []groupDHCPHostModel `tfsdk:"dhcp_host"`
+	NetworkName   types.String         `tfsdk:"network_name"`
+	RouterIP      types.String         `tfsdk:"router_ip"`
+	RouterVMID    types.String         `tfsdk:"router_vm_id"`
+	MemberIPs     types.Map            `tfsdk:"member_ips"`
+	MemberMACs    types.Map            `tfsdk:"member_macs"`
+	MemberVMIDs   types.Map            `tfsdk:"member_vm_ids"`
 }
 
 // API payloads
@@ -86,6 +93,12 @@ type apiDNSRecord struct {
 	CNAME *string `json:"cname,omitempty"`
 }
 
+type apiGroupDHCPHost struct {
+	MAC      string  `json:"mac"`
+	IP       string  `json:"ip"`
+	Hostname *string `json:"hostname,omitempty"`
+}
+
 type apiGroupSpec struct {
 	Name   string  `json:"name"`
 	CIDR   string  `json:"cidr"`
@@ -102,6 +115,7 @@ type apiGroupSpec struct {
 	} `json:"router"`
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
+	DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
 }
 
 type apiGroupMember struct {
@@ -133,7 +147,8 @@ type apiGroup struct {
 				Records    []apiDNSRecord `json:"records"`
 			} `json:"dns"`
 		} `json:"router"`
-		Members []apiGroupMemberSpec `json:"members"`
+		Members   []apiGroupMemberSpec `json:"members"`
+		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
 	} `json:"spec"`
 }
 
@@ -148,7 +163,7 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 	replaceStr := []planmodifier.String{stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
 		Description: "A lab group: an isolated network, a router VM (DHCP, DNS, NAT) and member VMs with fixed " +
-			"addresses and DNS names. Members and DNS records are added/removed in place (applied live on the " +
+			"addresses and DNS names. Members, DNS records and DHCP reservations are added/removed in place (applied live on the " +
 			"router); a member whose image/size changes is recreated. Network/router settings recreate the group.",
 		Attributes: map[string]schema.Attribute{
 			"id":   schema.StringAttribute{Computed: true, PlanModifiers: keep},
@@ -198,6 +213,15 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"ip":        schema.StringAttribute{Optional: true, Description: "Fixed IP (assigned by the app if unset: see member_ips)."},
 				}},
 			},
+			"dhcp_host": schema.ListNestedBlock{
+				Description: "Static DHCP reservation for a machine that is not a member (e.g. a vmmanager_vm on " +
+					"network_name). Applied live on the router; with hostname, <hostname>.<domain> resolves too.",
+				NestedObject: schema.NestedBlockObject{Attributes: map[string]schema.Attribute{
+					"mac":      schema.StringAttribute{Required: true, Description: "Lowercase MAC address."},
+					"ip":       schema.StringAttribute{Required: true, Description: "Address in cidr (not the router's or a member's)."},
+					"hostname": schema.StringAttribute{Optional: true},
+				}},
+			},
 			"dns_record": schema.ListNestedBlock{
 				Description: "DNS record served by the router; name is relative to domain (\"api.ocp\", \"*.apps.ocp\").",
 				NestedObject: schema.NestedBlockObject{Attributes: map[string]schema.Attribute{
@@ -243,6 +267,10 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 		}
 		c["ssh_keys"] = keys
 		s.CloudInit = c
+	}
+	s.DHCPHosts = []apiGroupDHCPHost{}
+	for _, h := range m.DHCPHosts {
+		s.DHCPHosts = append(s.DHCPHosts, apiGroupDHCPHost{MAC: h.MAC.ValueString(), IP: h.IP.ValueString(), Hostname: strPtr(h.Hostname)})
 	}
 	s.Members = []apiGroupMemberSpec{}
 	for _, mem := range m.Members {
@@ -388,6 +416,11 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		records = append(records, dnsRecordModel{Name: types.StringValue(rec.Name), A: strOrNull(rec.A), CNAME: strOrNull(rec.CNAME)})
 	}
 	m.DNSRecords = records
+	var hosts []groupDHCPHostModel
+	for _, h := range g.Spec.DHCPHosts {
+		hosts = append(hosts, groupDHCPHostModel{MAC: types.StringValue(h.MAC), IP: types.StringValue(h.IP), Hostname: strOrNull(h.Hostname)})
+	}
+	m.DHCPHosts = hosts
 	m.MemberIPs, _ = types.MapValueFrom(ctx, types.StringType, ips)
 	m.MemberMACs, _ = types.MapValueFrom(ctx, types.StringType, macs)
 	m.MemberVMIDs, _ = types.MapValueFrom(ctx, types.StringType, vmIDs)

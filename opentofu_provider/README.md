@@ -84,6 +84,7 @@ A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS,
 | `dns_forwarders` | uplink's DNS, in place | |
 | `member` blocks | in place | `name`, `image` (`debian-13`), `memory` (1024), `vcpu` (1), `disk_size` (10), `role`, `ip` (assigned if unset). Added/removed live; changing image/size recreates that member |
 | `dns_record` blocks | in place, live | `name` (relative to `domain`, `*.x` wildcards), `a` or `cname` |
+| `dhcp_host` blocks | in place, live | static reservation for a non-member machine (e.g. a `vmmanager_vm` on `network_name`): `mac`, `ip` (in `cidr`, not the router's/a member's), optional `hostname` (→ `<hostname>.<domain>`) |
 | `running` | `true`, in place | start (router first) / stop (router last) |
 
 Computed: `id`, `network_name`, `router_ip`, `router_vm_id`, `member_ips`, `member_macs`, `member_vm_ids`

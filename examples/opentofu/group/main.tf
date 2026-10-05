@@ -5,7 +5,7 @@
 #   cd opentofu_provider && make install     # once
 #   tofu init && tofu apply
 #
-# Adding/removing a member or a dns_record is applied in place (live on the router).
+# Adding/removing a member, a dns_record or a dhcp_host is applied in place (live on the router).
 
 terraform {
   required_providers {
@@ -39,6 +39,15 @@ resource "vmmanager_group" "lab" {
       image  = "debian-13"
       memory = member.value.memory
       ip     = member.value.ip
+    }
+  }
+
+  dynamic "dhcp_host" {
+    for_each = var.dhcp_hosts
+    content {
+      mac      = dhcp_host.key
+      ip       = dhcp_host.value.ip
+      hostname = dhcp_host.value.hostname
     }
   }
 
