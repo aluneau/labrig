@@ -1,6 +1,8 @@
 """Host/Node schemas"""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
+
+from app.schemas.task import Task
 
 
 class HostResources(BaseModel):
@@ -50,3 +52,36 @@ class HostInfo(BaseModel):
 
     total_networks: int
     active_networks: int
+
+
+class LibvirtUnit(BaseModel):
+    name: str
+    active_state: str  # active | inactive | activating | deactivating | failed
+    enabled: Optional[str] = None  # enabled | disabled | static | ...
+
+
+class LibvirtStatus(BaseModel):
+    """State of the libvirt daemon(s), read from systemd without connecting (no socket activation)"""
+    state: str  # running | stopped | starting | stopping
+    connected: bool  # the app holds an open connection right now
+    manageable: bool  # Start/Stop available (local qemu:///system with systemd)
+    mode: Optional[str] = None  # monolithic (libvirtd) | modular (virtqemud, virtnetworkd, ...)
+    daemon_active: bool = False  # the daemon process runs (False when only its sockets listen)
+    units: List[LibvirtUnit] = []
+    idle_timeout_minutes: float
+    helper_installed: bool
+    dhcp_release_available: bool
+    uri: str
+
+
+class LibvirtStop(BaseModel):
+    # refuse: fail with 409 if VMs run; shutdown: ACPI-shut them down first (a task); force: stop anyway
+    mode: str = Field("refuse", pattern=r"^(refuse|shutdown|force)$")
+    timeout: int = Field(120, ge=10, le=1800)  # seconds to wait for VMs in "shutdown" mode
+
+
+class LibvirtAction(BaseModel):
+    """Result of a start / stop request"""
+    status: LibvirtStatus
+    task: Optional[Task] = None  # "shutdown" mode: background task shutting VMs down, then stopping libvirt
+    warning: Optional[str] = None

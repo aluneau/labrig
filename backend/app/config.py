@@ -28,6 +28,13 @@ class Settings(BaseSettings):
 
     # libvirt
     LIBVIRT_URI: str = "qemu:///system"
+    # Close the libvirt connection after this many idle minutes when no browser is attached
+    # (live events), so socket-activated libvirtd / virtqemud can exit (their --timeout). 0 = never.
+    LIBVIRT_IDLE_TIMEOUT: float = 5
+    # How libvirt runs on this host, for Start/Stop: auto | monolithic (libvirtd) | modular (virtqemud…)
+    LIBVIRT_DAEMON_MODE: str = "auto"
+    # Root-owned helper run through pkexec (installed by scripts/setup.sh), e.g. for DHCP release
+    HELPER_PATH: str = "/usr/libexec/vm-manager/helper"
 
     # Storage pool used for new VM disks and uploaded ISOs (created if missing)
     DEFAULT_POOL_NAME: str = "default"

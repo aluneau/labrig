@@ -4,16 +4,29 @@ libvirt is the source of truth; networks are mirrored into the database so
 the API can expose stable integer IDs.
 """
 import ipaddress
+import logging
+import re
+import time
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Dict, Any
 from xml.sax.saxutils import escape, quoteattr
 
+import libvirt
 from sqlalchemy.orm import Session
 
 from app.database import serialized
 from app.libvirt_client import libvirt_client
 from app.models import Network
 from app.schemas import NetworkCreate, NetworkUpdate, DHCPHost
+from app.services.helper_service import run_helper
+
+logger = logging.getLogger(__name__)
+
+MAC_RE = re.compile(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
+
+
+class LeaseInUse(Exception):
+    """The lease belongs to a running VM"""
 
 
 class NetworkService:
@@ -223,7 +236,8 @@ class NetworkService:
         self.sync_networks(db)
         return True
 
-    def delete_dhcp_host(self, db: Session, network_id: int, mac: str) -> bool:
+    def delete_dhcp_host(self, db: Session, network_id: int, mac: str, release_lease: bool = False) -> bool:
+        """Remove a reservation; release_lease also drops the MAC's current lease (if any)"""
         net = self.get_network(db, network_id)
         if not net:
             return False
@@ -233,7 +247,43 @@ class NetworkService:
             return False
         libvirt_client.update_dhcp_host(net.name, "delete", host["mac"], host["ip"], host.get("name"))
         self.sync_networks(db)
+        if release_lease and self._find_lease(net.name, mac):
+            self.release_lease(db, network_id, mac, force=True)
         return True
+
+    @staticmethod
+    def _find_lease(network: str, mac: str) -> Optional[Dict[str, Any]]:
+        return next((l for l in libvirt_client.get_network_leases(network)
+                     if l.get("mac", "").lower() == mac.lower() and l.get("type", 0) == libvirt.VIR_IP_ADDR_TYPE_IPV4),
+                    None)
+
+    def release_lease(self, db: Session, network_id: int, mac: str, force: bool = False) -> Optional[Dict[str, Any]]:
+        """Drop a DHCP lease from the network's dnsmasq (privileged helper -> dhcp_release).
+
+        Refused (LeaseInUse) when a running VM owns the MAC, unless force: it would just renew it.
+        """
+        net = self.get_network(db, network_id)
+        if not net:
+            return None
+        if not MAC_RE.match(mac):
+            raise ValueError(f"Invalid MAC address '{mac}'")
+        lease = self._find_lease(net.name, mac)
+        if lease is None:
+            raise LookupError(f"No IPv4 DHCP lease for {mac} in network '{net.name}'")
+        owner = next((i["vm"] for i in libvirt_client.network_interfaces(net.name)
+                      if i["mac"].lower() == mac.lower() and i["active"]), None)
+        if owner and not force:
+            raise LeaseInUse(f"VM '{owner}' is running with this MAC: it would renew the lease. Stop it first.")
+        run_helper(["dhcp-release", net.name, lease["ipaddr"], mac.lower()])
+        # dnsmasq tells libvirt's leaseshelper, which rewrites the lease file: wait for it
+        released = False
+        for _ in range(20):
+            if self._find_lease(net.name, mac) is None:
+                released = True
+                break
+            time.sleep(0.25)
+        logger.info(f"Released DHCP lease {lease['ipaddr']} ({mac}) on network {net.name}: {released}")
+        return {"mac": mac.lower(), "ip": lease["ipaddr"], "released": released}
 
     @staticmethod
     def _dhcp_hosts(xml: str) -> List[Dict[str, Any]]:

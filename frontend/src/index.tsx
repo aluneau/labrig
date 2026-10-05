@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App';
 import { EventsProvider } from './hooks/useEvents';
+import { LibvirtProvider } from './hooks/useLibvirt';
 import '@patternfly/patternfly/patternfly.css';
 import '@patternfly/react-core/dist/styles/base.css';
 import './index.css';
@@ -13,7 +14,9 @@ root.render(
   <React.StrictMode>
     <BrowserRouter>
       <EventsProvider>
-        <App />
+        <LibvirtProvider>
+          <App />
+        </LibvirtProvider>
       </EventsProvider>
     </BrowserRouter>
   </React.StrictMode>

@@ -89,6 +89,14 @@ class DHCPHost(BaseModel):
 class NetworkInterface(BaseModel):
     vm: str
     mac: str
+    active: bool = False  # the VM is running
+
+
+class LeaseRelease(BaseModel):
+    """Result of releasing a DHCP lease"""
+    mac: str
+    ip: str
+    released: bool  # the lease is gone from libvirt's lease list
 
 
 class NetworkConfig(BaseModel):

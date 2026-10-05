@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Page } from '@patternfly/react-core';
 import { AppHeader } from './components/layout/AppHeader';
 import { AppSidebar } from './components/layout/AppSidebar';
+import { LibvirtGate } from './components/common/LibvirtGate';
 import { DashboardPage } from './pages/DashboardPage';
 import { VMsPage } from './pages/VMsPage';
 import { StoragePage } from './pages/StoragePage';
@@ -12,15 +13,18 @@ import { TasksPage } from './pages/TasksPage';
 import { ConsolePage } from './pages/ConsolePage';
 import { NetworkDetailPage } from './pages/NetworkDetailPage';
 
+/** Pages that need libvirt show "libvirt is stopped" + Start instead of errors */
+const gated = (page: React.ReactNode) => <LibvirtGate>{page}</LibvirtGate>;
+
 export const App: React.FC = () => (
   <Page header={<AppHeader />} sidebar={<AppSidebar />} isManagedSidebar>
     <Routes>
-      <Route path="/" element={<DashboardPage />} />
-      <Route path="/vms" element={<VMsPage />} />
-      <Route path="/vms/:id/console" element={<ConsolePage />} />
-      <Route path="/storage" element={<StoragePage />} />
-      <Route path="/networks" element={<NetworksPage />} />
-      <Route path="/networks/:id" element={<NetworkDetailPage />} />
+      <Route path="/" element={gated(<DashboardPage />)} />
+      <Route path="/vms" element={gated(<VMsPage />)} />
+      <Route path="/vms/:id/console" element={gated(<ConsolePage />)} />
+      <Route path="/storage" element={gated(<StoragePage />)} />
+      <Route path="/networks" element={gated(<NetworksPage />)} />
+      <Route path="/networks/:id" element={gated(<NetworkDetailPage />)} />
       <Route path="/hosts" element={<HostsPage />} />
       <Route path="/tasks" element={<TasksPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />

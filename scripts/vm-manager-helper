@@ -1,0 +1,115 @@
+#!/usr/bin/python3 -I
+"""VM Manager privileged helper. Installed root-owned as /usr/libexec/vm-manager/helper by
+scripts/setup.sh and run by the app through pkexec (polkit action org.vmmanager.helper, allowed
+for group libvirt without a password).
+
+Fixed command whitelist, every argument validated here (never trust the caller):
+  helper version
+  helper dhcp-release <network> <ipv4> <mac>
+      Drop a DHCP lease from the dnsmasq of a libvirt network (dnsmasq's dhcp_release). The bridge
+      is resolved from libvirt, and the lease must exist in that network.
+
+Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed.
+"""
+import ipaddress
+import os
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+VERSION = "1"
+PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
+MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+CLIENTID_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){0,127}$")
+BRIDGE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+
+
+def fail(code, message):
+    sys.stderr.write(f"error: {message}\n")
+    sys.exit(code)
+
+
+def which(name):
+    for d in PATH.split(":"):
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def dhcp_release(args):
+    if len(args) != 3:
+        fail(2, "usage: dhcp-release <network> <ipv4> <mac>")
+    network, ip, mac = args[0], args[1], args[2].lower()
+    if not NETWORK_RE.match(network):
+        fail(2, f"invalid network name {network!r}")
+    try:
+        address = ipaddress.IPv4Address(ip)
+    except ValueError:
+        fail(2, f"invalid IPv4 address {ip!r}")
+    if not MAC_RE.match(mac):
+        fail(2, f"invalid MAC address {mac!r}")
+    tool = which("dhcp_release")
+    if tool is None:
+        fail(3, "dhcp_release is not installed on the host: install dnsmasq-utils (Debian/Ubuntu, RHEL/Fedora) "
+                "or dnsmasq (Arch), or re-run scripts/setup.sh")
+
+    try:
+        import libvirt
+    except ImportError:
+        fail(3, "the libvirt Python bindings are not installed for /usr/bin/python3")
+    libvirt.registerErrorHandler(lambda _ctx, _err: None, None)
+    try:
+        conn = libvirt.open("qemu:///system")
+    except libvirt.libvirtError as e:
+        fail(5, f"cannot connect to libvirt: {e.get_error_message()}")
+    try:
+        try:
+            net = conn.networkLookupByName(network)
+        except libvirt.libvirtError:
+            fail(4, f"network {network!r} not found")
+        if not net.isActive():
+            fail(4, f"network {network!r} is not running")
+        root = ET.fromstring(net.XMLDesc(0))
+        bridge = root.find("bridge")
+        bridge = bridge.get("name") if bridge is not None else None
+        if not bridge or not BRIDGE_RE.match(bridge):
+            fail(4, f"network {network!r} has no bridge")
+        if not any(address in ipaddress.ip_interface(f"{el.get('address')}/{el.get('prefix') or el.get('netmask')}").network
+                   for el in root.findall("ip") if el.get("family", "ipv4") == "ipv4" and el.get("address")
+                   and (el.get("prefix") or el.get("netmask"))):
+            fail(2, f"{ip} is not in a subnet of network {network!r}")
+        lease = next((l for l in net.DHCPLeases() if l.get("mac", "").lower() == mac and l.get("ipaddr") == ip), None)
+        if lease is None:
+            fail(4, f"no DHCP lease for {mac} / {ip} in network {network!r}")
+    finally:
+        conn.close()
+
+    cmd = [tool, bridge, ip, mac]
+    clientid = (lease.get("clientid") or "").lower()
+    if clientid and CLIENTID_RE.match(clientid):
+        cmd.append(clientid)  # dnsmasq matches the lease by client id when the guest sent one
+    result = subprocess.run(cmd, capture_output=True, text=True, env={"PATH": PATH, "LC_ALL": "C"}, timeout=20)
+    if result.returncode != 0:
+        fail(5, f"dhcp_release failed: {(result.stderr or result.stdout).strip() or result.returncode}")
+    print(f"released {ip} ({mac}) on {bridge}")
+
+
+COMMANDS = {
+    "version": lambda args: print(VERSION),
+    "dhcp-release": dhcp_release,
+}
+
+
+def main():
+    if os.geteuid() != 0:
+        fail(2, "must run as root (through pkexec)")
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        fail(2, f"usage: helper {{{'|'.join(COMMANDS)}}} ...")
+    COMMANDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

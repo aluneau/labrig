@@ -13,6 +13,12 @@ from app.config import settings
 from app.database import engine, Base, SessionLocal
 from app.api.v1 import api_router
 from app.models import CloudImage
+from app.events import event_bus
+from app.libvirt_client import libvirt_client, LibvirtUnavailable
+from app.services.daemon_service import daemon_service, DaemonError
+from app.services.helper_service import HelperError
+from app.services.task_service import task_service
+from fastapi.concurrency import run_in_threadpool
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -24,27 +30,33 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
     Base.metadata.create_all(bind=engine)
-    from app.services.task_service import task_service
     with SessionLocal() as db:
         task_service.mark_interrupted(db)
         # Cloud images whose download died with the previous process
         db.query(CloudImage).filter(CloudImage.status == "downloading").update({CloudImage.status: "error"})
         db.commit()
 
-    async def keep_connected():
-        """Reconnect to libvirt after a daemon restart so live events keep flowing"""
-        from fastapi.concurrency import run_in_threadpool
-        from app.libvirt_client import libvirt_client
+    async def watch_libvirt():
+        """No keepalive: libvirt is connected on demand by requests. This loop only
+        - closes the connection once idle with no browser attached, so socket-activated
+          libvirtd / virtqemud can exit (their --timeout);
+        - while browsers are attached, publishes daemon state changes (read from systemd,
+          which never socket-activates the daemon)."""
         while True:
-            try:
-                await run_in_threadpool(libvirt_client.connect)
-            except Exception:
-                pass  # logged by connect(); retried below
             await asyncio.sleep(5)
+            try:
+                if event_bus.subscriber_count():
+                    if daemon_service.manageable():
+                        await run_in_threadpool(daemon_service.status, False)
+                elif settings.LIBVIRT_IDLE_TIMEOUT > 0 and not task_service.has_running():
+                    await run_in_threadpool(libvirt_client.close_if_idle, settings.LIBVIRT_IDLE_TIMEOUT * 60)
+            except Exception:
+                logging.getLogger(__name__).exception("libvirt watcher")
 
-    watchdog = asyncio.create_task(keep_connected())
+    watcher = asyncio.create_task(watch_libvirt())
     yield
-    watchdog.cancel()
+    watcher.cancel()
+    libvirt_client.disconnect()
 
 
 app = FastAPI(
@@ -71,12 +83,27 @@ _NOT_FOUND_CODES = {
     libvirt.VIR_ERR_NO_STORAGE_VOL,
 }
 
+LIBVIRT_STOPPED = {"detail": "libvirt is stopped", "libvirt": "stopped"}
+
+
+@app.exception_handler(LibvirtUnavailable)
+async def libvirt_unavailable_handler(request: Request, exc: LibvirtUnavailable):
+    return JSONResponse(status_code=503, content=LIBVIRT_STOPPED)
+
 
 @app.exception_handler(libvirt.libvirtError)
 async def libvirt_error_handler(request: Request, exc: libvirt.libvirtError):
     """Surface libvirt's own error message to the client"""
+    if libvirt_client.conn is not None and not libvirt_client.is_alive():  # daemon went away mid-request
+        return JSONResponse(status_code=503, content=LIBVIRT_STOPPED)
     status = 404 if exc.get_error_code() in _NOT_FOUND_CODES else 400
     return JSONResponse(status_code=status, content={"detail": exc.get_error_message() or str(exc)})
+
+
+@app.exception_handler(DaemonError)
+@app.exception_handler(HelperError)
+async def privileged_error_handler(request: Request, exc):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 app.include_router(api_router, prefix="/api/v1")

@@ -1,6 +1,7 @@
 """libvirt connection wrapper"""
 import libvirt
 import threading
+import time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 from typing import Optional, List, Dict, Any, BinaryIO
@@ -62,27 +63,68 @@ VOLUME_TYPES = {
 }
 
 
+class LibvirtUnavailable(Exception):
+    """The libvirt daemon is not running (no socket to connect to). Served as HTTP 503."""
+
+    def __init__(self, detail: str = ""):
+        super().__init__("libvirt is stopped")
+        self.detail = detail
+
+
+# Errors from libvirt.open() meaning "nothing listens on the socket" (daemon and its sockets stopped)
+_UNAVAILABLE_CODES = {libvirt.VIR_ERR_SYSTEM_ERROR, libvirt.VIR_ERR_NO_CONNECT}
+
+
 class LibvirtClient:
-    """libvirt connection wrapper"""
+    """libvirt connection wrapper.
+
+    Connects on demand (each API call goes through connect()) and is closed by close_if_idle()
+    when nothing used it for a while, so socket-activated daemons can time out. Nothing here
+    reconnects by itself: a stopped libvirt stays stopped until someone starts it.
+    """
 
     def __init__(self, uri: str = None):
         self.uri = uri or settings.LIBVIRT_URI
         self.conn: Optional[libvirt.virConnect] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._callback_ids: List[Any] = []  # (deregister function, id) for the current connection
+        self._last_used = 0.0
 
     def connect(self) -> libvirt.virConnect:
-        """Connect to libvirt (reuses a live connection)"""
+        """Return a live connection, opening one if needed. Raises LibvirtUnavailable if the daemon is down."""
         with self._lock:
-            if self.conn is None or not self.conn.isAlive():
+            self._last_used = time.monotonic()
+            if self.conn is not None:
                 try:
-                    self.conn = libvirt.open(self.uri)
-                    logger.info(f"Connected to libvirt at {self.uri}")
-                except libvirt.libvirtError as e:
-                    logger.error(f"Failed to connect to libvirt: {e}")
-                    raise
-                self._register_events(self.conn)
-                event_bus.publish({"kind": "connection", "event": "connected"})
-            return self.conn
+                    if self.conn.isAlive():
+                        return self.conn
+                except libvirt.libvirtError:
+                    pass
+                self._drop()  # daemon went away: forget the dead connection
+            try:
+                conn = libvirt.open(self.uri)
+            except libvirt.libvirtError as e:
+                if e.get_error_code() in _UNAVAILABLE_CODES:
+                    logger.debug(f"libvirt unavailable at {self.uri}: {e}")
+                    raise LibvirtUnavailable(e.get_error_message() or str(e)) from e
+                logger.error(f"Failed to connect to libvirt: {e}")
+                raise
+            logger.info(f"Connected to libvirt at {self.uri}")
+            self.conn = conn
+            self._register_events(conn)
+        event_bus.publish({"kind": "connection", "event": "connected"})
+        return conn
+
+    def is_alive(self) -> bool:
+        """True if a connection is open and alive. Never connects."""
+        conn = self.conn
+        try:
+            return conn is not None and bool(conn.isAlive())
+        except libvirt.libvirtError:
+            return False
+
+    def idle_seconds(self) -> float:
+        return time.monotonic() - self._last_used
 
     def _register_events(self, conn: libvirt.virConnect) -> None:
         try:
@@ -112,26 +154,61 @@ class LibvirtClient:
         def on_pool(_conn, pool, event, _detail, _opaque):
             event_bus.publish({"kind": "pool", "event": event, "name": pool.name()})
 
+        # Each registration holds a reference on the connection: they are deregistered in _drop(),
+        # otherwise close() would leave the socket open and keep the daemon alive.
         registrations = [
-            lambda: conn.registerCloseCallback(on_close, None),
-            lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_LIFECYCLE, on_domain, None),
-            lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_REBOOT, on_reboot, None),
-            lambda: conn.networkEventRegisterAny(None, libvirt.VIR_NETWORK_EVENT_ID_LIFECYCLE, on_network, None),
-            lambda: conn.storagePoolEventRegisterAny(None, libvirt.VIR_STORAGE_POOL_EVENT_ID_LIFECYCLE, on_pool, None),
+            (lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_LIFECYCLE, on_domain, None),
+             conn.domainEventDeregisterAny),
+            (lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_REBOOT, on_reboot, None),
+             conn.domainEventDeregisterAny),
+            (lambda: conn.networkEventRegisterAny(None, libvirt.VIR_NETWORK_EVENT_ID_LIFECYCLE, on_network, None),
+             conn.networkEventDeregisterAny),
+            (lambda: conn.storagePoolEventRegisterAny(None, libvirt.VIR_STORAGE_POOL_EVENT_ID_LIFECYCLE, on_pool, None),
+             conn.storagePoolEventDeregisterAny),
         ]
-        for register in registrations:
+        self._callback_ids = []
+        try:
+            conn.registerCloseCallback(on_close, None)
+            self._callback_ids.append((lambda _id: conn.unregisterCloseCallback(), None))
+        except libvirt.libvirtError as e:
+            logger.warning(f"Could not register libvirt close callback: {e}")
+        for register, deregister in registrations:
             try:
-                register()
+                self._callback_ids.append((deregister, register()))
             except libvirt.libvirtError as e:
                 logger.warning(f"Could not register libvirt event callback: {e}")
 
+    def _drop(self) -> None:
+        """Deregister callbacks and close the current connection (lock held)"""
+        conn, self.conn = self.conn, None
+        if conn is None:
+            return
+        for deregister, callback_id in reversed(self._callback_ids):
+            try:
+                deregister(callback_id)
+            except libvirt.libvirtError:
+                pass  # connection already dead
+        self._callback_ids = []
+        try:
+            conn.close()
+        except libvirt.libvirtError:
+            pass
+
     def disconnect(self):
-        """Disconnect from libvirt"""
+        """Close the connection (if any)"""
         with self._lock:
-            if self.conn:
-                self.conn.close()
-                self.conn = None
+            if self.conn is not None:
+                self._drop()
                 logger.info("Disconnected from libvirt")
+
+    def close_if_idle(self, idle_seconds: float) -> bool:
+        """Close the connection if it was not used for idle_seconds; True if it was closed"""
+        with self._lock:
+            if self.conn is None or self.idle_seconds() < idle_seconds:
+                return False
+            self._drop()
+        logger.info(f"Closed the idle libvirt connection (unused for {idle_seconds / 60:g} min)")
+        return True
 
     # VM Operations
 
@@ -233,6 +310,9 @@ class LibvirtClient:
         domain = conn.defineXML(xml)
         logger.info(f"Defined VM {name} with UUID {domain.UUIDString()}")
         return domain.UUIDString()
+
+    def running_vm_names(self) -> List[str]:
+        return sorted(d.name() for d in self.connect().listAllDomains(libvirt.VIR_CONNECT_LIST_DOMAINS_ACTIVE))
 
     def start_vm(self, name: str) -> None:
         self.connect().lookupByName(name).create()
@@ -647,14 +727,14 @@ class LibvirtClient:
         net.update(commands[command], libvirt.VIR_NETWORK_SECTION_IP_DHCP_HOST, -1, xml, flags)
 
     def network_interfaces(self, name: str) -> List[Dict[str, Any]]:
-        """VM interfaces attached to a network: [{vm, mac}]"""
+        """VM interfaces attached to a network: [{vm, mac, active}]"""
         result = []
         for dom in self.connect().listAllDomains(0):
             root = ET.fromstring(dom.XMLDesc(0))
             for iface in root.findall("./devices/interface[@type='network']"):
                 source, mac = iface.find("source"), iface.find("mac")
                 if source is not None and source.get("network") == name and mac is not None:
-                    result.append({"vm": dom.name(), "mac": mac.get("address")})
+                    result.append({"vm": dom.name(), "mac": mac.get("address"), "active": bool(dom.isActive())})
         return result
 
     def delete_network(self, name: str) -> bool:

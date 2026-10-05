@@ -7,8 +7,9 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas import (
     Network, NetworkCreate, NetworkDetail, DHCPLease, NetworkUpdate, NetworkXML, DHCPHost, NetworkConfig,
+    LeaseRelease,
 )
-from app.services.network_service import network_service
+from app.services.network_service import network_service, LeaseInUse
 
 router = APIRouter()
 
@@ -137,7 +138,27 @@ def update_dhcp_host(network_id: int, mac: str, host: DHCPHost, db: Session = De
 
 
 @router.delete("/{network_id}/hosts/{mac}")
-def delete_dhcp_host(network_id: int, mac: str, db: Session = Depends(get_db)):
-    if not network_service.delete_dhcp_host(db, network_id, mac):
+def delete_dhcp_host(network_id: int, mac: str, release_lease: bool = False, db: Session = Depends(get_db)):
+    """Remove a reservation; `release_lease=true` also releases the MAC's current lease"""
+    if not network_service.delete_dhcp_host(db, network_id, mac, release_lease=release_lease):
         raise HTTPException(status_code=404, detail="Reservation not found")
     return {"message": "Reservation removed"}
+
+
+@router.delete("/{network_id}/leases/{mac}", response_model=LeaseRelease)
+def release_lease(network_id: int, mac: str, force: bool = False, db: Session = Depends(get_db)):
+    """Release the DHCP lease of `mac` (dnsmasq's dhcp_release, through the privileged helper).
+
+    409 if a running VM owns the MAC, unless `force=true`.
+    """
+    try:
+        result = network_service.release_lease(db, network_id, mac, force=force)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LeaseInUse as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Network not found")
+    return result
