@@ -44,6 +44,9 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
   Members come from a quick "Add member" row or the full Create VM form ("Custom VM…" on the Members tab,
   or "Lab group" in Create VM): cloud image, ISO install or empty disk; ISO/empty members have no cloud-init
   and get their reserved IP + name from the router by DHCP.
+  **Remote access**: connect a laptop to a lab with WireGuard (router wg0, relayed by the host; config file /
+  QR code, `nmcli connection import`), reaching the group network, its DNS zone and a cluster API: see
+  [docs/wireguard.md](docs/wireguard.md).
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -86,13 +89,15 @@ it uses sudo for the system parts:
 5. starts the `default` NAT network with autostart, and moves it to a free `192.168.X.0/24`
    when `192.168.122.0/24` is already in use (LAN, VPN, nested lab…)
 6. firewall: with **ufw**, allows DHCP/DNS and forwarding on libvirt bridges (`virbr+`), otherwise VMs
-   boot without an IP; with **firewalld**, libvirt's own `libvirt` zone already covers it
+   boot without an IP; with **firewalld**, libvirt's own `libvirt` zone already covers it. With either,
+   opens udp 51820-51869 for lab remote access (WireGuard; `--wg-ports A-B|none`)
 7. creates `backend/venv`, builds the UI if needed
 8. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
 
 | Option | |
 |---|---|
 | `--no-boot` | start libvirt and the service now but **don't enable them at boot** (gaming PC): `sudo systemctl start vm-manager` when needed |
+| `--wg-ports A-B` | UDP ports opened in ufw/firewalld for lab WireGuard (default `51820-51869`, = `WG_HOST_PORTS`); `none` to skip |
 | `--no-service` | no systemd service, start with `./run.sh` |
 | `--listen 0.0.0.0 --port 8000` | reachable from the network (no login yet: trusted networks only; open the port yourself) |
 
