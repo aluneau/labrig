@@ -61,7 +61,7 @@ export const ClustersPage: React.FC = () => {
 
   return (
     <>
-      <PageHeader title="Clusters" description="Kubernetes clusters built from cloud-image VMs: k3s on a standalone network, kubeadm inside a lab group (router DNS + haproxy)."
+      <PageHeader title="Clusters" description="Kubernetes clusters: k3s on a standalone network, kubeadm and OpenShift inside a lab group (router DNS + haproxy)."
         actions={<Button onClick={() => setIsCreateOpen(true)}>Create cluster</Button>} />
       <PageSection>
         {(error || loadError) && (
@@ -85,7 +85,14 @@ export const ClustersPage: React.FC = () => {
               {clusters.map((c) => (
                 <Tr key={c.id}>
                   <Td dataLabel="Name"><Link to={`/clusters/${c.id}`}><strong>{c.name}</strong></Link></Td>
-                  <Td dataLabel="Type">{c.type}{c.version ? ` ${c.version}` : ''}</Td>
+                  <Td dataLabel="Type">
+                    {c.type === 'openshift' ? 'OpenShift' : c.type}{c.version ? ` ${c.version}` : ''}
+                    {c.type === 'openshift' && c.spec?.openshift?.topology && (
+                      <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
+                        {c.spec.openshift.topology === 'sno' ? 'single node' : c.spec.openshift.topology}
+                      </div>
+                    )}
+                  </Td>
                   <Td dataLabel="Status"><ClusterStatus cluster={c} /></Td>
                   <Td dataLabel="Nodes">
                     {c.ctlplanes} control plane{c.ctlplanes === 1 ? '' : 's'}, {c.workers} worker{c.workers === 1 ? '' : 's'}

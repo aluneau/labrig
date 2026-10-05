@@ -350,6 +350,7 @@ export interface ClusterCreate {
   password?: string | null;
   ssh_keys?: string[];
   keyboard?: string | null;
+  openshift?: OpenShiftOptions | null; // type 'openshift' (counts and sizes follow the topology)
 }
 
 export interface ClusterNode {
@@ -385,12 +386,186 @@ export interface Cluster {
   task_running: boolean;
   task_progress?: number | null;
   has_kubeconfig: boolean;
+  console_url?: string | null; // OpenShift web console
   ctlplanes: number;
   workers: number;
   spec?: Record<string, any> | null;
   nodes: ClusterNode[];
   created_at: string;
   updated_at: string;
+}
+
+// OpenShift (backend/app/schemas/openshift.py)
+
+export type OpenShiftTopology = 'sno' | 'compact' | 'ha';
+export type OpenShiftStorage = 'none' | 'lvms' | 'odf';
+
+export interface OperatorRequest {
+  name: string; // package name
+  channel?: string | null; // null = the package's defaultChannel
+  source?: string; // default redhat-operators
+  namespace?: string | null;
+}
+
+export interface SriovOptions {
+  enabled: boolean;
+  nics: number; // igb NICs per node (1-4)
+  vfs: number; // VFs per NIC (1-7)
+  device_type: 'netdevice' | 'vfio-pci';
+  ipam_range: string;
+}
+
+export interface MetalLBOptions {
+  enabled: boolean;
+  addresses: number; // pool size (2-64)
+  demo: boolean;
+  pool?: string | null; // assigned: "10.43.5.230-10.43.5.245"
+}
+
+export interface OpenShiftOptions {
+  version?: string | null; // null = latest of the channel
+  channel: string;
+  topology: OpenShiftTopology;
+  storage: OpenShiftStorage;
+  storage_disk_size: number; // GiB per storage node
+  operators: OperatorRequest[];
+  sriov: SriovOptions;
+  metallb: MetalLBOptions;
+  disable_updates: boolean;
+}
+
+export interface PullSecretIn {
+  content?: string | null;
+  path?: string | null;
+}
+
+export interface PullSecretStatus {
+  configured: boolean;
+  registries: string[];
+  source?: string | null;
+}
+
+export interface OpenShiftChannel {
+  name: string; // stable-4.20
+  minor: string; // 4.20
+  latest?: string | null;
+}
+
+export interface OpenShiftVersion {
+  version: string;
+  payload?: string | null;
+  cached: boolean; // openshift-install + oc already downloaded
+}
+
+export interface CatalogOperator {
+  name: string;
+  display_name: string;
+  description: string;
+  source: string;
+  category: string;
+  managed_by?: 'storage:lvms' | 'storage:odf' | 'sriov' | 'metallb' | string | null;
+  min_nodes: number;
+}
+
+export interface InstalledOperator {
+  name: string;
+  namespace: string;
+  channel?: string | null;
+  source?: string | null;
+  csv?: string | null;
+  phase?: string | null; // Succeeded, Installing, Failed...
+  version?: string | null;
+}
+
+export interface PackageManifest {
+  name: string;
+  display_name?: string | null;
+  provider?: string | null;
+  source: string;
+  default_channel?: string | null;
+  channels: string[];
+  description?: string | null;
+  suggested_namespace?: string | null;
+  all_namespaces_only: boolean;
+}
+
+export interface ClusterCredentials {
+  username: string;
+  password?: string | null;
+  console_url?: string | null;
+}
+
+export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo';
+
+export interface AddonRequest {
+  kind: AddonKind;
+  operator?: OperatorRequest | null;
+  sriov?: SriovOptions | null;
+  metallb?: MetalLBOptions | null;
+}
+
+export interface ScenarioCheck {
+  name: string;
+  ok?: boolean | null; // null = not run / unknown
+  detail: string;
+}
+
+export interface MetalLBEndpoint {
+  pod: string;
+  node: string;
+  ip: string;
+  ready?: boolean | null;
+}
+
+export interface MetalLBScenario {
+  enabled: boolean;
+  pool?: string | null;
+  service_ip?: string | null;
+  hostname?: string | null; // hello.<domain>
+  announcing_node?: string | null;
+  endpoints: MetalLBEndpoint[];
+  router_ip?: string | null;
+  group_cidr?: string | null;
+  wireguard: boolean;
+  wireguard_port?: number | null; // host relay UDP port, null when remote access is off
+  checks: ScenarioCheck[];
+}
+
+export interface AssistedHost {
+  name: string;
+  role?: string | null;
+  status?: string | null;
+  stage?: string | null;
+  progress?: number | null;
+}
+
+export interface ClusterOperatorStatus {
+  name: string;
+  available?: boolean | null;
+  progressing?: boolean | null;
+  degraded?: boolean | null;
+  message?: string | null;
+  version?: string | null;
+}
+
+export type InstallPhase = 'preparing' | 'booting' | 'installing' | 'finalizing' | 'addons' | 'ready' | 'error' | 'stopped';
+
+export interface AddonState {
+  kind: string;
+  name: string;
+  state: 'pending' | 'installing' | 'done' | 'error' | string;
+  message?: string | null;
+}
+
+export interface InstallStatus {
+  phase: InstallPhase | string;
+  assisted_status?: string | null;
+  assisted_info?: string | null;
+  progress?: number | null;
+  hosts: AssistedHost[];
+  version?: string | null;
+  cluster_operators: ClusterOperatorStatus[];
+  addons: AddonState[];
 }
 
 export interface ClusterCommandOutput {
