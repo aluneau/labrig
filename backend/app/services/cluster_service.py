@@ -586,9 +586,9 @@ class ClusterService:
             return self._guarded(db, task, cluster_id, body)
         return self._run_task(db, cluster, "scale", f"Remove {node_name} from", run, node_name)
 
-    def _delete_node_resources(self, cluster: Cluster, node: ClusterNode) -> None:
+    def _delete_node_resources(self, cluster: Cluster, node: ClusterNode, whole_cluster: bool = False) -> None:
         network = network_for(cluster)
-        if not network.owned:  # an owned network goes away with the cluster anyway
+        if not (whole_cluster and network.owned):  # an owned network goes away with the cluster anyway
             try:
                 if node.mac:
                     network.release(node.mac)
@@ -606,7 +606,7 @@ class ClusterService:
                 raise ValueError("The cluster task did not stop in time, try again")
             db.refresh(cluster)
         for node in list(cluster.nodes):
-            self._delete_node_resources(cluster, node)
+            self._delete_node_resources(cluster, node, whole_cluster=True)
         network = network_for(cluster)
         if network.owned:
             network.destroy()

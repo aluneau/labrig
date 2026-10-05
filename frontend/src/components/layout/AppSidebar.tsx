@@ -8,6 +8,7 @@ import {
   NetworkIcon,
   ServerIcon,
   TaskIcon,
+  ClusterIcon,
 } from '@patternfly/react-icons';
 
 const NAV_ITEMS = [
@@ -15,6 +16,7 @@ const NAV_ITEMS = [
   { path: '/vms', label: 'Virtual Machines', icon: VirtualMachineIcon },
   { path: '/storage', label: 'Storage', icon: StorageDomainIcon },
   { path: '/networks', label: 'Networks', icon: NetworkIcon },
+  { path: '/clusters', label: 'Clusters', icon: ClusterIcon },
   { path: '/hosts', label: 'Host', icon: ServerIcon },
   { path: '/tasks', label: 'Tasks', icon: TaskIcon },
 ];

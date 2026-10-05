@@ -11,6 +11,8 @@ import { HostsPage } from './pages/HostsPage';
 import { TasksPage } from './pages/TasksPage';
 import { ConsolePage } from './pages/ConsolePage';
 import { NetworkDetailPage } from './pages/NetworkDetailPage';
+import { ClustersPage } from './pages/ClustersPage';
+import { ClusterDetailPage } from './pages/ClusterDetailPage';
 
 export const App: React.FC = () => (
   <Page header={<AppHeader />} sidebar={<AppSidebar />} isManagedSidebar>
@@ -21,6 +23,8 @@ export const App: React.FC = () => (
       <Route path="/storage" element={<StoragePage />} />
       <Route path="/networks" element={<NetworksPage />} />
       <Route path="/networks/:id" element={<NetworkDetailPage />} />
+      <Route path="/clusters" element={<ClustersPage />} />
+      <Route path="/clusters/:id" element={<ClusterDetailPage />} />
       <Route path="/hosts" element={<HostsPage />} />
       <Route path="/tasks" element={<TasksPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
