@@ -48,6 +48,7 @@ frontend/src/
   pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
+docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s, kubeadm (clusters)
@@ -131,6 +132,18 @@ e2e/                  Playwright browser tests against the real app (see below)
   startup, DB only), not DNAT: libvirt rejects inbound connections to NAT networks (both firewall backends) and
   rewrites its rules on restart. setup.sh opens `--wg-ports` (default 51820-51869/udp) in ufw/firewalld.
   Client AllowedIPs = group CIDR + tunnel + `uplink_ip/32` (load balancers, kubeadm API), DNS = router tunnel IP.
+- **OpenShift** (docs/openshift.md): `openshift_service` (pull secret in `DATA_DIR/openshift/pull-secret.json` 0600,
+  never in the DB / API; versions from the upgrade graph API; `openshift-install` + `oc` cached per release in
+  `DATA_DIR/openshift/bin/<ver>`, installer cache `XDG_CACHE_HOME=DATA_DIR/openshift/cache`), `openshift_installer`
+  (ABI, platform none, always in a lab group: `api`/`api-int`/`*.apps` -> router, haproxy 6443/22623/80/443 => one
+  OpenShift cluster per group; install dir `DATA_DIR/openshift/clusters/<name>/`; nodes = empty 120 GiB disk + agent
+  ISO, boot disk then CD; progress = Assisted Service on master-0:8090 curled **from the router** (guest-exec), then
+  `oc` from the host with `server: https://<uplink_ip>:6443` + `tls-server-name: api.<c>.<d>`; CSRs approved by the
+  app), `openshift_addons` (OLM installs, LVMS on the disk with serial `vmm-storage`, ODF, SR-IOV in dev mode on igb
+  NICs of the isolated network `vmm-s-<cluster>`, MetalLB L2 + `hello` demo). Group spec `address_pools` keep the
+  MetalLB pool out of DHCP / static IPs. Every router serves NTP (chrony `allow <cidr>` + DHCP option): the
+  installer validates node clocks. The SR-IOV policy must be created only after the config daemon reported the
+  NICs (the controller skips nodes with empty status and doesn't retry).
 - **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
   (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
   nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry
