@@ -136,6 +136,14 @@ Design:
 > Not yet: FRR/BGP, WireGuard, VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
 > flavour, groups without uplink (the EL router installs its packages at first boot), snapshots, templates,
 > export with disks, per-group autostart, `group_id` on `vmmanager_vm`.
+>
+> **Custom members** (done): the full Create VM form adds members too ("Custom VM…" on the Members tab,
+> "Lab group" select on the VMs page). `MemberSpec.source` = `cloud_image` | `iso` | `empty` (+ `iso`), so
+> ISO installs live in the spec like the rest (router metadata, rebuild, export). ISO/empty members get no
+> cloud-init: only the MAC reservation + DNS name, the installed OS must use DHCP. Next: the OpenTofu
+> `vmmanager_group` `member` block should gain `source`, `iso`, `cloud_init` and `user_data` (it only has
+> name/image/memory/vcpu/disk_size/role/ip today); PXE boot from the router (dnsmasq `dhcp-boot`) would
+> make empty-disk members useful (they boot nothing until an ISO is inserted on the VM's Devices tab).
 
 ### 2.1 Concept and data model (L)
 

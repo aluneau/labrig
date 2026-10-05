@@ -29,6 +29,9 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
   DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
   plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
   is re-rendered and pushed through the QEMU guest agent); start/stop/delete the whole lab; export its spec.
+  Members come from a quick "Add member" row or the full Create VM form ("Custom VM…" on the Members tab,
+  or "Lab group" in Create VM): cloud image, ISO install or empty disk; ISO/empty members have no cloud-init
+  and get their reserved IP + name from the router by DHCP.
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -137,7 +140,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
-`devices.js`, `groups.js`).
+`devices.js`, `groups.js`, `group-members.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 
 ## API overview
