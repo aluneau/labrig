@@ -22,6 +22,7 @@ from xml.sax.saxutils import escape
 
 import libvirt
 import yaml
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import serialized
@@ -201,7 +202,10 @@ class GroupService:
             elif m.source == "iso":
                 self.resolve_iso(db, m.iso)
 
-        spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
+        try:
+            spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
+        except ValidationError as e:  # not the whole spec dump in the API error
+            raise ValueError("; ".join(err["msg"].replace("Value error, ", "") for err in e.errors()))
         backend.validate(spec)
         return spec
 

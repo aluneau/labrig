@@ -228,12 +228,15 @@ class GroupSpec(BaseModel):
             addr = ipaddress.IPv4Address(ip)
             if addr not in net or addr in (net.network_address, net.broadcast_address):
                 raise ValueError(f"{label} {ip} is not a usable address of {net}")
-        ips = [m.ip for m in self.members if m.ip]
+        owners: Dict[str, List[str]] = {}
         if self.router.ip:
-            ips.append(self.router.ip)
-        dupes = {ip for ip in ips if ips.count(ip) > 1}
+            owners[self.router.ip] = ["router"]
+        for m in self.members:
+            if m.ip:
+                owners.setdefault(m.ip, []).append(m.name)
+        dupes = [f"{ip} ({', '.join(names)})" for ip, names in sorted(owners.items()) if len(names) > 1]
         if dupes:
-            raise ValueError(f"Duplicate IPs: {', '.join(sorted(dupes))}")
+            raise ValueError(f"Duplicate IPs: {'; '.join(dupes)}")
         if self.dhcp:
             for label, ip in (("DHCP start", self.dhcp.start), ("DHCP end", self.dhcp.end)):
                 if ipaddress.IPv4Address(_ipv4(ip, label)) not in net:
