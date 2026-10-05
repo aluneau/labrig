@@ -330,6 +330,7 @@ export const GroupDetailPage: React.FC = () => {
   if (!group) return error ? <PageSection><Alert variant="danger" isInline title={error} /></PageSection> : <Bullseye><Spinner size="xl" /></Bullseye>;
 
   const transitional = !['ready', 'error', 'missing'].includes(group.status);
+  const powerBusy = busy || transitional || progress !== null;  // a start/stop task is still running
   const power = async (action: 'start' | 'stop') => {
     setBusy(true);
     try {
@@ -360,8 +361,8 @@ export const GroupDetailPage: React.FC = () => {
             </div>
           </FlexItem>
           <FlexItem align={{ default: 'alignRight' }}>
-            <Button variant="secondary" onClick={() => power('start')} isDisabled={busy || transitional || group.state === 'running'} style={{ marginRight: 8 }}>Start</Button>
-            <Button variant="secondary" onClick={() => power('stop')} isDisabled={busy || transitional || group.state === 'stopped'} style={{ marginRight: 8 }}>Stop</Button>
+            <Button variant="secondary" onClick={() => power('start')} isDisabled={powerBusy || group.state === 'running'} style={{ marginRight: 8 }}>Start</Button>
+            <Button variant="secondary" onClick={() => power('stop')} isDisabled={powerBusy || group.state === 'stopped'} style={{ marginRight: 8 }}>Stop</Button>
             <Button variant="danger" onClick={() => setConfirmDelete(true)} isDisabled={group.status === 'deleting'}>Delete</Button>
           </FlexItem>
         </Flex>

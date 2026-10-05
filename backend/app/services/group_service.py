@@ -576,12 +576,22 @@ class GroupService:
 
     # Power
 
+    @staticmethod
+    def _check_no_power_task(db: Session, group: Group) -> None:
+        """A start racing a stop still waiting on a VM would power that VM off again (and vice versa)"""
+        busy = db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id,
+                                     Task.type.in_(["group_start", "group_stop"]),
+                                     Task.status.in_(["pending", "running"])).first()
+        if busy is not None:
+            raise ValueError(f"'{busy.name}' is still running: wait for it to finish")
+
     def start_group(self, db: Session, group_id: int) -> Optional[Task]:
         group = self.get_group(db, group_id)
         if not group:
             return None
         if group.status in ("creating", "deleting", "missing"):
             raise ValueError(f"Group is {group.status}")
+        self._check_no_power_task(db, group)
         return task_service.start(
             db, TaskCreate(name=f"Start lab group {group.name}", type="group_start", target_type="group",
                            target_id=group.id, target_name=group.name),
@@ -622,6 +632,7 @@ class GroupService:
             return None
         if group.status in ("creating", "deleting"):
             raise ValueError(f"Group is {group.status}")
+        self._check_no_power_task(db, group)
         return task_service.start(
             db, TaskCreate(name=f"Stop lab group {group.name}", type="group_stop", target_type="group",
                            target_id=group.id, target_name=group.name),

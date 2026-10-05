@@ -8,7 +8,8 @@
 // Creates and deletes the group GROUP (default e2e-g-mem, VMs e2e-g-mem-*) through the API, the members
 // through the UI. Needs ready Debian 13 + AlmaLinux 9/10 cloud images and an ISO (ISO env, default
 // e2e-g-netboot.iso: downloaded from boot.netboot.xyz if missing, kept afterwards).
-// Budget: router 1 GiB + 1 + 1.5 + 1 GiB.
+//  - an empty-disk member from the VMs page Create VM form ("Lab group" select)
+// Budget: router 1 GiB + 1 + 1.5 + 1 + 0.25 GiB.
 const { chromium } = require('playwright-core');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -132,11 +133,12 @@ const taskDone = (id, timeoutMs, label) => waitFor(async () => {
     // Custom (b): ISO boot, no cloud-init
     await page.getByRole('button', { name: 'Custom VM…' }).click();
     dialog = page.getByRole('dialog');
-    await dialog.locator('#vm-iso option', { hasText: ISO }).waitFor({ state: 'attached' });
+    await dialog.locator('#src-iso').waitFor();
     await dialog.locator('#vm-name').fill('pxe1');
     await dialog.locator('#vm-memory').fill('1');
     await dialog.locator('#vm-vcpu').fill('1');
     await dialog.locator('#src-iso').check();
+    await dialog.locator('#vm-iso option', { hasText: ISO }).waitFor({ state: 'attached' });
     await dialog.locator('#vm-iso').selectOption(iso.path);
     await dialog.locator('#vm-disk').fill('2');
     await dialog.getByText('No cloud-init here').waitFor();
@@ -144,8 +146,30 @@ const taskDone = (id, timeoutMs, label) => waitFor(async () => {
     await dialog.getByRole('button', { name: 'Create', exact: true }).click();
     await page.getByText(`Member pxe1 added to ${GROUP}`).waitFor({ timeout: 120000 });
     await page.getByRole('row', { name: /pxe1/ }).getByText(`ISO ${ISO}`).waitFor();
+    if (!(await page.getByRole('row', { name: /pxe1/ }).getByText('member', { exact: true }).count())) throw new Error('role leaked into the next custom VM');
     await page.screenshot({ path: 'group-members-table.png', fullPage: true });
     log('custom ISO member added');
+
+    // From the other side: Create VM on the VMs page with "Lab group" set -> an empty-disk member
+    await page.goto(`${BASE}/vms`);
+    await page.getByRole('button', { name: 'Create VM' }).first().click();
+    dialog = page.getByRole('dialog');
+    await dialog.locator('#vm-group option', { hasText: GROUP }).waitFor({ state: 'attached' });
+    await dialog.locator('#vm-group').selectOption({ label: `${GROUP} (${CIDR})` });
+    await dialog.getByText(`${GROUP}-`, { exact: true }).waitFor();
+    await dialog.locator('#vm-name').fill('empty1');
+    await dialog.locator('#vm-memory').fill('0.25');
+    await dialog.locator('#vm-vcpu').fill('1');
+    await dialog.locator('#src-empty').check();
+    await dialog.locator('#vm-disk').fill('1');
+    await page.screenshot({ path: 'group-members-vms-page.png', fullPage: true });
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await dialog.waitFor({ state: 'detached', timeout: 60000 });
+    await page.getByText(`${GROUP}-empty1`, { exact: true }).waitFor({ timeout: 30000 });
+    log('empty-disk member added from the VMs page');
+    await page.goto(`${BASE}/groups/${groupId}`);
+    await page.getByRole('tab', { name: 'Members' }).click();
+    await page.getByRole('row', { name: /empty1/ }).getByText('empty disk').waitFor();
 
     // libvirt: sizes, MACs, metadata
     let group = await api(`/groups/${groupId}`);
@@ -165,7 +189,7 @@ const taskDone = (id, timeoutMs, label) => waitFor(async () => {
     // Router config: reservations for both
     const cfg = await api(`/groups/${groupId}/router/config`);
     const dnsmasq = Object.values(cfg.files).join('\n');
-    for (const x of ['custom1', 'pxe1']) {
+    for (const x of ['custom1', 'pxe1', 'empty1']) {
       if (!dnsmasq.includes(`dhcp-host=${m[x].mac},${m[x].ip},${x}`)) throw new Error(`no dhcp-host for ${x}`);
     }
 

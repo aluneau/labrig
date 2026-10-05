@@ -166,6 +166,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
         const message = await submitMember(group);
         setName('');
         setMemberIp('');
+        setRole('member');
         onCreated(message);
         onClose();
       } catch (err) {
