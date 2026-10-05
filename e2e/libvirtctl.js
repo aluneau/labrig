@@ -67,7 +67,7 @@ const until = async (fn, ms = 180000) => {
       await page.screenshot({ path: 'libvirt-host-stopped.png' });
     });
 
-    for (const path of ['/', '/vms', '/storage', '/networks', `/networks/${net.id}`]) {
+    for (const path of ['/', '/vms', '/groups', '/storage', '/networks', `/networks/${net.id}`]) {
       await step(`${path} shows "libvirt is stopped"`, async () => {
         await page.goto(BASE + path);
         await page.locator('#libvirt-stopped').getByText('libvirt is stopped').waitFor();
