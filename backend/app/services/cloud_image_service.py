@@ -171,13 +171,15 @@ class CloudImageService:
         if keyboard:
             # The VNC console types physical keys, so the text console needs this layout.
             # Debian/Ubuntu: cloud-init's keyboard module writes it, console-setup applies it.
-            # EL's cloud.cfg doesn't run the keyboard module: localectl converts the XKB layout
-            # to a console keymap, then vconsole-setup reloads it.
+            # EL's cloud.cfg doesn't run the keyboard module: set the console keymap with localectl
+            # (the UI's XKB names all exist as console keymaps; set-x11-keymap fails on EL9 without
+            # xkeyboard-config, so it's only the fallback), then vconsole-setup reloads it.
             config["keyboard"] = {"layout": keyboard}
             config["runcmd"].append(
                 "if command -v apt-get >/dev/null; then"
                 " DEBIAN_FRONTEND=noninteractive apt-get install -y console-setup && setupcon --force --save;"
-                f" else localectl set-x11-keymap {keyboard} && systemctl restart systemd-vconsole-setup; fi || true")
+                f" else {{ localectl set-keymap {keyboard} || localectl set-x11-keymap {keyboard}; }}"
+                " && systemctl restart systemd-vconsole-setup; fi || true")
         if username:
             user: Dict[str, Any] = {
                 "name": username,
