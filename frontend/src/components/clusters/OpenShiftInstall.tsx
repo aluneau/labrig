@@ -92,6 +92,12 @@ const OperatorsTable: React.FC<{ operators: ClusterOperatorStatus[] }> = ({ oper
   </Table>
 );
 
+/** Assisted host statuses: insufficient / pending-for-input block the install, the rest progress */
+const HOST_COLORS: Record<string, LabelProps['color']> = {
+  insufficient: 'orange', 'pending-for-input': 'orange', disconnected: 'red', error: 'red',
+  known: 'green', installed: 'green', 'added-to-existing-cluster': 'green', discovering: 'grey',
+};
+
 const ADDON_COLORS: Record<string, LabelProps['color']> = { pending: 'grey', installing: 'blue', done: 'green', error: 'red' };
 
 export const InstallPanel: React.FC<{ cluster: Cluster; status: InstallStatus | null; error?: string | null }> = ({ cluster, status, error }) => {
@@ -141,9 +147,11 @@ export const InstallPanel: React.FC<{ cluster: Cluster; status: InstallStatus | 
                 <Tbody>
                   {status.hosts.map((h) => (
                     <Tr key={h.name}>
-                      <Td dataLabel="Host">{h.name}</Td>
+                      <Td dataLabel="Host" modifier="nowrap">{h.name}</Td>
                       <Td dataLabel="Role">{h.role || '—'}</Td>
-                      <Td dataLabel="Status">{h.status || '—'}</Td>
+                      <Td dataLabel="Status">
+                        {h.status ? <Label isCompact color={HOST_COLORS[h.status] || 'blue'}>{h.status}</Label> : '—'}
+                      </Td>
                       <Td dataLabel="Stage" modifier="breakWord">{h.stage || '—'}</Td>
                       <Td dataLabel="Progress">
                         {h.progress != null
