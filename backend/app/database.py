@@ -2,7 +2,7 @@
 import threading
 from functools import wraps
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import settings
@@ -41,6 +41,26 @@ def serialized(func):
         with _sync_lock:
             return func(*args, **kwargs)
     return wrapper
+
+
+def init_db() -> None:
+    """Create missing tables, then add missing nullable columns to existing ones.
+
+    create_all() never alters an existing table, so a model gaining a column would break
+    databases created by an older version. New columns must be nullable (or have a server
+    default) so they can be added in place; nothing is ever dropped or rewritten.
+    """
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing or not (column.nullable or column.server_default is not None):
+                    continue
+                ddl = column.type.compile(dialect=engine.dialect)
+                default = f" DEFAULT {column.server_default.arg}" if column.server_default is not None else ""
+                conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl}{default}'))
 
 
 def get_db():

@@ -3,7 +3,7 @@ import { API_BASE } from '../services/api';
 
 /** Event pushed by the backend on /api/v1/events (Server-Sent Events) */
 export interface LiveEvent {
-  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection';
+  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection' | 'group';
   event?: string | number;
   uuid?: string;
   name?: string;
@@ -12,6 +12,8 @@ export interface LiveEvent {
   status?: string;
   progress?: number;
   target_type?: string | null;
+  device?: string; // vm device_removed: libvirt device alias
+  target_name?: string | null;
 }
 
 type Handler = (event: LiveEvent) => void;

@@ -13,7 +13,7 @@ HEARTBEAT_SECONDS = 15
 
 @router.get("")
 async def stream_events(request: Request):
-    """Live events: {"kind": "vm" | "network" | "pool" | "task" | "connection", ...}"""
+    """Live events: {"kind": "vm" | "network" | "pool" | "task" | "group" | "connection", ...}"""
     queue = event_bus.subscribe()
 
     async def stream():

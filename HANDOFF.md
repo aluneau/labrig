@@ -39,7 +39,7 @@ libvirt on this host, and in fresh nested VMs.
   before that, re-run `scripts/setup.sh --no-boot` once to install the helper + polkit rule.
 - The project is **not a git repository** yet (a `.gitignore` is ready). The owner wants to ship it, so
   `git init` + a remote is the obvious first step (ask before doing it).
-- An existing VM's CPU/memory can't be edited, nor can disks/CD-ROM be added (future-features §1.2–1.4).
+- An existing VM's CPU/memory can't be edited. (Disks, CD-ROM media and boot order can: §1.2–1.4 done.)
 - `docker-compose.yml` / Dockerfiles are legacy and untested with the current code.
 - Two VMs the owner made (`test`, `debian-test`) disappeared during the session, apparently deleted by
   the owner while testing (tests only touch `e2e-*` / `tofu-*`). Unconfirmed.

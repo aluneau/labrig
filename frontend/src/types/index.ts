@@ -14,9 +14,47 @@ export interface VM {
 }
 
 export interface VMDisk {
-  device?: string | null;
+  device?: string | null; // disk | cdrom
   path?: string | null;
+  target?: string | null; // vda, sda, ...
+  bus?: string | null;
+  format?: string | null;
+  capacity?: number | null; // bytes (disks only)
+  boot: boolean; // the boot disk (can't be detached)
+  // running VM only: 'attach' = appears at next start, 'detach' = goes away when the guest releases it / at shutdown
+  pending?: 'attach' | 'detach' | null;
+}
+
+export interface VMCdrom {
   target?: string | null;
+  path?: string | null; // inserted ISO, null = empty
+  pending: boolean; // drive added while running: exists from the next start
+}
+
+export type BootDevice = 'hd' | 'cdrom' | 'network';
+
+export interface VMBoot {
+  order: BootDevice[]; // persistent order (next cold start)
+  once?: BootDevice[] | null; // one-shot order for the next start through this app
+}
+
+export interface VMBootUpdate {
+  order?: BootDevice[];
+  once?: boolean;
+}
+
+export interface VMDiskCreate {
+  size_gb: number;
+  pool?: string;
+  format?: 'qcow2' | 'raw';
+  bus?: 'virtio' | 'sata';
+}
+
+export interface DeviceChange {
+  message: string;
+  pending: boolean; // applies at the next start / shutdown, not now
+  target?: string | null;
+  path?: string | null;
 }
 
 export interface VMInterface {
@@ -36,6 +74,8 @@ export interface VMDetail extends VM {
   disks: VMDisk[];
   interfaces: VMInterface[];
   console?: ConsoleInfo | null;
+  cdrom?: VMCdrom | null;
+  boot?: VMBoot | null;
   xml_config?: string | null;
 }
 
@@ -311,4 +351,119 @@ export interface LibvirtAction {
   status: LibvirtStatus;
   task?: Task | null;
   warning?: string | null;
+}
+
+// Lab groups (backend/app/schemas/group.py)
+
+export interface DNSRecord {
+  name: string; // relative to the group domain ("api.ocp", "*.apps.ocp"), absolute if it ends with '.'
+  a?: string | null;
+  cname?: string | null;
+}
+
+export interface GroupCloudInit {
+  username?: string | null;
+  password?: string | null;
+  ssh_keys?: string[];
+  keyboard?: string | null;
+}
+
+export interface MemberSpec {
+  name: string;
+  image?: string;
+  memory?: number; // MiB
+  vcpu?: number;
+  disk_size?: number; // GiB
+  role?: string;
+  ip?: string | null;
+  mac?: string | null;
+  cloud_init?: GroupCloudInit | null;
+  user_data?: string | null;
+}
+
+export interface RouterSpec {
+  flavour?: 'el' | 'vyos';
+  image?: string | null;
+  memory?: number;
+  vcpu?: number;
+  disk_size?: number;
+  dns?: { forwarders?: string[]; records?: DNSRecord[] };
+  bgp?: unknown;
+  wireguard?: unknown;
+  vlans?: unknown[];
+  ip?: string | null;
+  lan_mac?: string | null;
+  uplink_mac?: string | null;
+}
+
+export interface GroupSpec {
+  name: string;
+  cidr: string;
+  domain?: string | null;
+  uplink?: string | null;
+  dhcp?: { start: string; end: string } | null;
+  router?: RouterSpec;
+  cloud_init?: GroupCloudInit;
+  members: MemberSpec[];
+}
+
+export interface GroupMemberInfo {
+  name: string;
+  role: string;
+  hostname?: string | null;
+  fqdn?: string | null;
+  ip?: string | null;
+  mac?: string | null;
+  vm_id?: number | null;
+  vm_name?: string | null;
+  vm_uuid?: string | null;
+  state: string;
+  image?: string | null;
+  memory?: number | null;
+  vcpu?: number | null;
+}
+
+export interface Group {
+  id: number;
+  name: string;
+  cidr: string;
+  domain: string;
+  uplink?: string | null;
+  status: 'creating' | 'ready' | 'updating' | 'error' | 'deleting' | 'missing' | string;
+  state: 'running' | 'stopped' | 'partial' | string;
+  error_message?: string | null;
+  network_name: string;
+  network_id?: number | null;
+  router: GroupMemberInfo;
+  members: GroupMemberInfo[];
+  member_count: number;
+  config_applied: boolean;
+  config_applied_at?: string | null;
+  config_error?: string | null;
+  spec: GroupSpec;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GroupLease {
+  ip: string;
+  mac: string;
+  hostname?: string | null;
+  expiry?: number | null;
+}
+
+export interface GroupDetail extends Group {
+  router_uplink_ips: string[];
+  leases: GroupLease[];
+}
+
+export interface RouterConfig {
+  flavour: string;
+  user_data: string;
+  network_config: string;
+  files: Record<string, string>;
+  apply_command: string;
+  config_applied: boolean;
+  config_applied_at?: string | null;
+  config_error?: string | null;
 }

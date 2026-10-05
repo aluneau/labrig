@@ -1,9 +1,10 @@
 import {
-  VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo,
+  VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo, DeviceChange, VMBootUpdate, VMDiskCreate,
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
+  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -62,6 +63,15 @@ export const vmApi = {
   delete: (id: number, deleteDisks = false) => del(`/vms/${id}?delete_disks=${deleteDisks}`),
   power: (id: number, action: VMPowerAction) => post<VM>(`/vms/${id}/${action}`),
   console: (id: number) => request<ConsoleInfo>(`/vms/${id}/console`),
+  setCdrom: (id: number, isoPath: string | null) =>
+    request<DeviceChange>(`/vms/${id}/cdrom`, { method: 'PUT', body: JSON.stringify({ iso_path: isoPath }) }),
+  setBoot: (id: number, data: VMBootUpdate) =>
+    request<DeviceChange>(`/vms/${id}/boot`, { method: 'PUT', body: JSON.stringify(data) }),
+  addDisk: (id: number, data: VMDiskCreate) => post<DeviceChange>(`/vms/${id}/disks`, data),
+  resizeDisk: (id: number, target: string, sizeGb: number) =>
+    request<DeviceChange>(`/vms/${id}/disks/${target}`, { method: 'PUT', body: JSON.stringify({ size_gb: sizeGb }) }),
+  detachDisk: (id: number, target: string, deleteVolume: boolean) =>
+    del<DeviceChange>(`/vms/${id}/disks/${target}?delete_volume=${deleteVolume}`),
 };
 
 export const storageApi = {
@@ -110,6 +120,25 @@ export const networkApi = {
     del(`/networks/${id}/hosts/${encodeURIComponent(mac)}?release_lease=${releaseLease}`),
   releaseLease: (id: number, mac: string, force = false) =>
     del<LeaseRelease>(`/networks/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
+};
+
+export const groupApi = {
+  list: () => request<Group[]>('/groups'),
+  get: (id: number) => request<GroupDetail>(`/groups/${id}`),
+  create: (spec: GroupSpec) => post<{ group: Group; task_id: number }>('/groups', spec),
+  update: (id: number, spec: GroupSpec) =>
+    request<GroupDetail>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(spec) }),
+  delete: (id: number, deleteDisks = true) => del(`/groups/${id}?delete_disks=${deleteDisks}`),
+  start: (id: number) => post<Task>(`/groups/${id}/start`),
+  stop: (id: number, force = false) => post<Task>(`/groups/${id}/stop?force=${force}`),
+  addMember: (id: number, member: MemberSpec) => post<GroupDetail>(`/groups/${id}/members`, member),
+  removeMember: (id: number, name: string, deleteDisks = true) =>
+    del<GroupDetail>(`/groups/${id}/members/${encodeURIComponent(name)}?delete_disks=${deleteDisks}`),
+  setRecord: (id: number, record: DNSRecord) => post<GroupDetail>(`/groups/${id}/dns-records`, record),
+  removeRecord: (id: number, name: string) => del<GroupDetail>(`/groups/${id}/dns-records/${encodeURIComponent(name)}`),
+  routerConfig: (id: number) => request<RouterConfig>(`/groups/${id}/router/config`),
+  applyRouterConfig: (id: number) => post<GroupDetail>(`/groups/${id}/router/apply`),
+  exportSpec: (id: number) => request<{ yaml: string; spec: GroupSpec }>(`/groups/${id}/export`),
 };
 
 export const taskApi = {

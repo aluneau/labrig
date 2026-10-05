@@ -1,6 +1,7 @@
 """Pydantic schemas"""
 from app.schemas.vm import (
     VM, VMCreate, VMUpdate, VMDetail, VMConsole, VMDisk, VMInterface, VMTemplate, VMTemplateCreate,
+    VMCdrom, VMBoot, VMBootUpdate, VMCdromUpdate, VMDiskCreate, VMDiskResize, DeviceChange,
 )
 from app.schemas.storage import (
     StoragePool, StoragePoolCreate,
@@ -18,6 +19,7 @@ from app.schemas.host import HostInfo, HostResources, LibvirtStatus, LibvirtUnit
 __all__ = [
     "VM", "VMCreate", "VMUpdate", "VMDetail", "VMConsole", "VMDisk", "VMInterface",
     "VMTemplate", "VMTemplateCreate",
+    "VMCdrom", "VMBoot", "VMBootUpdate", "VMCdromUpdate", "VMDiskCreate", "VMDiskResize", "DeviceChange",
     "StoragePool", "StoragePoolCreate", "Volume", "VolumeCreate",
     "ISOImage", "ISODownload", "CloudImage", "CloudImageDownload",
     "Network", "NetworkCreate", "NetworkDetail", "DHCPLease", "NetworkUpdate", "NetworkXML", "DHCPHost",

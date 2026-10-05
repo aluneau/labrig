@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.database import engine, Base, SessionLocal
+from app.database import SessionLocal, init_db
 from app.api.v1 import api_router
 from app.models import CloudImage
 from app.events import event_bus
@@ -29,7 +29,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
-    Base.metadata.create_all(bind=engine)
+    init_db()
     with SessionLocal() as db:
         task_service.mark_interrupted(db)
         # Cloud images whose download died with the previous process

@@ -36,16 +36,17 @@ backend/app/
   database.py         SQLite (WAL, one connection per session), @serialized lock for libvirt->DB mirroring
   libvirt_client.py   ALL libvirt calls; event loop thread + lifecycle callbacks -> event_bus; domain XML template
   events.py           thread-safe EventBus -> asyncio queues (SSE)
-  services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host
-  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE)
+  services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
+                      group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el")
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Host, Tasks
-  components/         common/, layout/, vms/CreateVMModal, console/VncConsole
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm
-examples/opentofu/lab tofu example (network with DHCP reservations + 2 Debian VMs)
+  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Host, Tasks
+  components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, console/VncConsole
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _group
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -74,8 +75,28 @@ e2e/                  Playwright browser tests against the real app (see below)
   run with pkexec, polkit action `org.vmmanager.helper`). Fixed whitelist, validates everything itself.
   Never give the app sudo.
 - Background jobs (downloads) use `task_service.start(...)`; task bodies must poll `is_cancelled()`.
+- **Devices** (`domain_xml.py` = pure XML helpers, calls in `libvirt_client`, endpoints `vm_devices.py`
+  mounted before `vms` so `POST /vms/{id}/disks` isn't a power action): new VMs get an empty SATA CD-ROM
+  `sda` (seed moves to `sdb`) and 16 `pcie-root-port`s (hot-plug needs free ports; older VMs fall back
+  to "attached at next start"). "User CD-ROM" = first non-`-cidata.iso` CD-ROM. Media changes use
+  separate LIVE and CONFIG `updateDeviceFlags` calls (running and saved XML can differ). Boot order keeps
+  the XML's style (`<os><boot dev>` or per-device `<boot order>`, never mixed), switching to per-device
+  when several CD-ROMs exist. One-shot boot = `vms.next_boot` in the DB, applied by `vm_service._start`
+  (define with CD first, start, redefine original). Hot-unplug waits for the DEVICE_REMOVED event (15 s),
+  else reports `pending`. VM delete with disks takes disks from both live and saved XML.
+- DB schema: `database.init_db()` creates tables and adds missing **nullable** columns (no migration
+  tool); new columns must be nullable or have a server default.
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
+- **Lab groups**: the `GroupSpec` (schemas/group.py) is the source of truth; `normalize()` assigns router
+  IP/MACs, DHCP range, member IPs/MACs and stores them in the spec. Network `vmm-g-<name>` is isolated with
+  no `<ip>` (no libvirt dnsmasq); router `<name>-rtr` (eth0 uplink, eth1 LAN, matched by MAC in the seed's
+  network-config), members `<name>-<member>` (hostname = member name). libvirt objects carry
+  `<metadata><vmm:group name role member/>`; the router's also holds the full spec, so `sync_groups()`
+  rebuilds the DB. Deletes only touch objects whose metadata names the group. Spec changes are pushed with
+  guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
+  permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp, wireguard,
+  vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 
@@ -107,6 +128,8 @@ cd backend && venv/bin/python -c "import app.main"            # backend imports
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
 node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
+node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
+node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```
