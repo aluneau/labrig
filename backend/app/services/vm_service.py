@@ -237,7 +237,8 @@ class VMService:
             vm.next_boot = ",".join(order)
             db.commit()
             libvirt_client.publish_vm_event(vm.name, "devices")
-            return {"message": f"The next start through this app boots from {order[0]} (once)", "pending": True}
+            names = {"cdrom": "the CD/DVD", "hd": "the disk", "network": "the network"}
+            return {"message": f"The next start through this app boots from {names[order[0]]} (once)", "pending": True}
         messages = []
         if once is False and vm.next_boot:
             vm.next_boot = None

@@ -12,6 +12,7 @@ export interface LiveEvent {
   status?: string;
   progress?: number;
   target_type?: string | null;
+  device?: string; // vm device_removed: libvirt device alias
 }
 
 type Handler = (event: LiveEvent) => void;

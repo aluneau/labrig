@@ -461,14 +461,11 @@ class LibvirtClient:
             return {"target": target, "pending": live is not None, "added": True}
 
         if cd_live is not None:
-            # FORCE: eject even if the guest locked the tray
-            flags = libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_DEVICE_MODIFY_FORCE
-            same = cd_config is not None and \
-                domain_xml.disk_info(cd_config)["target"] == domain_xml.disk_info(cd_live)["target"]
-            if same:
-                flags |= libvirt.VIR_DOMAIN_AFFECT_CONFIG
-            domain.updateDeviceFlags(domain_xml.media_change_xml(cd_live, iso_path), flags)
-            if cd_config is not None and not same:
+            # Two calls: the running and saved definitions may differ (e.g. a one-shot boot order
+            # puts <boot order='1'/> on the running CD-ROM only). FORCE: eject even if the tray is locked.
+            domain.updateDeviceFlags(domain_xml.media_change_xml(cd_live, iso_path),
+                                     libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_DEVICE_MODIFY_FORCE)
+            if cd_config is not None:
                 domain.updateDeviceFlags(domain_xml.media_change_xml(cd_config, iso_path),
                                          libvirt.VIR_DOMAIN_AFFECT_CONFIG)
             pending = False
