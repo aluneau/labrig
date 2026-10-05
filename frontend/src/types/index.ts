@@ -445,7 +445,11 @@ export interface GroupCloudInit {
 
 export interface MemberSpec {
   name: string;
-  image?: string;
+  // cloud_image: `image` + cloud-init; iso: boots `iso` (path or name); empty: blank disk.
+  // iso/empty members get no cloud-init: the router gives them their reserved IP + name by DHCP.
+  source?: 'cloud_image' | 'iso' | 'empty';
+  image?: string | null;
+  iso?: string | null;
   memory?: number; // MiB
   vcpu?: number;
   disk_size?: number; // GiB

@@ -13,14 +13,17 @@ import {
   GridItem,
   HelperText,
   HelperTextItem,
+  InputGroup,
+  InputGroupItem,
+  InputGroupText,
   Modal,
   ModalVariant,
   Radio,
   TextArea,
   TextInput,
 } from '@patternfly/react-core';
-import { CloudImage, ISOImage, Network, VMCreate } from '../../types';
-import { networkApi, storageApi, vmApi } from '../../services/api';
+import { CloudImage, Group, GroupCloudInit, ISOImage, MemberSpec, Network, VMCreate } from '../../types';
+import { groupApi, networkApi, storageApi, vmApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 
 type Source = 'cloud' | 'iso' | 'empty';
@@ -28,10 +31,14 @@ type Source = 'cloud' | 'iso' | 'empty';
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (message?: string) => void;
+  /** Group mode, locked to this lab group: the VM is created as a member (POST /groups/{id}/members) */
+  group?: Group | null;
 }
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+/** Group member names (also hostnames): see MemberSpec.name */
+export const MEMBER_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
 export const KEYBOARD_LAYOUTS: [string, string][] = [
   ['us', 'English (US)'], ['gb', 'English (UK)'], ['fr', 'French (AZERTY)'], ['be', 'Belgian'],
@@ -50,10 +57,17 @@ export function defaultKeyboard(): string {
   return known.has(guess) ? guess : 'us';
 }
 
-export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) => {
+const groupCloudInit = (g: Group): GroupCloudInit => g.spec.cloud_init || {};
+
+export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, group: lockedGroup }) => {
   const [cloudImages, setCloudImages] = useState<CloudImage[]>([]);
   const [isos, setIsos] = useState<ISOImage[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  // Lab group the VM joins as a member ('' = none)
+  const [groupId, setGroupId] = useState('');
+  const [memberIp, setMemberIp] = useState('');
+  const [role, setRole] = useState('member');
 
   const [name, setName] = useState('');
   const [memoryGiB, setMemoryGiB] = useState('2');
@@ -74,9 +88,24 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const group = lockedGroup || groups.find((g) => String(g.id) === groupId) || null;
+
+  // Group mode: login settings default to the group's (members inherit them)
+  useEffect(() => {
+    if (!isOpen || !group) return;
+    const ci = groupCloudInit(group);
+    setUsername(ci.username || '');
+    setPassword(ci.password || '');
+    setSshKeys((ci.ssh_keys || []).join('\n'));
+    if (ci.keyboard) setKeyboard(ci.keyboard);
+  }, [isOpen, group?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
+    if (!lockedGroup) {
+      groupApi.list().then((gs) => setGroups(gs.filter((g) => g.status === 'ready'))).catch(() => setGroups([]));
+    }
     Promise.all([storageApi.listCloudImages(), storageApi.listIsos(), networkApi.list()])
       .then(([images, isoList, nets]) => {
         const ready = images.filter((i) => i.status === 'ready');
@@ -89,9 +118,9 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
         if (!ready.length) setSource(isoList.length ? 'iso' : 'empty');
       })
       .catch((err) => setError(errorText(err)));
-  }, [isOpen]);
+  }, [isOpen, !!lockedGroup]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const nameValid = NAME_RE.test(name);
+  const nameValid = group ? MEMBER_NAME_RE.test(name) : NAME_RE.test(name);
   const canSubmit =
     nameValid &&
     Number(memoryGiB) > 0 &&
@@ -100,7 +129,52 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
     (source !== 'iso' || isoPath) &&
     (source === 'iso' || Number(diskGiB) > 0);
 
+  const submitMember = async (g: Group) => {
+    const member: MemberSpec = {
+      name,
+      role: role.trim() || 'member',
+      ip: memberIp.trim() || null,
+      memory: Math.round(Number(memoryGiB) * 1024),
+      vcpu: Number(vcpu),
+      disk_size: Number(diskGiB) || 0,
+      source: source === 'cloud' ? 'cloud_image' : source,
+    };
+    if (source === 'cloud') {
+      const img = cloudImages.find((i) => String(i.id) === cloudImageId);
+      member.image = img ? `${img.distribution}-${img.version}` : cloudImageId;
+      const keys = sshKeys.split('\n').map((k) => k.trim()).filter(Boolean);
+      const inherited = groupCloudInit(g);
+      const same = (username || null) === (inherited.username || null)
+        && (password || null) === (inherited.password || null)
+        && keyboard === (inherited.keyboard || keyboard)
+        && keys.join('\n') === (inherited.ssh_keys || []).join('\n');
+      // null = the group's login settings (kept in sync with the group spec)
+      member.cloud_init = same ? null : { username: username || null, password: password || null, ssh_keys: keys, keyboard };
+      member.user_data = userData.trim() || null;
+    } else if (source === 'iso') {
+      member.iso = isoPath;
+    }
+    await groupApi.addMember(g.id, member);
+    return `Member ${name} added to ${g.name}`;
+  };
+
   const submit = async () => {
+    if (group) {
+      setSubmitting(true);
+      setError(null);
+      try {
+        const message = await submitMember(group);
+        setName('');
+        setMemberIp('');
+        onCreated(message);
+        onClose();
+      } catch (err) {
+        setError(errorText(err));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     const data: VMCreate = {
       name,
       memory: Math.round(Number(memoryGiB) * 1024),
@@ -139,7 +213,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
   return (
     <Modal
       variant={ModalVariant.medium}
-      title="Create virtual machine"
+      title={lockedGroup ? `Add a custom VM to ${lockedGroup.name}` : 'Create virtual machine'}
       isOpen={isOpen}
       onClose={onClose}
       actions={[
@@ -152,6 +226,52 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
       <Form onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}>
         {error && <Alert variant="danger" isInline title="Could not create VM">{error}</Alert>}
 
+        {!lockedGroup && groups.length > 0 && (
+          <FormGroup label="Lab group" fieldId="vm-group">
+            <FormSelect id="vm-group" value={groupId} onChange={(_e, v) => setGroupId(v)}>
+              <FormSelectOption value="" label="None (standalone VM)" />
+              {groups.map((g) => <FormSelectOption key={g.id} value={String(g.id)} label={`${g.name} (${g.cidr})`} />)}
+            </FormSelect>
+          </FormGroup>
+        )}
+
+        {group && (
+          <>
+            <FormGroup label="Member name" isRequired fieldId="vm-name">
+              <InputGroup>
+                <InputGroupText>{group.name}-</InputGroupText>
+                <InputGroupItem isFill>
+                  <TextInput id="vm-name" isRequired value={name} validated={name && !nameValid ? 'error' : 'default'}
+                    onChange={(_e, v) => setName(v)} />
+                </InputGroupItem>
+              </InputGroup>
+              <FormHelperText>
+                <HelperText>
+                  <HelperTextItem variant={name && !nameValid ? 'error' : 'default'}>
+                    Lowercase letters, digits and '-'. VM {group.name}-{name || '<name>'}, hostname {name || '<name>'}.{group.domain}
+                  </HelperTextItem>
+                </HelperText>
+              </FormHelperText>
+            </FormGroup>
+            <Grid hasGutter md={6}>
+              <GridItem>
+                <FormGroup label="Fixed IP" fieldId="vm-member-ip">
+                  <TextInput id="vm-member-ip" value={memberIp} placeholder="auto" onChange={(_e, v) => setMemberIp(v)} />
+                  <FormHelperText>
+                    <HelperText><HelperTextItem>Empty: next free address of {group.cidr} outside the DHCP range.</HelperTextItem></HelperText>
+                  </FormHelperText>
+                </FormGroup>
+              </GridItem>
+              <GridItem>
+                <FormGroup label="Role" fieldId="vm-member-role">
+                  <TextInput id="vm-member-role" value={role} onChange={(_e, v) => setRole(v)} />
+                </FormGroup>
+              </GridItem>
+            </Grid>
+          </>
+        )}
+
+        {!group && <>
         <FormGroup label="Name" isRequired fieldId="vm-name">
           <TextInput
             id="vm-name"
@@ -168,6 +288,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
             </HelperText>
           </FormHelperText>
         </FormGroup>
+        </>}
 
         <Grid hasGutter md={4}>
           <GridItem>
@@ -259,6 +380,27 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
           </FormGroup>
         )}
 
+        {group && (
+          <FormGroup label="Network" fieldId="vm-network">
+            <FormSelect id="vm-network" value={group.network_name} isDisabled onChange={() => undefined}>
+              <FormSelectOption value={group.network_name} label={group.network_name} />
+            </FormSelect>
+            <FormHelperText>
+              <HelperText>
+                <HelperTextItem>
+                  Members live on the group network with a fixed MAC: the router reserves their IP (DHCP) and serves
+                  their name in {group.domain}.{' '}
+                  {source === 'cloud'
+                    ? 'cloud-init sets the hostname.'
+                    : 'No cloud-init here: configure the installed OS for DHCP and it gets its reserved IP and name.'}{' '}
+                  The VM starts and stops with the group (now if the router is running) and is deleted with it.
+                </HelperTextItem>
+              </HelperText>
+            </FormHelperText>
+          </FormGroup>
+        )}
+
+        {!group && <>
         <FormGroup label="Network" fieldId="vm-network">
           <FormSelect id="vm-network" value={network} onChange={(_e, v) => setNetwork(v)}>
             {networks.map((n) => (
@@ -271,6 +413,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) =
           <Checkbox id="vm-start" label="Start after creation" isChecked={start} onChange={(_e, v) => setStart(v)} />
           <Checkbox id="vm-autostart" label="Start automatically when the host boots" isChecked={autostart} onChange={(_e, v) => setAutostart(v)} />
         </FormGroup>
+        </>}
       </Form>
     </Modal>
   );
