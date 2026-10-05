@@ -24,3 +24,6 @@ e2e/screenshots/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Claude Code (agent worktrees, local settings)
+.claude/
