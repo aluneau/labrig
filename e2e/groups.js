@@ -116,7 +116,7 @@ const api = async (path, opts) => (await fetch(`${BASE}/api/v1${path}`, opts)).j
     await page.getByText('Config applied').waitFor();
     await page.screenshot({ path: 'groups-router.png', fullPage: true });
     await page.getByRole('tab', { name: 'Export' }).click();
-    await page.getByText('cidr: 10.42.32.0/24').first().waitFor();
+    await page.getByText(`cidr: ${CIDR}`).first().waitFor();
     await page.screenshot({ path: 'groups-export.png' });
 
     // Stop / start
