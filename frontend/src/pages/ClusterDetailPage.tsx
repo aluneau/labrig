@@ -43,6 +43,7 @@ import { ClusterStatus } from './ClustersPage';
 import { CLUSTER_TYPE_HELP } from '../components/clusters/CreateClusterModal';
 import { ConsoleAccess, InstallPanel } from '../components/clusters/OpenShiftInstall';
 import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
+import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
 
 const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
@@ -262,6 +263,7 @@ export const ClusterDetailPage: React.FC = () => {
             <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
             <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" />
             <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" />
+            {cluster.group_id ? <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>} id="os-tab-topology" /> : null}
           </Tabs>
         </PageSection>
       )}
@@ -275,6 +277,12 @@ export const ClusterDetailPage: React.FC = () => {
           <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
         )}
         {isOpenShift && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
+        {isOpenShift && tab === 'topology' && cluster.group_id && (
+          <Card><CardBody>
+            <LabTopology groupId={cluster.group_id} focusCluster={cluster.name}
+              refreshKey={`${cluster.updated_at}|${cluster.nodes.map((n) => n.state).join(',')}`} />
+          </CardBody></Card>
+        )}
         {(!isOpenShift || tab === 'overview') && (
         <Stack hasGutter>
           {(error || loadError) && (

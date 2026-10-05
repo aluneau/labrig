@@ -417,9 +417,10 @@ export interface SriovOptions {
 
 export interface MetalLBOptions {
   enabled: boolean;
-  addresses: number; // pool size (2-64)
+  mode?: 'l2' | 'bgp'; // l2: pool in the group network, ARP; bgp: a /27 outside it, announced to the router
+  addresses: number; // L2 pool size (2-64); BGP pools are a /27
   demo: boolean;
-  pool?: string | null; // assigned: "10.43.5.230-10.43.5.245"
+  pool?: string | null; // assigned: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
 }
 
 export interface OpenShiftOptions {
@@ -519,6 +520,9 @@ export interface MetalLBEndpoint {
 
 export interface MetalLBScenario {
   enabled: boolean;
+  mode?: 'l2' | 'bgp' | string;
+  bgp_peers?: { node: string; ip?: string | null; state: string }[]; // bgp: each node's session with the router
+  bgp_nexthops?: string[]; // bgp: nodes the router sends the service IP to (ECMP)
   pool?: string | null;
   service_ip?: string | null;
   hostname?: string | null; // hello.<domain>
