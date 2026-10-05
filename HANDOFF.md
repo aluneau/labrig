@@ -48,13 +48,15 @@ Read `CLAUDE.md` first (layout, run/verify commands, architecture rules, portabi
 - **Still pending owner action:** `scripts/setup.sh --no-boot` (installs the root helper + polkit rules; the Host
   page says "Privileged helper not installed"). Not needed for WireGuard/OpenShift/BGP.
 - **Running now** (owner's decision whether to keep them):
-  - `e2e-ocp` — test SNO from this session (24 GiB, group `e2e-ocp` with router, MetalLB **BGP** mode,
-    `hello.lab` → 10.45.0.1). Delete it from the Clusters page when done (also removes its group, ISO, `vmm-s-e2e-ocp`).
+  - (`e2e-ocp`, the test SNO of this session, was deleted on 2026-10-06 with its group, ISO and networks.)
   - `test2` — an OpenShift cluster the **owner** started from the UI this evening (installing at last check). Not ours: don't touch.
   - `test` (kubeadm) and its group — the owner's.
 - OpenShift data: `backend/data/openshift/` (pull secret 0600, `bin/4.20.39`, base ISO cache ~1.4 GB,
   `clusters/<name>/` install dirs with kubeadmin password + SSH key). `~/pull-secret.json` is mode 644: suggest `chmod 600`.
-- Git: local `main` only, no remote. All agent worktrees/branches merged and removed.
+- Git: **public** remote `origin` = https://github.com/aluneau/labrig (pushed 2026-10-06). Before the first
+  push the history was scanned for secrets (pull secret values, keys, kubeconfigs, tokens: none) and rewritten so
+  every commit is `Adrien Luneau <adrien.luneau@gmail.com>` (no work email) and the docs have no personal details.
+  Keep it that way: never commit `backend/data/` (pull secret, install dirs, DB), `*.tfstate`, kubeconfigs.
 
 ## Known limitations / open issues
 
@@ -79,6 +81,12 @@ group network → address overlap; no NTP for the installer; SR-IOV policy race;
 docroot). Usage limits interrupted agents twice; resuming them with SendMessage worked.
 
 ## Next steps (owner's priorities)
+
+0. **Rename to Labrig** (name chosen 2026-10-06; repo already `aluneau/labrig`): UI title, docs, README, package
+   name first; then the OpenTofu provider (`vmmanager_*` → `labrig_*`, needs a migration note for existing state),
+   Go module path, systemd unit / helper / polkit names (setup.sh must migrate an installed `vm-manager`). The
+   `vmm-` prefixes of libvirt objects and the metadata namespace URL can stay (internal; changing them would orphan
+   existing labs).
 
 1. Owner: try the new UI on `test2` / `e2e-ocp` (laptop over WireGuard: group → Remote access → Add device,
    then the Topology and MetalLB lab tabs), decide whether to keep `e2e-ocp`; run `scripts/setup.sh --no-boot`.
