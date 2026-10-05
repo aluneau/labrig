@@ -120,7 +120,7 @@ def reconcile(db: Session) -> None:
     for group in db.query(Group).all():
         spec = group.spec or {}
         wg, uplink_ip = _wg_of(spec), (spec.get("router") or {}).get("uplink_ip")
-        if group.status == "deleting" or not wg or not wg.get("enabled", True) or not uplink_ip:
+        if group.status in ("deleting", "missing") or not wg or not wg.get("enabled", True) or not uplink_ip:
             continue
         if wg.get("host_port"):
             wanted[int(wg["host_port"])] = (uplink_ip, int(wg.get("listen_port") or 51820))
