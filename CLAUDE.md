@@ -101,6 +101,11 @@ e2e/                  Playwright browser tests against the real app (see below)
   guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
   permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp, wireguard,
   vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
+  Members (`MemberSpec`) have `source`: `cloud_image` (default, `image` + cloud-init) | `iso` (`iso` = volume
+  path or name) | `empty`; the last two get no seed, only the MAC reservation + DNS name. Both the quick
+  "Add member" form and CreateVMModal in group mode (`group` prop, or its "Lab group" select) POST a
+  MemberSpec to `/groups/{id}/members`; new members are pre-checked (VM name free, <= 64 chars) and dropped
+  from the spec again if their VM can't be created.
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 

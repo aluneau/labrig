@@ -32,7 +32,11 @@ function errorMessage(body: any, status: number): string {
   if (typeof detail === 'string') return detail;
   // FastAPI validation errors: [{loc: [...], msg: '...'}]
   if (Array.isArray(detail)) {
-    return detail.map((d) => `${(d.loc || []).slice(1).join('.')}: ${d.msg}`).join('; ');
+    return detail.map((d) => {
+      const field = (d.loc || []).slice(1).join('.');
+      const msg = String(d.msg).replace(/^Value error, /, '');
+      return field ? `${field}: ${msg}` : msg;
+    }).join('; ');
   }
   return `Request failed (HTTP ${status})`;
 }
