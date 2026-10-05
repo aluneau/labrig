@@ -406,33 +406,80 @@ Integration options:
 - Cluster = a **group with a role layout** (`ctlplanes`, `workers`, `type`) + a `clusters` table
   (`kubeconfig`, `version`, `status`). UI: *Clusters* page, kubeconfig download, console of each node.
 
-### 3.3 Phase B: OpenShift SNO with the agent-based installer (L)
+### 3.3 OpenShift (agent-based installer) — plan (2026-10-05), in progress
 
-Requirements: SNO minimum **8 vCPU, 16 GB RAM, 120 GB disk** (4 vCPU works, but with no headroom),
-and DNS for `api.<cluster>.<domain>`, `api-int.<cluster>.<domain>`, `*.apps.<cluster>.<domain>`.
-For SNO all three point to the node's IP ([SNO docs](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_on_a_single_node/install-sno-installing-sno),
-[agent-based](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/installing_an_on-premise_cluster_with_the_agent-based_installer/installing-with-agent-based-installer)).
-A 3-node compact cluster needs ~3×(8 vCPU, 16–24 GB). It fits a gaming rig with 64+ GB, which is
-the point of this project.
+Research: kcli (UPI + static pods, SNO bootstrap-in-place) vs the **agent-based installer (ABI)**: ABI wins
+(one flow for SNO / compact / HA, no bootstrap VM, Red Hat's documented on-prem path, fits our router DNS +
+DHCP reservations + ISO boot). kcli is still the reference for operator recipes (`apps/<name>/`).
 
-Flow:
-1. User supplies a **pull secret** once (stored encrypted at rest in `backend/data`, never sent to the
-   browser again) and picks a version. The app downloads `openshift-install` for that version
-   (mirror.openshift.com) into a cache.
-2. The app writes `install-config.yaml` (baseDomain = group domain, machineNetwork = group CIDR,
-   platform `none` for SNO, `baremetal` with VIPs for multi-node) and `agent-config.yaml`
-   (rendezvousIP, a static MAC→IP per host, matching the group's DHCP reservations), then runs
-   `openshift-install agent create image` (a task) and uploads `agent.x86_64.iso` into the pool.
-3. Creates the node VMs (fixed MACs, empty 120 GB disks, CD-ROM = agent ISO, boot order disk → cdrom),
-   and the router gets the `api`/`api-int`/`*.apps` records (SNO) or haproxy + VIPs (compact/HA).
-4. Runs `openshift-install agent wait-for install-complete` in a task with progress and log
-   streaming; on success it stores the kubeconfig + kubeadmin password and ejects the ISO (§1.2).
+**Topology.** Always in a lab group (auto-created per cluster by default), `platform: none`, the router is
+the external DNS + LB like customers' UPI setups:
+- DNS: `api`, `api-int` -> router LAN IP (SNO: the node IP), `*.apps` -> router LAN IP (wildcard
+  `address=`), node names via reservations (PTR from dnsmasq `dhcp-host`/`host-record`).
+- haproxy (TCP): 6443 -> masters, 22623 -> masters, 80/443 -> ingress nodes (masters when compact/SNO,
+  workers otherwise). Fixed ports => **one OpenShift cluster per group**.
+- `SNO` (1 master), `compact` (3 masters, schedulable), `HA` (3 masters + N workers). Nodes: q35,
+  host-passthrough, virtio disk 120 GiB (empty, thin) + SATA CD with the agent ISO, boot order disk -> CD
+  (empty disk falls through to the ISO, installed disk wins after the reboot), fixed MACs reserved in
+  the group, `rootDeviceHints: /dev/vda`. Defaults: SNO 8 vCPU / 24 GiB, masters 8 / 20 GiB, workers 4 / 12 GiB.
+  A host budget check (RAM / vCPU / disk) runs before anything is created.
 
-Phase C: **compact (3 masters) and HA** with workers, **disconnected** mode (mirror registry on the router or
-a helper VM, `oc-mirror`), and **OKD** (no pull secret) for people without subscriptions.
+**Versions and binaries.** `GET /openshift/versions?channel=stable-4.20` = upgrade graph API
+(`api.openshift.com/api/upgrades_info/v1/graph`, filter on the minor prefix, never hard-code `4.`),
+`GET /openshift/channels` lists minors from mirror.openshift.com. Per version, `openshift-install` and `oc`
+(`clients/ocp/<ver>/openshift-{install,client}-linux.tar.gz`, sha256sum.txt checked) are cached in
+`DATA_DIR/openshift/bin/<ver>/`; the installer's base-ISO cache in `DATA_DIR/openshift/cache`
+(`XDG_CACHE_HOME`). Downloads are tasks.
 
-OpenTofu: `vmmanager_cluster { type = "openshift" | "k3s" | "kubeadm", group_id, ctlplanes, workers,
-version, pull_secret = file(...) }` with computed `kubeconfig` (sensitive) and `console_url`.
+**Pull secret.** Stored once in `DATA_DIR/openshift/pull-secret.json` (0600, never in the DB, never
+returned): upload in the UI, or import from a host path (`~/pull-secret.json`). Validated as JSON with `auths`.
+A per-cluster SSH key pair is generated (`sshKey`, for `agent-gather` / debug; private key downloadable).
+
+**Install flow** (task `cluster_create`, cancellable):
+1. group (create or check) -> reservations + DNS + LB entries (`GroupClusterNetwork`, one router push);
+2. binaries (cached); render `install-config.yaml` + `agent-config.yaml` (rendezvousIP = master-0,
+   hosts with MAC / role / hostname / root device) + `openshift/*.yaml` manifests for day-1 options
+   (operator Subscriptions, SR-IOV MachineConfig, chrony); `openshift-install agent create image` in
+   `DATA_DIR/openshift/clusters/<name>/` (0700);
+3. upload `agent.x86_64.iso` to the default pool as `<cluster>-agent.iso`; create + start the VMs;
+4. phase A: poll the Assisted Service (`http://<rendezvous>:8090/api/assisted-install/v2/clusters`,
+   `Watcher-Authorization` token from the install state) from the **router** with guest-exec (the host
+   can't route to the group) -> progress %, host stages; phase B: `oc` from the host with a kubeconfig whose
+   server is `https://<router uplink IP>:6443` + `tls-server-name: api.<cluster>.<domain>` until
+   `clusterversion` is Available and not Progressing (clusteroperators listed in the status);
+5. eject + delete the ISO, approve pending CSRs, run the add-ons (below), store kubeconfig + kubeadmin
+   password (DB, never in list responses), console URL `https://console-openshift-console.apps.<cluster>.<domain>`.
+Start = masters first, approve CSRs until all nodes Ready; stop = ACPI shutdown (warn during the first 24 h).
+No "add workers" in v1 (`oc adm node-image create` later).
+
+**Add-ons** (`addons` in the create request, also installable day-2 from the cluster page):
+- *Operators*: curated list (LVMS, ODF, LSO, SR-IOV, MetalLB, NMState, OpenShift Virtualization, GitOps,
+  Pipelines, ...) + any package name; day-2 picker reads `packagemanifests` live. Install = Namespace (from
+  `suggested-namespace`) + OperatorGroup (own namespace unless AllNamespaces-only) + Subscription
+  (defaultChannel), wait for the CSV `Succeeded`, then the operator's CR if we know one.
+- *Storage*: `none` | `lvms` (SNO / any size: one extra 100 GiB disk per node, `LVMCluster` on
+  `/dev/vdb`, default StorageClass `lvms-vg1`) | `odf` (>= 3 nodes: LSO `LocalVolumeSet` + ODF
+  `StorageCluster` `resourceProfile: lean`, +8 vCPU / +24 GiB per storage node, RBD default class).
+  Extra disks get a serial (`/dev/disk/by-id/virtio-<serial>`).
+- *SR-IOV*: each node gets vIOMMU + N igb NICs (on the group network), the SR-IOV operator with
+  `DEV_MODE=TRUE` (igb is not in `supported-nic-ids`), `SriovOperatorConfig` (`disableDrain` on SNO /
+  compact), a MachineConfig `intel_iommu=on iommu=pt` (day 1), a sample `SriovNetworkNodePolicy`
+  (netdevice, 4 VFs) + `SriovNetwork` with whereabouts.
+- *MetalLB*: operator + `MetalLB` CR + L2 `IPAddressPool` carved out of the group CIDR (the router's DHCP
+  range is shrunk to keep it free) + `L2Advertisement`. **Scenario "MetalLB L2 lab"**: a demo `hello`
+  Deployment + `Service type=LoadBalancer`, DNS record `hello.<domain>` -> its external IP, a diagram in
+  the UI (laptop -WireGuard-> router -> L2/ARP -> announcing node -> pods), checks (curl from the router,
+  which node announces), failover demo (stop the announcing node). Later: BGP mode with FRR on the router
+  (needs the router `bgp` block).
+
+**API**: `ClusterCreate.type = "openshift"` + `openshift: {version, channel, topology, storage, operators[],
+sriov{enabled, nics, vfs}, metallb{enabled, addresses, demo}}`; `/openshift/{pull-secret, channels, versions,
+catalog}`; `/clusters/{id}/{kubeadmin, ssh-key, operators, packagemanifests, addons/...}`.
+UI: create modal (version picker, topology, sizes, storage, operators, SR-IOV, MetalLB) with a resource
+summary; cluster page: install progress (Assisted stages, cluster operators), console link + kubeadmin,
+Operators tab, MetalLB lab tab with the diagram. OpenTofu: `vmmanager_cluster` `type = "openshift"` +
+`openshift` block. e2e: `openshift.js` (SNO + LVMS + MetalLB demo; long). Not in v1: OKD, disconnected,
+`platform: baremetal` with VIPs, BGP, add workers, upgrades, FIPS.
 
 ---
 
