@@ -129,6 +129,26 @@ class OpenShiftInstaller:
     def _update_spec(self, db: Session, cluster: Cluster, **values: Any) -> None:
         cluster.spec = {**(cluster.spec or {}), **values}
         db.commit()
+        self.save_spec(cluster)
+
+    @staticmethod
+    def save_spec(cluster: Cluster) -> None:
+        """Keep the cluster's spec (options, add-on states, MetalLB pool) next to its install files, so
+        a cluster rebuilt from libvirt metadata (other DB, lost DB) gets it back. No secrets in it."""
+        from app.services.cluster_service import SECRET_SPEC_KEYS
+        spec = {k: v for k, v in (cluster.spec or {}).items() if k not in SECRET_SPEC_KEYS}
+        path = openshift_service.cluster_dir(cluster.name) / "spec.json"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(spec, f, indent=1)
+
+    @staticmethod
+    def load_spec(name: str) -> Optional[Dict[str, Any]]:
+        path = openshift_service.root / "clusters" / name / "spec.json"
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
 
     def _set_addon(self, db: Session, cluster: Cluster, kind: str, name: str, state: str,
                    message: Optional[str] = None) -> None:
@@ -195,6 +215,7 @@ class OpenShiftInstaller:
         db.add(cluster)
         db.commit()
         db.refresh(cluster)
+        self.save_spec(cluster)
         self.svc._publish(cluster)
         topo = {"sno": "single node", "compact": "compact (3 masters)",
                 "ha": f"3 masters + {counts['workers']} workers"}[opts.topology]
@@ -376,7 +397,7 @@ class OpenShiftInstaller:
         workdir = openshift_service.cluster_dir(cluster.name)
         # A retry starts from scratch (the installer refuses a dir with a previous state), keeping the SSH key
         for entry in workdir.iterdir():
-            if entry.name.startswith("id_ed25519"):
+            if entry.name.startswith("id_ed25519") or entry.name == "spec.json":
                 continue
             shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
         # the app's key + the user's (all authorized for `core`)

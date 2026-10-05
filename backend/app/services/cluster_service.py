@@ -116,17 +116,25 @@ class ClusterService:
                 group = None
                 if entry["attrs"].get("group"):
                     group = db.query(Group).filter(Group.name == entry["attrs"]["group"]).first()
+                ctype = entry["attrs"].get("type", "k3s")
+                spec = self._rebuild_spec(entry["nodes"])
+                message = ("Rebuilt from libvirt metadata (kubeconfig and join token are read "
+                           "from the first control plane when needed)")
+                if ctype == "openshift":
+                    from app.services.openshift_installer import openshift_installer
+                    saved = openshift_installer.load_spec(name)
+                    spec = saved or spec
+                    message = None if saved else "Rebuilt from libvirt metadata (add-on settings unknown)"
                 cluster = Cluster(
                     group_id=group.id if group else None,
                     group_owned=entry["attrs"].get("group_owned") == "yes" if group else None,
-                    name=name, type=entry["attrs"].get("type", "k3s"), status="ready",
+                    name=name, type=ctype, status="ready",
                     version=entry["attrs"].get("version") or None,
                     network=entry["attrs"].get("network", "default"),
                     network_owned=entry["attrs"].get("owned") == "yes",
                     domain=entry["attrs"].get("domain", "lab"),
-                    status_message="Rebuilt from libvirt metadata (kubeconfig and join token are read "
-                                   "from the first control plane when needed)",
-                    spec=self._rebuild_spec(entry["nodes"]),
+                    status_message=message,
+                    spec=spec,
                 )
                 db.add(cluster)
                 db.flush()
