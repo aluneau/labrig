@@ -67,6 +67,11 @@ def network_for(cluster: Cluster) -> ClusterNetwork:
                                  cidr=spec.get("cidr"), zone=f"{cluster.name}.{cluster.domain}")
 
 
+def _node_index(name: str) -> int:
+    suffix = name.rsplit("-", 1)[-1]
+    return int(suffix) if suffix.isdigit() else -1
+
+
 def _random_mac() -> str:
     return "52:54:00:%02x:%02x:%02x" % tuple(random.randint(0, 255) for _ in range(3))
 
@@ -94,18 +99,22 @@ class ClusterService:
         for name, entry in found.items():
             cluster = db.query(Cluster).filter(Cluster.name == name).first()
             if cluster is None:
-                attrs = entry["attrs"]
                 cluster = Cluster(
-                    name=name, type=attrs.get("type", "k3s"), version=attrs.get("version") or None,
-                    network=attrs.get("network", "default"), network_owned=attrs.get("owned") == "yes",
-                    domain=attrs.get("domain", "lab"), status="ready",
-                    status_message="Rebuilt from libvirt metadata (no join token: adding workers is disabled)",
-                    spec={"cidr": attrs.get("cidr")} if attrs.get("cidr") else {},
+                    name=name, type=entry["attrs"].get("type", "k3s"), status="ready",
+                    version=entry["attrs"].get("version") or None,
+                    network=entry["attrs"].get("network", "default"),
+                    network_owned=entry["attrs"].get("owned") == "yes",
+                    domain=entry["attrs"].get("domain", "lab"),
+                    status_message="Rebuilt from libvirt metadata (kubeconfig and join token are read "
+                                   "from the first control plane when needed)",
+                    spec=self._rebuild_spec(entry["nodes"]),
                 )
                 db.add(cluster)
                 db.flush()
                 changed = True
             known = {n.name for n in cluster.nodes}
+            # ctlplane-0 first: it is the API endpoint and where kubectl runs
+            entry["nodes"].sort(key=lambda n: (n[1].get("role") != "ctlplane", _node_index(n[0])))
             for vm_name, attrs in entry["nodes"]:
                 if vm_name in known:
                     continue
@@ -120,6 +129,27 @@ class ClusterService:
                     changed = True
         if changed:
             db.commit()
+
+    @staticmethod
+    def _rebuild_spec(nodes: List[tuple]) -> Dict[str, Any]:
+        """Best-effort creation spec from node metadata + VM sizes (no password / SSH keys)"""
+        attrs = nodes[0][1]
+        spec: Dict[str, Any] = {
+            "cidr": attrs.get("cidr") or None, "pod_cidr": attrs.get("pod_cidr") or "10.244.0.0/16",
+            "service_cidr": attrs.get("service_cidr") or "10.96.0.0/16", "el": attrs.get("el") == "yes",
+            "cloud_image_id": int(attrs["image"]) if attrs.get("image", "").isdigit() else None,
+            "ctlplanes": sum(1 for _, a in nodes if a.get("role") == "ctlplane"),
+            "workers": sum(1 for _, a in nodes if a.get("role") == "worker"),
+            "username": None, "ssh_keys": [], "rebuilt": True,
+        }
+        for role in ("ctlplane", "worker"):
+            res = {"memory": 2048, "vcpu": 2, "disk_size": 20}
+            vm_name = next((n for n, a in nodes if a.get("role") == role), None)
+            live = libvirt_client.get_vm(vm_name) if vm_name else None
+            if live:
+                res.update(memory=live["max_memory"] // 1024, vcpu=live["vcpu"])
+            spec[role] = res
+        return spec
 
     def list_clusters(self, db: Session) -> List[Dict[str, Any]]:
         self.sync_clusters(db)
@@ -384,6 +414,8 @@ class ClusterService:
         attrs = {"name": cluster.name, "type": cluster.type, "role": node.role, "ip": node.ip,
                  "domain": cluster.domain, "network": cluster.network,
                  "owned": "yes" if cluster.network_owned else "no", "cidr": spec.get("cidr") or "",
+                 "image": spec.get("cloud_image_id") or "", "el": "yes" if spec.get("el") else "no",
+                 "pod_cidr": spec.get("pod_cidr") or "", "service_cidr": spec.get("service_cidr") or "",
                  "version": cluster.version or ""}
         xml = "<cluster " + " ".join(f"{k}={quoteattr(str(v))}" for k, v in attrs.items()) + "/>"
         libvirt_client.set_vm_metadata(node.name, METADATA_URI, METADATA_KEY, xml)
@@ -539,17 +571,37 @@ class ClusterService:
                 return
             self._sleep(task, 2)
 
+    def _recover_token(self, db: Session, cluster: Cluster) -> None:
+        """Clusters rebuilt from libvirt metadata have no token: read it from the first control plane"""
+        driver = get_driver(cluster.type)
+        first = self._first_ctlplane(cluster)
+        try:
+            out = self._exec(first.name, driver.token_command(), timeout=30)
+        except (libvirt.libvirtError, TimeoutError) as e:
+            raise ValueError(f"No join token and cannot read it from {first.name}: {e}")
+        if out["exitcode"] != 0 or not out["stdout"].strip():
+            raise ValueError(f"No join token and cannot read it from {first.name}: {out['stderr'].strip()}")
+        cluster.token = out["stdout"].strip()
+        if cluster.status_message and cluster.status_message.startswith("Rebuilt"):
+            cluster.status_message = None
+        db.commit()
+
     def add_workers(self, db: Session, cluster: Cluster, count: int) -> Task:
-        if not cluster.token:
-            raise ValueError("This cluster has no join token (rebuilt from libvirt): can't add workers")
-        if cluster.status not in ("ready",):
+        if self.to_dict(db, cluster)["status"] != "ready":
             raise ValueError("Start the cluster first")
+        if not cluster.token:
+            self._recover_token(db, cluster)
+        if not (cluster.spec or {}).get("cloud_image_id"):  # rebuilt from old metadata
+            image = self._pick_image(db, None)
+            cluster.spec = {**(cluster.spec or {}), "cloud_image_id": image.id,
+                            "image": f"{image.distribution} {image.version}",
+                            "el": image.distribution in EL_DISTRIBUTIONS}
+            db.commit()
 
         def run(db: Session, task: Task, cluster_id: int, count: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
-                indexes = [int(n.name.rsplit("-", 1)[1]) for n in cluster.nodes
-                           if n.role == "worker" and n.name.rsplit("-", 1)[1].isdigit()]
-                names = self._node_names(cluster.name, 0, count, max(indexes, default=-1) + 1)
+                last = max((_node_index(n.name) for n in cluster.nodes if n.role == "worker"), default=-1)
+                names = self._node_names(cluster.name, 0, count, last + 1)
                 self._set_status(db, cluster, "provisioning", f"Adding {', '.join(names)}")
                 self._add_nodes(db, task, cluster, network_for(cluster), [(n, "worker") for n in names], 5, 30)
                 result = self._wait_ready(db, task, cluster, 40, 95)

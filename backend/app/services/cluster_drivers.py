@@ -144,6 +144,10 @@ class K3sDriver(ClusterDriver):
     def version_command(self) -> List[str]:
         return [K3S_BIN, "--version"]
 
+    def token_command(self) -> List[str]:
+        """Join token, to recover it for a cluster rebuilt from libvirt metadata"""
+        return ["/bin/cat", "/var/lib/rancher/k3s/server/token"]
+
     @staticmethod
     def parse_version(output: str) -> Optional[str]:
         parts = output.split()  # "k3s version v1.33.5+k3s1 (hash)"
