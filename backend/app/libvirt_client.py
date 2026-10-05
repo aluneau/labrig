@@ -1,4 +1,7 @@
 """libvirt connection wrapper"""
+import base64
+import json
+import time
 import libvirt
 import threading
 import xml.etree.ElementTree as ET
@@ -10,6 +13,10 @@ from app.config import settings
 from app.events import event_bus
 
 logger = logging.getLogger(__name__)
+
+# XML namespace of the app's own metadata on libvirt objects (lab groups):
+# <metadata><vmm:group xmlns:vmm="..." name="..." role="..."/></metadata>
+VMM_NS = "https://github.com/aluneau/vm-manager/group"
 
 # Errors are raised as libvirtError; don't also print them to stderr
 libvirt.registerErrorHandler(lambda _ctx, _err: None, None)
@@ -174,8 +181,9 @@ class LibvirtClient:
 
     def create_vm(self, name: str, memory: int, vcpu: int,
                   disk_xml: str, network_xml: str,
-                  arch: str = "x86_64", boot_devs: Optional[List[str]] = None) -> str:
-        """Define a new VM. memory is in MiB."""
+                  arch: str = "x86_64", boot_devs: Optional[List[str]] = None,
+                  metadata_xml: str = "") -> str:
+        """Define a new VM. memory is in MiB. metadata_xml goes inside <metadata>."""
         conn = self.connect()
         boot_xml = "\n".join(f"<boot dev='{d}'/>" for d in (boot_devs or ["hd"]))
         listen = quoteattr(settings.VNC_LISTEN)
@@ -185,6 +193,7 @@ class LibvirtClient:
         xml = f"""
         <domain type='kvm'>
             <name>{escape(name)}</name>
+            {f"<metadata>{metadata_xml}</metadata>" if metadata_xml else ""}
             <memory unit='MiB'>{int(memory)}</memory>
             <currentMemory unit='MiB'>{int(memory)}</currentMemory>
             <vcpu placement='static'>{int(vcpu)}</vcpu>
@@ -668,6 +677,149 @@ class LibvirtClient:
         net.undefine()
         logger.info(f"Deleted network {name}")
         return True
+
+    # Lab groups: app metadata on domains / networks
+
+    @staticmethod
+    def _group_meta(xml: str) -> Optional[Dict[str, Any]]:
+        """Parse <metadata><vmm:group name role member><vmm:spec>json</vmm:spec></vmm:group>"""
+        el = ET.fromstring(xml).find(f"./metadata/{{{VMM_NS}}}group")
+        if el is None:
+            return None
+        meta: Dict[str, Any] = {k: el.get(k) for k in ("name", "role", "member")}
+        spec = el.findtext(f"{{{VMM_NS}}}spec")
+        if spec:
+            try:
+                meta["spec"] = json.loads(spec)
+            except ValueError:
+                pass
+        return meta
+
+    @staticmethod
+    def group_metadata_xml(group: str, role: str, member: Optional[str] = None,
+                           spec: Optional[Dict[str, Any]] = None, qualified: bool = True) -> str:
+        """The vmm:group element. qualified=False gives the bare element setMetadata() expects."""
+        p = "vmm:" if qualified else ""
+        ns = f" xmlns:vmm={quoteattr(VMM_NS)}" if qualified else ""
+        member_attr = f" member={quoteattr(member)}" if member else ""
+        spec_xml = f"<{p}spec>{escape(json.dumps(spec, sort_keys=True))}</{p}spec>" if spec is not None else ""
+        return (f"<{p}group{ns} name={quoteattr(group)} role={quoteattr(role)}"
+                f"{member_attr}>{spec_xml}</{p}group>")
+
+    def list_group_objects(self) -> List[Dict[str, Any]]:
+        """Domains and networks carrying group metadata: [{kind, name, uuid, group, role, member, spec?}]"""
+        conn = self.connect()
+        found = []
+        for dom in conn.listAllDomains(0):
+            # persistent config: setMetadata(CONFIG) on a running domain only changes that one
+            try:
+                xml = dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE)
+            except libvirt.libvirtError:
+                continue
+            meta = self._group_meta(xml)
+            if meta:
+                found.append({"kind": "domain", "name": dom.name(), "uuid": dom.UUIDString(),
+                              "group": meta.pop("name"), **meta})
+        for net in conn.listAllNetworks(0):
+            try:
+                meta = self._group_meta(net.XMLDesc(libvirt.VIR_NETWORK_XML_INACTIVE))
+            except libvirt.libvirtError:
+                continue
+            if meta:
+                found.append({"kind": "network", "name": net.name(), "uuid": net.UUIDString(),
+                              "group": meta.pop("name"), **meta})
+        return found
+
+    def domain_group(self, name: str) -> Optional[Dict[str, Any]]:
+        """Group metadata of a domain (None if it has none or doesn't exist)"""
+        try:
+            dom = self.connect().lookupByName(name)
+            return self._group_meta(dom.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        except libvirt.libvirtError:
+            return None
+
+    def set_domain_group_metadata(self, name: str, group: str, role: str, member: Optional[str] = None,
+                                  spec: Optional[Dict[str, Any]] = None) -> None:
+        """Replace the vmm:group element of a domain (persistent config, and live if running)"""
+        dom = self.connect().lookupByName(name)
+        flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+        if dom.isActive():
+            flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+        xml = self.group_metadata_xml(group, role, member, spec, qualified=False)
+        dom.setMetadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, xml, "vmm", VMM_NS, flags)
+
+    def all_macs(self) -> List[str]:
+        """MAC addresses of every domain interface on this host"""
+        macs = []
+        for dom in self.connect().listAllDomains(0):
+            for mac in ET.fromstring(dom.XMLDesc(0)).findall("./devices/interface/mac"):
+                if mac.get("address"):
+                    macs.append(mac.get("address").lower())
+        return macs
+
+    def network_subnets(self) -> List[Dict[str, str]]:
+        """IPv4 subnets of libvirt networks: [{network, cidr}]"""
+        import ipaddress
+        result = []
+        for net in self.connect().listAllNetworks(0):
+            for ip in ET.fromstring(net.XMLDesc(0)).findall("ip"):
+                if ip.get("family", "ipv4") != "ipv4" or not ip.get("address"):
+                    continue
+                prefix = ip.get("prefix") or (
+                    str(ipaddress.ip_network(f"0.0.0.0/{ip.get('netmask')}").prefixlen) if ip.get("netmask") else "24")
+                cidr = ipaddress.ip_network(f"{ip.get('address')}/{prefix}", strict=False)
+                result.append({"network": net.name(), "cidr": str(cidr)})
+        return result
+
+    # QEMU guest agent (needs the org.qemu.guest_agent.0 channel, present in every VM we define)
+
+    def agent_command(self, name: str, command: str, arguments: Optional[Dict[str, Any]] = None,
+                      timeout: int = 10) -> Any:
+        """Run a raw guest agent command, returns its "return" value (raises libvirtError)"""
+        import libvirt_qemu  # part of the libvirt Python bindings
+        dom = self.connect().lookupByName(name)
+        payload: Dict[str, Any] = {"execute": command}
+        if arguments is not None:
+            payload["arguments"] = arguments
+        out = libvirt_qemu.qemuAgentCommand(dom, json.dumps(payload), timeout, 0)
+        return json.loads(out).get("return")
+
+    def agent_ping(self, name: str) -> bool:
+        try:
+            self.agent_command(name, "guest-ping", timeout=3)
+            return True
+        except libvirt.libvirtError:
+            return False
+
+    def agent_exec(self, name: str, path: str, args: Optional[List[str]] = None, input_data: Optional[bytes] = None,
+                   timeout: float = 60) -> Dict[str, Any]:
+        """guest-exec + poll guest-exec-status: {exitcode, stdout, stderr} (raises TimeoutError)"""
+        arguments: Dict[str, Any] = {"path": path, "arg": args or [], "capture-output": True}
+        if input_data is not None:
+            arguments["input-data"] = base64.b64encode(input_data).decode()
+        pid = self.agent_command(name, "guest-exec", arguments)["pid"]
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.agent_command(name, "guest-exec-status", {"pid": pid})
+            if status.get("exited"):
+                return {
+                    "exitcode": status.get("exitcode", status.get("signal", -1)),
+                    "stdout": base64.b64decode(status.get("out-data", "")).decode(errors="replace"),
+                    "stderr": base64.b64decode(status.get("err-data", "")).decode(errors="replace"),
+                }
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{path} did not finish within {timeout:.0f}s in {name}")
+            time.sleep(0.5)
+
+    def agent_write_file(self, name: str, path: str, data: bytes, chunk: int = 48 * 1024) -> None:
+        """guest-file-open/write/close: replace a file inside the guest"""
+        handle = self.agent_command(name, "guest-file-open", {"path": path, "mode": "w"})
+        try:
+            for i in range(0, max(len(data), 1), chunk):
+                self.agent_command(name, "guest-file-write",
+                                   {"handle": handle, "buf-b64": base64.b64encode(data[i:i + chunk]).decode()})
+        finally:
+            self.agent_command(name, "guest-file-close", {"handle": handle})
 
     # Host Info
 
