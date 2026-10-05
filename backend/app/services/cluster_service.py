@@ -1,9 +1,11 @@
-"""Kubernetes clusters (k3s for now) built from cloud-image VMs
+"""Kubernetes clusters (k3s, kubeadm) built from cloud-image VMs
 
 A cluster = node VMs created with vm_service (cloud image + cloud-init) on a
 ClusterNetwork (fixed MAC -> IP reservations, DNS records for the nodes and
 api.<cluster>.<domain>), plus a clusters row for what only the app knows (join
-token, kubeconfig, spec). Each node VM carries
+token, kubeconfig, spec). k3s clusters get a standalone libvirt network (no
+router); kubeadm clusters live in a lab group whose router serves their DNS and
+fronts the API with haproxy (GroupClusterNetwork). Each node VM carries
 <vmm:cluster name=… type=… role=… …/> metadata so the clusters table can be
 rebuilt from libvirt, which stays the source of truth.
 
@@ -28,11 +30,12 @@ from sqlalchemy.orm import Session
 from app.database import serialized
 from app.events import event_bus
 from app.libvirt_client import libvirt_client
-from app.models import VM, CloudImage, Cluster, ClusterNode, Task
+from app.models import VM, CloudImage, Cluster, ClusterNode, Group, Task
 from app.schemas import ClusterCreate, TaskCreate, VMCreate
 from app.services.cloud_image_service import cloud_image_service
-from app.services.cluster_drivers import EL_DISTRIBUTIONS, ClusterDriver, get_driver
-from app.services.cluster_network import ClusterNetwork, LibvirtClusterNetwork
+from app.services.cluster_drivers import EL_DISTRIBUTIONS, ClusterDriver, get_driver, kubeadm_token
+from app.services.cluster_network import ClusterNetwork, GroupClusterNetwork, LibvirtClusterNetwork, free_subnet
+from app.services.group_service import group_service, network_name as group_network_name
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
 
@@ -60,8 +63,16 @@ class Cancelled(Exception):
     pass
 
 
+GROUP_CREATE_TIMEOUT = 20 * 60  # auto-created group: router first boot (dnf)
+API_PORT = 6443
+# Never returned by the API
+SECRET_SPEC_KEYS = ("password", "certificate_key")
+
+
 def network_for(cluster: Cluster) -> ClusterNetwork:
-    """The network implementation of a cluster. Lab groups will return a group-backed one here."""
+    """The network implementation of a cluster: its lab group (kubeadm) or a libvirt network (k3s)"""
+    if cluster.group_id:
+        return GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
     spec = cluster.spec or {}
     return LibvirtClusterNetwork(cluster.network, owned=bool(cluster.network_owned),
                                  cidr=spec.get("cidr"), zone=f"{cluster.name}.{cluster.domain}")
@@ -96,10 +107,17 @@ class ClusterService:
             entry["nodes"].append((vm_name, dict(el.attrib)))
 
         changed = False
+        if any(e["attrs"].get("group") for e in found.values()):
+            group_service.sync_groups(db)
         for name, entry in found.items():
             cluster = db.query(Cluster).filter(Cluster.name == name).first()
             if cluster is None:
+                group = None
+                if entry["attrs"].get("group"):
+                    group = db.query(Group).filter(Group.name == entry["attrs"]["group"]).first()
                 cluster = Cluster(
+                    group_id=group.id if group else None,
+                    group_owned=entry["attrs"].get("group_owned") == "yes" if group else None,
                     name=name, type=entry["attrs"].get("type", "k3s"), status="ready",
                     version=entry["attrs"].get("version") or None,
                     network=entry["attrs"].get("network", "default"),
@@ -124,9 +142,14 @@ class ClusterService:
                 changed = True
             if not cluster.api_ip:
                 first = self._first_ctlplane(cluster)
-                if first is not None:
+                if cluster.group_id:
+                    try:
+                        cluster.api_ip = network_for(cluster).uplink_ip()
+                    except ValueError:
+                        pass
+                elif first is not None:
                     cluster.api_ip = first.ip
-                    changed = True
+                changed = changed or bool(cluster.api_ip)
         if changed:
             db.commit()
 
@@ -141,6 +164,7 @@ class ClusterService:
             "ctlplanes": sum(1 for _, a in nodes if a.get("role") == "ctlplane"),
             "workers": sum(1 for _, a in nodes if a.get("role") == "worker"),
             "username": None, "ssh_keys": [], "rebuilt": True,
+            "api_port": int(attrs["api_port"]) if attrs.get("api_port", "").isdigit() else API_PORT,
         }
         for role in ("ctlplane", "worker"):
             res = {"memory": 2048, "vcpu": 2, "disk_size": 20}
@@ -191,12 +215,25 @@ class ClusterService:
             task = db.query(Task).filter(Task.id == cluster.task_id).first()
             task_progress = task.progress if task else None
 
-        spec = {k: v for k, v in (cluster.spec or {}).items() if k != "password"}
+        spec = {k: v for k, v in (cluster.spec or {}).items() if k not in SECRET_SPEC_KEYS}
+        port = self._api_port(cluster)
+        group = db.query(Group).filter(Group.id == cluster.group_id).first() if cluster.group_id else None
+        lb = None
+        if group is not None:
+            gspec = group.spec or {}
+            entry = next((x for x in gspec.get("load_balancers") or []
+                          if x.get("owner") == f"cluster:{cluster.name}"), None)
+            if entry:
+                lb = {"name": entry["name"], "port": entry["port"], "backends": entry["backends"],
+                      "router_ip": (gspec.get("router") or {}).get("ip"),
+                      "uplink_ip": (gspec.get("router") or {}).get("uplink_ip")}
         return {
             "id": cluster.id, "name": cluster.name, "type": cluster.type, "version": cluster.version,
             "network": cluster.network, "network_owned": bool(cluster.network_owned), "domain": cluster.domain,
+            "group_id": cluster.group_id, "group_name": group.name if group else None,
+            "group_owned": bool(cluster.group_owned), "load_balancer": lb,
             "api_hostname": f"api.{zone}", "api_ip": cluster.api_ip,
-            "api_endpoint": f"https://{cluster.api_ip}:6443" if cluster.api_ip else None,
+            "api_endpoint": f"https://{cluster.api_ip}:{port}" if cluster.api_ip else None,
             "status": status, "status_message": cluster.status_message, "task_id": cluster.task_id,
             "task_running": busy, "task_progress": task_progress,
             "has_kubeconfig": bool(cluster.kubeconfig),
@@ -218,6 +255,20 @@ class ClusterService:
     def _first_ctlplane(cluster: Cluster) -> Optional[ClusterNode]:
         return next((n for n in cluster.nodes if n.role == "ctlplane"), None)
 
+    @staticmethod
+    def _api_node(cluster: Cluster) -> Optional[ClusterNode]:
+        """Control plane to run kubectl / kubeadm on: the first running one (with 3 control
+        planes the cluster keeps working while ctlplane-0 is down)"""
+        ctlplanes = [n for n in cluster.nodes if n.role == "ctlplane"]
+        for node in ctlplanes:
+            if (libvirt_client.get_vm(node.name) or {}).get("state") == "running":
+                return node
+        return ctlplanes[0] if ctlplanes else None
+
+    @staticmethod
+    def _api_port(cluster: Cluster) -> int:
+        return int((cluster.spec or {}).get("api_port") or API_PORT)
+
     # ----------------------------------------------------------------- creating
 
     def _pick_image(self, db: Session, image_id: Optional[int]) -> CloudImage:
@@ -237,7 +288,18 @@ class ClusterService:
         raise ValueError("No cloud image is ready: download Debian 13 or AlmaLinux 9 on the Storage page")
 
     def create_cluster(self, db: Session, data: ClusterCreate) -> Cluster:
-        get_driver(data.type)  # rejects unsupported types
+        driver = get_driver(data.type)  # rejects unsupported types
+        if driver.needs_group and data.network:
+            raise ValueError(f"{data.type} clusters live in a lab group (router DNS + API load balancer): "
+                             "pick a group_id or let the app create one, not a network")
+        if not driver.needs_group and data.group_id is not None:
+            raise ValueError(f"{data.type} clusters use their own standalone network (no router): "
+                             "group_id is for kubeadm clusters")
+        if data.type == "kubeadm":
+            from app.services.cluster_drivers import kubeadm_version
+            kubeadm_version(data.version)  # validates
+        elif data.version and (not data.version.startswith("v") or data.version.count(".") != 2):
+            raise ValueError("k3s version: a release such as v1.33.5+k3s1")
         if data.ctlplanes % 2 == 0:
             raise ValueError("ctlplanes must be odd (1, 3 or 5): etcd needs a majority")
         if db.query(Cluster).filter(Cluster.name == data.name).first():
@@ -257,6 +319,9 @@ class ClusterService:
         if clash:
             raise ValueError(f"VM '{clash[0]}' already exists")
 
+        if driver.needs_group:
+            return self._create_in_group(db, data, image)
+
         zone = f"{data.name}.{data.domain}"
         if data.network:
             network = LibvirtClusterNetwork.existing(data.network)
@@ -265,7 +330,8 @@ class ClusterService:
             if any(n["name"] == owned_name for n in libvirt_client.list_networks()):
                 raise ValueError(f"Network '{owned_name}' already exists")
             network = LibvirtClusterNetwork.for_new_cluster(data.name, zone, data.cidr,
-                                                            avoid=[data.pod_cidr, data.service_cidr])
+                                                            avoid=[data.pod_cidr, data.service_cidr]
+                                                            + [g.cidr for g in db.query(Group).all()])
         node_subnet = ipaddress.IPv4Network(network.cidr) if network.owned else network.subnet()
         for label, cidr in (("pod_cidr", data.pod_cidr), ("service_cidr", data.service_cidr)):
             if ipaddress.IPv4Network(cidr, strict=False).overlaps(node_subnet):
@@ -294,6 +360,104 @@ class ClusterService:
         cluster.task_id = task.id
         db.commit()
         return cluster
+
+    def _create_in_group(self, db: Session, data: ClusterCreate, image: CloudImage) -> Cluster:
+        """kubeadm: nodes in an existing lab group, or in a group created for (and deleted with) the cluster"""
+        from app.schemas.group import CloudInitSpec, GroupSpec, RouterSpec
+        group_service.sync_groups(db)
+        pod, svc = (ipaddress.IPv4Network(c, strict=False) for c in (data.pod_cidr, data.service_cidr))
+        if data.group_id is not None:
+            group = group_service.get_group(db, data.group_id)
+            if group is None:
+                raise ValueError(f"Lab group {data.group_id} not found")
+            if group.status in ("creating", "deleting", "missing", "error"):
+                raise ValueError(f"Lab group {group.name} is {group.status}")
+            gspec = GroupSpec.model_validate(group.spec)
+            if not gspec.uplink:
+                raise ValueError(f"Lab group {group.name} has no uplink: the host could not reach the API")
+            names = {m.name for m in gspec.members} | {r.name for r in gspec.reservations}
+            clash = [n for n in self._node_names(data.name, data.ctlplanes, data.workers) if n in names]
+            if clash:
+                raise ValueError(f"'{clash[0]}' already exists in group {group.name}")
+            node_subnet = ipaddress.IPv4Network(gspec.cidr)
+            domain, owned, task = gspec.domain, False, None
+        else:
+            if len(data.name) > 32:
+                raise ValueError("The cluster name is also its lab group's name: 32 characters max")
+            if db.query(Group).filter(Group.name == data.name).first():
+                raise ValueError(f"A lab group named '{data.name}' already exists: pick it (group_id) "
+                                 "or another cluster name")
+            avoid = [data.pod_cidr, data.service_cidr] + [g.cidr for g in db.query(Group).all()]
+            if data.cidr:
+                node_subnet = ipaddress.IPv4Network(data.cidr, strict=False)
+                if any(node_subnet.overlaps(ipaddress.IPv4Network(c, strict=False)) for c in avoid):
+                    raise ValueError(f"{node_subnet} overlaps the pod / service network or another group")
+            else:
+                node_subnet = free_subnet(avoid)
+            router = RouterSpec(memory=data.router_memory) if data.router_memory else RouterSpec()
+            gspec = GroupSpec(
+                name=data.name, cidr=str(node_subnet), domain=data.domain, owner=f"cluster:{data.name}",
+                router=router,
+                cloud_init=CloudInitSpec(username=data.username, password=data.password,
+                                         ssh_keys=data.ssh_keys, keyboard=data.keyboard),
+            )
+            domain, owned = gspec.domain, True
+            group = None
+        for label, net in (("pod_cidr", pod), ("service_cidr", svc)):
+            if net.overlaps(node_subnet):
+                raise ValueError(f"{label} {net} overlaps the node network {node_subnet}")
+        existing_vms = {vm["name"] for vm in libvirt_client.list_vms()}
+        clash = [n for n in self._node_names(data.name, data.ctlplanes, data.workers) if n in existing_vms]
+        if clash:
+            raise ValueError(f"VM '{clash[0]}' already exists")
+        if group is None:
+            group, task = group_service.create_group(db, gspec)
+
+        spec = data.model_dump()
+        spec.update(cloud_image_id=image.id, image=f"{image.distribution} {image.version}",
+                    el=image.distribution in EL_DISTRIBUTIONS, cidr=str(node_subnet),
+                    certificate_key=secrets.token_hex(32), group_task_id=task.id if task else None)
+        spec.pop("network", None)
+        cluster = Cluster(
+            name=data.name, type=data.type, version=data.version, network=group_network_name(group.name),
+            network_owned=False, group_id=group.id, group_owned=owned, domain=domain, spec=spec,
+            token=kubeadm_token(), status="provisioning",
+            status_message="Creating the lab group (router first boot)" if owned else "Queued",
+        )
+        db.add(cluster)
+        db.commit()
+        db.refresh(cluster)
+        self._publish(cluster)
+        where = f"new lab group {group.name}" if owned else f"lab group {group.name}"
+        task = task_service.start(db, TaskCreate(
+            name=f"Create {data.type} cluster {data.name}", type="cluster_create", target_type="cluster",
+            target_id=cluster.id, target_name=data.name,
+            description=f"{data.ctlplanes} control plane(s) + {data.workers} worker(s), {spec['image']}, {where}",
+        ), self._provision, cluster.id)
+        cluster.task_id = task.id
+        db.commit()
+        return cluster
+
+    def _wait_group(self, db: Session, task: Task, cluster: Cluster) -> None:
+        """Auto-created group: wait for its creation task (router first boot)"""
+        deadline = time.monotonic() + GROUP_CREATE_TIMEOUT
+        started = time.monotonic()
+        while True:
+            db.expire_all()
+            group = db.query(Group).filter(Group.id == cluster.group_id).first()
+            if group is None:
+                raise ValueError("The cluster's lab group was deleted")
+            if group.status == "ready":
+                return
+            if group.status in ("error", "missing", "deleting"):
+                raise RuntimeError(f"Lab group {group.name}: {group.status}"
+                                   + (f" ({group.error_message})" if group.error_message else ""))
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Lab group {group.name} not ready after {GROUP_CREATE_TIMEOUT // 60} min")
+            elapsed = time.monotonic() - started
+            self._check(task, cluster, db, 2 + int(18 * min(elapsed / 240, 1)),
+                        f"Creating lab group {group.name} (router first boot)")
+            self._sleep(task, 3)
 
     @staticmethod
     def _node_names(name: str, ctlplanes: int, workers: int, first_worker: int = 0) -> List[str]:
@@ -330,23 +494,34 @@ class ClusterService:
     def _provision(self, db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
         def body(cluster: Cluster) -> Dict[str, Any]:
             spec = cluster.spec
-            self._check(task, cluster, db, 2, "Creating network")
+            driver = get_driver(cluster.type)
+            if cluster.group_owned:
+                self._wait_group(db, task, cluster)
+            self._check(task, cluster, db, 21 if cluster.group_id else 2,
+                        "Starting the lab group's router" if cluster.group_id else "Creating network")
             network = network_for(cluster)
             network.ensure()
 
             names = self._node_names(cluster.name, spec["ctlplanes"], spec["workers"])
             roles = ["ctlplane"] * spec["ctlplanes"] + ["worker"] * spec["workers"]
-            nodes = self._add_nodes(db, task, cluster, network, list(zip(names, roles)), 5, 30)
+            p_from, p_to = (22, 30) if cluster.group_id else (5, 30)
+            nodes = self._add_nodes(db, task, cluster, network, list(zip(names, roles)), p_from, p_to)
 
             first = self._first_ctlplane(cluster)
             self._check(task, cluster, db, 32, f"Waiting for the guest agent of {first.name} (first boot)")
             self._wait_agent(task, first.name)
-            result = self._wait_ready(db, task, cluster, 40, 92)
+            if driver.orchestrated:
+                driver.bootstrap(self._ops(db, task, cluster), self._ctx(cluster),
+                                 self._node_dicts(cluster, nodes), initial=True)
+                result = self._wait_ready(db, task, cluster, 80, 92)
+            else:
+                result = self._wait_ready(db, task, cluster, 40, 92)
 
             self._check(task, cluster, db, 95, "Fetching kubeconfig")
             self._fetch_kubeconfig(db, cluster)
             self._set_status(db, cluster, "ready", None)
-            return {**result, "api_endpoint": f"https://{cluster.api_ip}:6443", "version": cluster.version}
+            return {**result, "api_endpoint": f"https://{cluster.api_ip}:{self._api_port(cluster)}",
+                    "version": cluster.version}
 
         return self._guarded(db, task, cluster_id, body)
 
@@ -368,27 +543,87 @@ class ClusterService:
             cluster.nodes.append(node)
             created.append(node)
         first = self._first_ctlplane(cluster)
-        cluster.api_ip = first.ip
+        new_ctlplanes = [n for n in created if n.role == "ctlplane"]
+        if network.fronts_api and new_ctlplanes:
+            # The router's haproxy fronts every control plane; the host reaches it on the router's
+            # uplink address, the nodes through api(-int).<cluster>.<domain> -> router LAN address
+            port = spec.get("api_port") or network.free_lb_port(API_PORT)
+            cluster.spec = {**spec, "api_port": port}
+            spec = cluster.spec
+            ips = [n.ip for n in cluster.nodes if n.role == "ctlplane"]
+            cluster.api_ip = network.publish_api([api_hostname, f"api-int.{zone}"], ips, port)
+        elif not network.fronts_api:
+            cluster.api_ip = first.ip
         db.commit()
 
-        ctx = {
-            "name": cluster.name, "zone": zone, "api_hostname": api_hostname, "api_ip": cluster.api_ip,
-            "token": cluster.token, "version": cluster.version or spec.get("version"),
-            "ctlplanes": spec["ctlplanes"], "pod_cidr": spec["pod_cidr"], "service_cidr": spec["service_cidr"],
-            "extra_args": spec.get("extra_args"), "el": spec.get("el"),
-        }
+        ctx = self._ctx(cluster)
         step = (progress_to - progress_from) / max(len(created), 1)
-        for i, node in enumerate(created):
-            self._check(task, cluster, db, int(progress_from + i * step), f"Creating {node.name}")
+        for node in created:
             network.reserve(node.name, node.mac, node.ip)
             hostnames = [f"{node.name}.{zone}", node.name]
-            if node is first:
+            if node is first and not network.fronts_api:
                 hostnames += [api_hostname, f"api-int.{zone}"]
             network.publish(node.ip, hostnames)
+        network.commit()  # group: one router config push for all the nodes
+        for i, node in enumerate(created):
+            self._check(task, cluster, db, int(progress_from + i * step), f"Creating {node.name}")
             self._create_node_vm(db, cluster, driver, ctx, node, node is first)
         for node in sorted(created, key=lambda n: n.role != "ctlplane"):
             libvirt_client.start_vm(node.name)
         return created
+
+    def _ctx(self, cluster: Cluster) -> Dict[str, Any]:
+        """What drivers need to render a node's cloud-init / bootstrap the cluster"""
+        spec = cluster.spec
+        zone = f"{cluster.name}.{cluster.domain}"
+        api_hostname = f"api.{zone}"
+        ctx = {
+            "name": cluster.name, "zone": zone, "api_hostname": api_hostname, "api_ip": cluster.api_ip,
+            "api_port": self._api_port(cluster),
+            "token": cluster.token, "version": cluster.version or spec.get("version"),
+            "ctlplanes": spec["ctlplanes"], "pod_cidr": spec["pod_cidr"], "service_cidr": spec["service_cidr"],
+            "extra_args": spec.get("extra_args"), "el": spec.get("el"),
+            "certificate_key": spec.get("certificate_key"),
+        }
+        if cluster.group_id:
+            router_ip = network_for(cluster).gateway()
+            ctx["api_sans"] = [n for n in (api_hostname, f"api-int.{zone}", cluster.api_ip, router_ip) if n]
+        return ctx
+
+    @staticmethod
+    def _node_dicts(cluster: Cluster, nodes: List[ClusterNode]) -> List[Dict[str, Any]]:
+        first = next((n for n in cluster.nodes if n.role == "ctlplane"), None)
+        ordered = sorted(nodes, key=lambda n: (n.role != "ctlplane", _node_index(n.name)))
+        return [{"name": n.name, "role": n.role, "ip": n.ip, "first": n is first} for n in ordered]
+
+    def _ops(self, db: Session, task: Task, cluster: Cluster) -> Any:
+        """What a driver's bootstrap() may do: run commands in nodes, wait, report progress"""
+        service = self
+
+        class Ops:
+            @staticmethod
+            def exec(vm: str, argv: List[str], timeout: float = 60) -> Dict[str, Any]:
+                if task_service.is_cancelled(task.id):
+                    raise Cancelled()
+                return service._exec(vm, argv, timeout=timeout)
+
+            @staticmethod
+            def wait_agent(vm: str) -> None:
+                service._wait_agent(task, vm)
+
+            @staticmethod
+            def progress(pct: int, message: str) -> None:
+                service._check(task, cluster, db, pct, message)
+
+            @staticmethod
+            def sleep(seconds: float) -> None:
+                service._sleep(task, seconds)
+
+            @staticmethod
+            def api_node() -> str:
+                return service._api_node(cluster).name
+
+        return Ops()
 
     def _create_node_vm(self, db: Session, cluster: Cluster, driver: ClusterDriver, ctx: Dict[str, Any],
                         node: ClusterNode, first: bool) -> None:
@@ -414,6 +649,10 @@ class ClusterService:
                  "image": spec.get("cloud_image_id") or "", "el": "yes" if spec.get("el") else "no",
                  "pod_cidr": spec.get("pod_cidr") or "", "service_cidr": spec.get("service_cidr") or "",
                  "version": cluster.version or ""}
+        if cluster.group_id:
+            group = db.query(Group).filter(Group.id == cluster.group_id).first()
+            attrs.update(group=group.name if group else "", group_owned="yes" if cluster.group_owned else "no",
+                         api_port=self._api_port(cluster))
         metadata = (f"<{METADATA_KEY}:cluster xmlns:{METADATA_KEY}={quoteattr(METADATA_URI)} "
                     + " ".join(f"{k}={quoteattr(str(v))}" for k, v in attrs.items()) + "/>")
         vm_service.create_vm(
@@ -452,10 +691,10 @@ class ClusterService:
         """Wait until every node of the cluster is Ready (asked to the first control plane).
         fresh: only count Ready reported since the first control plane booted (after a start)."""
         driver = get_driver(cluster.type)
-        first = self._first_ctlplane(cluster)
+        first = self._first_ctlplane(cluster) if fresh else self._api_node(cluster)
         expected = {n.name for n in cluster.nodes}
         deadline = time.monotonic() + timeout
-        last_error = "k3s is not installed yet"
+        last_error = f"{cluster.type} is not installed yet"
         since = None
         if fresh:
             boot = self._exec(first.name, ["/bin/sh", "-c", "echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) ))"])
@@ -483,7 +722,7 @@ class ClusterService:
 
     def _fetch_kubeconfig(self, db: Session, cluster: Cluster) -> None:
         driver = get_driver(cluster.type)
-        first = self._first_ctlplane(cluster)
+        first = self._api_node(cluster)
         out = self._exec(first.name, driver.kubeconfig_command(), timeout=30)
         if out["exitcode"] != 0:
             raise RuntimeError(f"Cannot read the kubeconfig on {first.name}: {out['stderr'].strip()}")
@@ -498,13 +737,14 @@ class ClusterService:
         db.commit()
 
     @staticmethod
-    def _rewrite_kubeconfig(text: str, cluster: Cluster) -> str:
+    def _rewrite_kubeconfig(text: str, cluster: "Cluster") -> str:
         """Point the server at the API address reachable from the host and name things after the cluster"""
         config = yaml.safe_load(text)
         name = cluster.name
         for entry in config.get("clusters") or []:
             entry["name"] = name
-            entry["cluster"]["server"] = f"https://{cluster.api_ip}:6443"
+            # k3s: the first control plane; kubeadm: the group router's load balancer (uplink address)
+            entry["cluster"]["server"] = f"https://{cluster.api_ip}:{ClusterService._api_port(cluster)}"
         for entry in config.get("users") or []:
             entry["name"] = f"{name}-admin"
         for entry in config.get("contexts") or []:
@@ -532,8 +772,10 @@ class ClusterService:
     def start_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
-                self._set_status(db, cluster, "starting", "Starting nodes")
+                self._set_status(db, cluster, "starting",
+                                 "Starting the lab group's router" if cluster.group_id else "Starting nodes")
                 network_for(cluster).ensure()
+                self._check(task, cluster, db, 10, "Starting nodes")
                 for role in ("ctlplane", "worker"):
                     for node in cluster.nodes:
                         live = libvirt_client.get_vm(node.name)
@@ -560,6 +802,7 @@ class ClusterService:
                         if live and live["state"] == "running":
                             libvirt_client.stop_vm(name)
                     self._wait_off(task, names)
+                network_for(cluster).stop()  # auto-created group: its router too
                 self._set_status(db, cluster, "stopped", None)
                 return {"stopped": len(cluster.nodes)}
             return self._guarded(db, task, cluster_id, body)
@@ -580,7 +823,7 @@ class ClusterService:
     def _recover_token(self, db: Session, cluster: Cluster) -> None:
         """Clusters rebuilt from libvirt metadata have no token: read it from the first control plane"""
         driver = get_driver(cluster.type)
-        first = self._first_ctlplane(cluster)
+        first = self._api_node(cluster)
         try:
             out = self._exec(first.name, driver.token_command(), timeout=30)
         except (libvirt.libvirtError, TimeoutError) as e:
@@ -609,8 +852,14 @@ class ClusterService:
                 last = max((_node_index(n.name) for n in cluster.nodes if n.role == "worker"), default=-1)
                 names = self._node_names(cluster.name, 0, count, last + 1)
                 self._set_status(db, cluster, "provisioning", f"Adding {', '.join(names)}")
-                self._add_nodes(db, task, cluster, network_for(cluster), [(n, "worker") for n in names], 5, 30)
-                result = self._wait_ready(db, task, cluster, 40, 95)
+                network = network_for(cluster)
+                network.ensure()
+                added = self._add_nodes(db, task, cluster, network, [(n, "worker") for n in names], 5, 30)
+                driver = get_driver(cluster.type)
+                if driver.orchestrated:
+                    driver.bootstrap(self._ops(db, task, cluster), self._ctx(cluster),
+                                     self._node_dicts(cluster, added), initial=False)
+                result = self._wait_ready(db, task, cluster, 80 if driver.orchestrated else 40, 95)
                 cluster.spec = {**cluster.spec, "workers": sum(1 for n in cluster.nodes if n.role == "worker")}
                 self._set_status(db, cluster, "ready", None)
                 return {**result, "added": names}
@@ -630,7 +879,7 @@ class ClusterService:
                 previous = cluster.status
                 self._set_status(db, cluster, "provisioning", f"Removing {node_name}")
                 driver = get_driver(cluster.type)
-                first = self._first_ctlplane(cluster)
+                first = self._api_node(cluster)
                 drained = False
                 try:  # best effort: the cluster may be stopped
                     self._exec(first.name, driver.kubectl_command(
@@ -650,15 +899,17 @@ class ClusterService:
             return self._guarded(db, task, cluster_id, body)
         return self._run_task(db, cluster, "scale", f"Remove {node_name} from", run, node_name)
 
-    def _delete_node_resources(self, cluster: Cluster, node: ClusterNode, whole_cluster: bool = False) -> None:
-        network = network_for(cluster)
-        if not (whole_cluster and network.owned):  # an owned network goes away with the cluster anyway
+    def _delete_node_resources(self, cluster: Cluster, node: ClusterNode, whole_cluster: bool = False,
+                               network: Optional[ClusterNetwork] = None) -> None:
+        network = network or network_for(cluster)
+        if not whole_cluster:  # the whole cluster: destroy() drops everything at once
             try:
                 if node.mac:
                     network.release(node.mac)
                 if node.ip:
                     network.unpublish(node.ip)
-            except libvirt.libvirtError as e:
+                network.commit()
+            except (libvirt.libvirtError, ValueError, RuntimeError) as e:
                 logger.warning(f"Could not remove the records of {node.name} from {cluster.network}: {e}")
         libvirt_client.delete_vm(node.name, delete_disks=True)
 
@@ -669,10 +920,23 @@ class ClusterService:
             if not task_service.wait(cluster.task_id, 60):
                 raise ValueError("The cluster task did not stop in time, try again")
             db.refresh(cluster)
-        for node in list(cluster.nodes):
-            self._delete_node_resources(cluster, node, whole_cluster=True)
         network = network_for(cluster)
-        if network.owned:
+        for node in list(cluster.nodes):
+            if not network.owned and not network.fronts_api:
+                # existing libvirt network: remove the node's reservation / records one by one
+                self._delete_node_resources(cluster, node, network=network)
+            else:
+                libvirt_client.delete_vm(node.name, delete_disks=True)
+        if cluster.group_id:
+            if cluster.group_owned:
+                if group_service.get_group(db, cluster.group_id) is not None:
+                    group_service.delete_group(db, cluster.group_id, for_cluster=cluster.name)
+            else:
+                try:
+                    network.destroy()  # only the cluster's reservations / records / load balancer
+                except (ValueError, RuntimeError) as e:
+                    logger.warning(f"Could not remove cluster {cluster.name}'s entries from its group: {e}")
+        elif network.owned:
             network.destroy()
         name, cluster_id = cluster.name, cluster.id
         db.delete(cluster)
@@ -691,7 +955,7 @@ class ClusterService:
         if view not in KUBECTL_VIEWS:
             raise ValueError(f"Unknown view '{view}' ({', '.join(KUBECTL_VIEWS)})")
         driver = get_driver(cluster.type)
-        first = self._first_ctlplane(cluster)
+        first = self._api_node(cluster)
         if first is None:
             raise ValueError("The cluster has no control plane")
         argv = driver.kubectl_command(KUBECTL_VIEWS[view])

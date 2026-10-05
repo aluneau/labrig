@@ -77,7 +77,11 @@ def delete_group(
     db: Session = Depends(get_db),
 ):
     """Delete the group's VMs and network. Only libvirt objects tagged with this group are touched."""
-    if not group_service.delete_group(db, group_id, delete_disks=delete_disks):
+    try:
+        found = group_service.delete_group(db, group_id, delete_disks=delete_disks)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not found:
         raise HTTPException(status_code=404, detail="Group not found")
     return {"message": "Group deleted"}
 

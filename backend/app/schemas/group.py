@@ -22,6 +22,12 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 LABEL = r"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
+HOST_LABEL = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+# Router RAM (MiB). 512 is enough with the 1 GiB swap file cloud-init creates before installing
+# packages (dnf at first boot is the peak); see router_service.
+ROUTER_MEMORY_DEFAULT = 512
+# Ports the router itself uses: load balancers can't take them
+RESERVED_ROUTER_PORTS = {22, 53, 67, 68}
 MAC = r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$"
 DNS_NAME = re.compile(r"^(\*\.)?([A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?\.)*"
                       r"[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?\.?$")
@@ -42,6 +48,8 @@ class DNSRecord(BaseModel):
     name: str = Field(..., min_length=1, max_length=253)
     a: Optional[str] = None
     cname: Optional[str] = None
+    # Set by the app for records it manages (e.g. "cluster:k1"); users can't change those
+    owner: Optional[str] = None
 
     @field_validator("name", "cname")
     @classmethod
@@ -108,7 +116,7 @@ class RouterSpec(BaseModel):
     # Cloud image: "almalinux-9" (distribution-version) or a cloudimg-*.qcow2 volume name.
     # Default: the first ready EL image (AlmaLinux 9/10, Rocky 9, CentOS Stream).
     image: Optional[str] = None
-    memory: int = Field(1024, ge=512)  # MiB
+    memory: int = Field(ROUTER_MEMORY_DEFAULT, ge=256)  # MiB
     vcpu: int = Field(1, ge=1, le=64)
     disk_size: int = Field(10, ge=5)   # GiB
     dns: DNSSpec = DNSSpec()
@@ -119,6 +127,49 @@ class RouterSpec(BaseModel):
     ip: Optional[str] = None
     lan_mac: Optional[str] = Field(None, pattern=MAC)
     uplink_mac: Optional[str] = Field(None, pattern=MAC)
+    # Fixed address of the uplink NIC (DHCP reservation on the uplink network): how the host
+    # reaches the router's load balancers
+    uplink_ip: Optional[str] = None
+
+
+class ReservationSpec(BaseModel):
+    """A host on the group network that is not a group member (e.g. a cluster node created by the
+    cluster driver): the router gives it a static lease and the DNS name <name>.<domain>."""
+    name: str = Field(..., pattern=HOST_LABEL)
+    mac: str = Field(..., pattern=MAC)
+    ip: str
+    owner: Optional[str] = None  # "cluster:<name>": managed by the app
+
+    @field_validator("ip")
+    @classmethod
+    def _ip(cls, v: str) -> str:
+        return _ipv4(v, "Reservation IP")
+
+    @field_validator("mac", mode="before")
+    @classmethod
+    def _mac(cls, v: str) -> str:
+        return v.lower() if isinstance(v, str) else v
+
+
+class LoadBalancerSpec(BaseModel):
+    """TCP load balancer on the router (haproxy): listens on every router address (LAN and uplink)
+    on `port` and spreads connections over the healthy backends (round robin, TCP health checks)."""
+    name: str = Field(..., pattern=HOST_LABEL)
+    port: int = Field(..., ge=1, le=65535)
+    backends: List[str] = Field(..., min_length=1)  # "ip:port"
+    mode: Literal["tcp"] = "tcp"
+    owner: Optional[str] = None
+
+    @field_validator("backends")
+    @classmethod
+    def _backends(cls, v: List[str]) -> List[str]:
+        result = []
+        for backend in v:
+            host, _, port = backend.strip().rpartition(":")
+            if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError(f"Backend '{backend}' must be ip:port")
+            result.append(f"{_ipv4(host, 'Backend')}:{int(port)}")
+        return result
 
 
 class CloudInitSpec(BaseModel):
@@ -167,6 +218,11 @@ class GroupSpec(BaseModel):
     router: RouterSpec = RouterSpec()
     cloud_init: CloudInitSpec = CloudInitSpec()
     members: List[MemberSpec] = []
+    # Hosts / load balancers / DNS records with an owner are managed by the app (cluster nodes,
+    # API load balancer): kept as they are when a user replaces the spec
+    reservations: List[ReservationSpec] = []
+    load_balancers: List[LoadBalancerSpec] = []
+    owner: Optional[str] = None  # "cluster:<name>" for a group created for (and deleted with) a cluster
 
     @field_validator("cidr")
     @classmethod
@@ -194,19 +250,20 @@ class GroupSpec(BaseModel):
         if not self.domain:
             self.domain = f"{self.name}.lab"
         net = ipaddress.IPv4Network(self.cidr)
-        names = [m.name for m in self.members]
+        names = [m.name for m in self.members] + [r.name for r in self.reservations]
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
-            raise ValueError(f"Duplicate member names: {', '.join(sorted(dupes))}")
+            raise ValueError(f"Duplicate member / reserved host names: {', '.join(sorted(dupes))}")
         if "router" in names:
             raise ValueError("'router' is reserved for the group's router")
-        for label, ip in [("Router IP", self.router.ip)] + [(f"Member {m.name} IP", m.ip) for m in self.members]:
+        for label, ip in ([("Router IP", self.router.ip)] + [(f"Member {m.name} IP", m.ip) for m in self.members]
+                          + [(f"Reserved host {r.name} IP", r.ip) for r in self.reservations]):
             if ip is None:
                 continue
             addr = ipaddress.IPv4Address(ip)
             if addr not in net or addr in (net.network_address, net.broadcast_address):
                 raise ValueError(f"{label} {ip} is not a usable address of {net}")
-        ips = [m.ip for m in self.members if m.ip]
+        ips = [m.ip for m in self.members if m.ip] + [r.ip for r in self.reservations]
         if self.router.ip:
             ips.append(self.router.ip)
         dupes = {ip for ip in ips if ips.count(ip) > 1}
@@ -222,6 +279,20 @@ class GroupSpec(BaseModel):
         dupes = {r for r in records if records.count(r) > 1}
         if dupes:
             raise ValueError(f"Duplicate DNS records: {', '.join(sorted(dupes))}")
+        macs = [m.mac for m in self.members if m.mac] + [r.mac for r in self.reservations]
+        dupes = {m for m in macs if macs.count(m) > 1}
+        if dupes:
+            raise ValueError(f"Duplicate MACs: {', '.join(sorted(dupes))}")
+        lb_names = [lb.name for lb in self.load_balancers]
+        lb_ports = [lb.port for lb in self.load_balancers]
+        if len(set(lb_names)) != len(lb_names):
+            raise ValueError("Duplicate load balancer names")
+        dupes = {str(p) for p in lb_ports if lb_ports.count(p) > 1}
+        if dupes:
+            raise ValueError(f"Several load balancers on port {', '.join(sorted(dupes))}")
+        reserved = sorted(str(p) for p in set(lb_ports) & RESERVED_ROUTER_PORTS)
+        if reserved:
+            raise ValueError(f"Port {', '.join(reserved)} is used by the router itself")
         return self
 
 
@@ -266,12 +337,31 @@ class Group(BaseModel):
     router: GroupMemberInfo
     members: List[GroupMemberInfo] = []
     member_count: int = 0
+    hosts: List[GroupHostInfo] = []        # reserved hosts (cluster nodes)
+    clusters: List[GroupClusterRef] = []   # clusters whose nodes live in this group
     config_applied: bool = False
     config_applied_at: Optional[datetime] = None
     config_error: Optional[str] = None
     spec: GroupSpec
     created_at: datetime
     updated_at: datetime
+
+
+class GroupHostInfo(BaseModel):
+    """A reserved host (not a member), e.g. a cluster node"""
+    name: str
+    ip: str
+    mac: str
+    owner: Optional[str] = None
+    fqdn: Optional[str] = None
+    vm_id: Optional[int] = None
+    state: str = "missing"
+
+
+class GroupClusterRef(BaseModel):
+    id: int
+    name: str
+    type: str
 
 
 class GroupDetail(Group):
