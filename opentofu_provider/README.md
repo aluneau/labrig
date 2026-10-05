@@ -60,6 +60,24 @@ Computed: `id`, `bridge`, `active`. Settings changes restart the network.
 
 Computed: `id`, `uuid`, `status`, `ip_addresses`, `vnc_port`. Destroy deletes the VM's disks.
 
+### `vmmanager_group`
+A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS, NAT), members `<name>-<member>`.
+| Argument | | |
+|---|---|---|
+| `name`, `cidr` | required, replace | router = first address of `cidr` |
+| `uplink` | `default`, replace | libvirt network for the router's internet access |
+| `router_image`, `router_memory` | first ready EL image, 1024, replace | e.g. `almalinux-9` |
+| `cloud_init` | optional, replace | `{username, password, ssh_keys, keyboard}` for router and members |
+| `domain` | `<name>.lab`, in place | |
+| `dns_forwarders` | uplink's DNS, in place | |
+| `member` blocks | in place | `name`, `image` (`debian-13`), `memory` (1024), `vcpu` (1), `disk_size` (10), `role`, `ip` (assigned if unset). Added/removed live; changing image/size recreates that member |
+| `dns_record` blocks | in place, live | `name` (relative to `domain`, `*.x` wildcards), `a` or `cname` |
+| `running` | `true`, in place | start (router first) / stop (router last) |
+
+Computed: `id`, `network_name`, `router_ip`, `router_vm_id`, `member_ips`, `member_macs`, `member_vm_ids`
+(maps keyed by member name). Creation waits for the router's first boot (~1 min). Destroy deletes the
+group's VMs, disks and network.
+
 All resources support `tofu import <address> <id>` (ids are the API ids).
 
 ## Development
@@ -69,4 +87,8 @@ make build && make test   # go vet
 ```
 
 Code: `internal/provider/` (`client.go` HTTP client + API payloads, one file per resource).
-Example: `examples/opentofu/lab`.
+Examples: `examples/opentofu/lab`, `examples/opentofu/group`.
+
+To try a provider build without touching the installed one, use a CLI config with
+`provider_installation { dev_overrides { "local/vmmanager" = "<this dir>" } direct {} }` and
+`TF_CLI_CONFIG_FILE=<that file> tofu plan` (no `tofu init` needed).
