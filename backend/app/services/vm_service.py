@@ -33,6 +33,8 @@ class VMService:
             if vm.uuid not in libvirt_vms:
                 db.query(Volume).filter(Volume.vm_id == vm.id).update({Volume.vm_id: None})
                 db.delete(vm)
+        # Deletes first: a VM recreated outside this app has the same name with a new UUID
+        db.flush()
 
         for lv_vm in libvirt_vms.values():
             vm = db.query(VM).filter(VM.uuid == lv_vm["uuid"]).first()

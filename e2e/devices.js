@@ -129,6 +129,7 @@ const ssh = (cmd) => execFileSync('ssh', ['-i', key, '-o', 'StrictHostKeyCheckin
     await page.screenshot({ path: 'devices-boot-once.png', fullPage: true });
     check(true, 'boot once flag set from the UI');
     await api('POST', `/vms/${vm.id}/force_stop`);
+    await until('shut off', async () => (await detail()).status === 'shutoff', 20000);
     await page.goto(`${BASE}/vms/${vm.id}/console`);
     await page.getByRole('button', { name: 'Start' }).first().click();
     await page.locator('.vnc-screen canvas').waitFor({ timeout: 20000 });

@@ -766,7 +766,17 @@ class LibvirtClient:
 
     def refresh_pool(self, pool_name: str) -> None:
         """Rescan a pool (picks up the real format of uploaded images)"""
-        self.connect().storagePoolLookupByName(pool_name).refresh(0)
+        pool = self.connect().storagePoolLookupByName(pool_name)
+        # Refused while another volume job (e.g. a cloud image clone) runs in the pool: retry
+        for attempt in range(30):
+            try:
+                pool.refresh(0)
+                return
+            except libvirt.libvirtError as e:
+                if attempt == 29:
+                    logger.warning(f"Could not refresh pool {pool_name}: {e}")
+                    return
+                time.sleep(2)
 
     def clone_volume(self, pool_name: str, source_path: str, name: str, capacity: int) -> str:
         """Full qcow2 copy of source_path, grown to at least capacity bytes; returns its path"""
