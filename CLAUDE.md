@@ -62,7 +62,10 @@ e2e/                  Playwright browser tests against the real app (see below)
   polling is only a slow safety net. DHCP leases have no events (NetworkDetail polls every 10 s).
 - **VNC**: VM consoles listen on 127.0.0.1 (`VNC_LISTEN`); the browser connects through the
   `/api/v1/vms/{id}/vnc` WebSocket bridge. noVNC sends scancodes, so the guest keyboard layout matters
-  (cloud-init `keyboard` option, defaults to the browser locale).
+  (cloud-init `keyboard` option, defaults to the browser locale). Scaling is ours (`consoleScale` in
+  VncConsole hooks noVNC's `Display.autoscale/_rescale`): nearest-neighbour + snap to whole device pixels
+  whenever not downscaling, smooth only when shrinking; noVNC's fractional smooth fit dimmed 1-px console
+  glyphs by ~20%. "1:1" toolbar toggle (remembered per browser). The Linux tty itself is grey #AAAAAA on black.
 - New VMs: q35, host-passthrough, virtio, no `<emulator>` (libvirt picks it), disks in the `default`
   pool (`/var/lib/libvirt/images`, created if missing). Cloud-image VMs get a full copy of the image
   plus `<name>-cidata.iso` (NoCloud seed, built with pycdlib); delete with `delete_disks` removes both.
@@ -98,6 +101,11 @@ e2e/                  Playwright browser tests against the real app (see below)
   guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
   permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp, wireguard,
   vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
+  Members (`MemberSpec`) have `source`: `cloud_image` (default, `image` + cloud-init) | `iso` (`iso` = volume
+  path or name) | `empty`; the last two get no seed, only the MAC reservation + DNS name. Both the quick
+  "Add member" form and CreateVMModal in group mode (`group` prop, or its "Lab group" select) POST a
+  MemberSpec to `/groups/{id}/members`; new members are pre-checked (VM name free, <= 64 chars) and dropped
+  from the spec again if their VM can't be created.
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 
@@ -136,6 +144,7 @@ cd backend && venv/bin/python -c "import app.main"            # backend imports
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
 node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
+node console.js                                                 # console fidelity: virsh screenshot vs canvas vs page, several viewports/DPRs
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 KUBECTL=… node clusters.js                                      # k3s: create, host kubectl, copy-paste kubectl commands in bash + fish, stop/start, delete
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete

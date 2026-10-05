@@ -39,6 +39,7 @@ import { errorText, formatMiB } from '../utils/format';
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
+import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
 import { groupStatus } from './GroupsPage';
 
 const STATE_COLORS: Record<string, string> = {
@@ -153,9 +154,9 @@ const Topology: React.FC<{ group: GroupDetail; onOpen: (m: GroupMemberInfo) => v
 
 // Members tab
 
-const AddMemberForm: React.FC<{ groupId: number; images: CloudImage[]; onDone: (msg: string) => void; onError: (msg: string) => void }> = ({
-  groupId, images, onDone, onError,
-}) => {
+const AddMemberForm: React.FC<{
+  groupId: number; images: CloudImage[]; onDone: (msg: string) => void; onError: (msg: string) => void; disabled?: boolean;
+}> = ({ groupId, images, onDone, onError, disabled }) => {
   const [name, setName] = useState('');
   const [image, setImage] = useState('');
   const [memory, setMemory] = useState('1');
@@ -164,10 +165,11 @@ const AddMemberForm: React.FC<{ groupId: number; images: CloudImage[]; onDone: (
     if (!image && images.length) setImage(imageSlug(images.find((i) => i.distribution === 'debian') || images[0]));
   }, [images, image]);
 
+  const nameValid = MEMBER_NAME_RE.test(name.trim());
   const submit = async () => {
     setBusy(true);
     try {
-      await groupApi.addMember(groupId, { name, image, memory: Math.round(Number(memory) * 1024) });
+      await groupApi.addMember(groupId, { name: name.trim(), image, memory: Math.round(Number(memory) * 1024) });
       onDone(`Member ${name} added`);
       setName('');
     } catch (err) {
@@ -180,7 +182,12 @@ const AddMemberForm: React.FC<{ groupId: number; images: CloudImage[]; onDone: (
   return (
     <Form isHorizontal={false} onSubmit={(e) => { e.preventDefault(); submit(); }}>
       <Flex alignItems={{ default: 'alignItemsFlexEnd' }}>
-        <FlexItem><FormGroup label="Name" fieldId="am-name"><TextInput id="am-name" value={name} onChange={(_e, v) => setName(v)} /></FormGroup></FlexItem>
+        <FlexItem>
+          <FormGroup label="Name" fieldId="am-name">
+            <TextInput id="am-name" value={name} onChange={(_e, v) => setName(v)} placeholder="web1"
+              validated={name && !nameValid ? 'error' : 'default'} aria-describedby="am-name-help" />
+          </FormGroup>
+        </FlexItem>
         <FlexItem>
           <FormGroup label="Image" fieldId="am-image">
             <FormSelect id="am-image" value={image} onChange={(_e, v) => setImage(v)}>
@@ -189,8 +196,14 @@ const AddMemberForm: React.FC<{ groupId: number; images: CloudImage[]; onDone: (
           </FormGroup>
         </FlexItem>
         <FlexItem><FormGroup label="Memory (GiB)" fieldId="am-mem"><TextInput id="am-mem" type="number" value={memory} onChange={(_e, v) => setMemory(v)} style={{ width: 90 }} /></FormGroup></FlexItem>
-        <FlexItem><Button type="submit" isDisabled={!name || busy} isLoading={busy}>Add member</Button></FlexItem>
+        <FlexItem><Button type="submit" isDisabled={!nameValid || !image || !(Number(memory) > 0) || busy || disabled} isLoading={busy}>Add member</Button></FlexItem>
       </Flex>
+      {name && !nameValid && (
+        <div id="am-name-help" style={{ color: 'var(--pf-v5-global--danger-color--100)', fontSize: 14 }}>
+          Lowercase letters, digits and '-' (max 32), also the member's hostname.
+        </div>
+      )}
+      {!images.length && <div style={{ fontSize: 14 }}>No cloud image downloaded: get one on the Storage page, or use "Custom VM…" with an ISO.</div>}
     </Form>
   );
 };
@@ -331,6 +344,7 @@ export const GroupDetailPage: React.FC = () => {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteDisks, setDeleteDisks] = useState(true);
   const [toRemove, setToRemove] = useState<string | null>(null);
+  const [customOpen, setCustomOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const deleting = useRef(false);  // VM events during a delete would reload a vanishing group
@@ -369,6 +383,7 @@ export const GroupDetailPage: React.FC = () => {
   if (!group) return error ? <PageSection><Alert variant="danger" isInline title={error} /></PageSection> : <Bullseye><Spinner size="xl" /></Bullseye>;
 
   const transitional = !['ready', 'error', 'missing'].includes(group.status);
+  const powerBusy = busy || transitional || progress !== null;  // a start/stop task is still running
   const power = async (action: 'start' | 'stop') => {
     setBusy(true);
     try {
@@ -399,8 +414,8 @@ export const GroupDetailPage: React.FC = () => {
             </div>
           </FlexItem>
           <FlexItem align={{ default: 'alignRight' }}>
-            <Button variant="secondary" onClick={() => power('start')} isDisabled={busy || transitional || group.state === 'running'} style={{ marginRight: 8 }}>Start</Button>
-            <Button variant="secondary" onClick={() => power('stop')} isDisabled={busy || transitional || group.state === 'stopped'} style={{ marginRight: 8 }}>Stop</Button>
+            <Button variant="secondary" onClick={() => power('start')} isDisabled={powerBusy || group.state === 'running'} style={{ marginRight: 8 }}>Start</Button>
+            <Button variant="secondary" onClick={() => power('stop')} isDisabled={powerBusy || group.state === 'stopped'} style={{ marginRight: 8 }}>Stop</Button>
             <Button variant="danger" onClick={() => setConfirmDelete(true)} isDisabled={group.status === 'deleting'}>Delete</Button>
           </FlexItem>
         </Flex>
@@ -437,8 +452,13 @@ export const GroupDetailPage: React.FC = () => {
                 </Tbody>
               </Table>
               <ClusterEntries group={group} />
-              <Title headingLevel="h3" size="md" style={{ margin: '24px 0 8px' }}>Add a member</Title>
-              <AddMemberForm groupId={group.id} images={images} onDone={onDone} onError={onError} />
+              <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ margin: '24px 0 8px' }}>
+                <FlexItem><Title headingLevel="h3" size="md">Add a member</Title></FlexItem>
+                <FlexItem>
+                  <Button variant="secondary" onClick={() => setCustomOpen(true)} isDisabled={transitional}>Custom VM…</Button>
+                </FlexItem>
+              </Flex>
+              <AddMemberForm groupId={group.id} images={images} onDone={onDone} onError={onError} disabled={transitional} />
             </PageSection>
           </Tab>
 
@@ -522,6 +542,8 @@ export const GroupDetailPage: React.FC = () => {
         <p>Deletes the router, the {group.member_count} member VM(s) and the network {group.network_name}. VMs outside the group are never touched.</p>
         <Checkbox id="g-delete-disks" label="Also delete their disks" isChecked={deleteDisks} onChange={(_e, v) => setDeleteDisks(v)} style={{ marginTop: 12 }} />
       </ConfirmModal>
+      <CreateVMModal isOpen={customOpen} group={group} onClose={() => setCustomOpen(false)}
+        onCreated={(msg) => onDone(msg || 'Member added')} />
       <ConfirmModal title={`Remove member ${toRemove}?`} isOpen={!!toRemove} confirmLabel="Remove"
         onConfirm={async () => {
           try {
