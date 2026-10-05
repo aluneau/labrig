@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -32,13 +33,25 @@ const (
 type groupResource struct{ client *Client }
 
 type groupMemberModel struct {
-	Name     types.String `tfsdk:"name"`
-	Image    types.String `tfsdk:"image"`
-	Memory   types.Int64  `tfsdk:"memory"`
-	VCPU     types.Int64  `tfsdk:"vcpu"`
-	DiskSize types.Int64  `tfsdk:"disk_size"`
-	Role     types.String `tfsdk:"role"`
-	IP       types.String `tfsdk:"ip"`
+	Name      types.String          `tfsdk:"name"`
+	Source    types.String          `tfsdk:"source"`
+	Image     types.String          `tfsdk:"image"`
+	ISO       types.String          `tfsdk:"iso"`
+	Memory    types.Int64           `tfsdk:"memory"`
+	VCPU      types.Int64           `tfsdk:"vcpu"`
+	DiskSize  types.Int64           `tfsdk:"disk_size"`
+	Role      types.String          `tfsdk:"role"`
+	IP        types.String          `tfsdk:"ip"`
+	CloudInit *memberCloudInitModel `tfsdk:"cloud_init"`
+	UserData  types.String          `tfsdk:"user_data"`
+}
+
+// Per-member login, replacing the group's cloud_init for that member (cloud_image members only)
+type memberCloudInitModel struct {
+	Username types.String `tfsdk:"username"`
+	Password types.String `tfsdk:"password"`
+	SSHKeys  types.List   `tfsdk:"ssh_keys"`
+	Keyboard types.String `tfsdk:"keyboard"`
 }
 
 type dnsRecordModel struct {
@@ -78,13 +91,17 @@ type groupModel struct {
 // API payloads
 
 type apiGroupMemberSpec struct {
-	Name     string  `json:"name"`
-	Image    string  `json:"image"`
-	Memory   int64   `json:"memory"`
-	VCPU     int64   `json:"vcpu"`
-	DiskSize int64   `json:"disk_size"`
-	Role     string  `json:"role"`
-	IP       *string `json:"ip,omitempty"`
+	Name      string         `json:"name"`
+	Source    string         `json:"source,omitempty"`
+	Image     *string        `json:"image"`
+	ISO       *string        `json:"iso,omitempty"`
+	Memory    int64          `json:"memory"`
+	VCPU      int64          `json:"vcpu"`
+	DiskSize  int64          `json:"disk_size"`
+	Role      string         `json:"role"`
+	IP        *string        `json:"ip,omitempty"`
+	CloudInit map[string]any `json:"cloud_init,omitempty"`
+	UserData  *string        `json:"user_data,omitempty"`
 }
 
 type apiDNSRecord struct {
@@ -191,7 +208,7 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"password":  schema.StringAttribute{Optional: true, Sensitive: true},
 					"ssh_keys":  schema.ListAttribute{Optional: true, ElementType: types.StringType},
 					"keyboard":  schema.StringAttribute{Optional: true},
-					"user_data": schema.StringAttribute{Optional: true, Description: "Not supported for groups (use per-member settings later)."},
+					"user_data": schema.StringAttribute{Optional: true, Description: "Not supported at group level: use user_data in a member block."},
 				},
 			},
 			"running":       schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Start (router first) or stop (router last) the whole group."},
@@ -204,10 +221,27 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		},
 		Blocks: map[string]schema.Block{
 			"member": schema.ListNestedBlock{
-				Description: "A member VM (cloud image + cloud-init), reachable as <name>.<domain>.",
+				Description: "A member VM, reachable as <name>.<domain> with a fixed IP from the router. From a cloud image " +
+					"(cloud-init), or booted from an ISO / an empty disk (no cloud-init: the installed OS gets its reserved " +
+					"address by DHCP). Changing source, image, iso, size, role, cloud_init or user_data recreates that member.",
 				NestedObject: schema.NestedBlockObject{Attributes: map[string]schema.Attribute{
-					"name":      schema.StringAttribute{Required: true},
-					"image":     schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("debian-13")},
+					"name": schema.StringAttribute{Required: true},
+					"source": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("cloud_image"),
+						Description: "cloud_image, iso or empty."},
+					"image": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("debian-13"),
+						Description: "Cloud image (source = cloud_image), e.g. debian-13, almalinux-9."},
+					"iso": schema.StringAttribute{Optional: true,
+						Description: "ISO volume name or path (source = iso; see GET /storage/isos)."},
+					"cloud_init": schema.SingleNestedAttribute{Optional: true,
+						Description: "Login for this member instead of the group's cloud_init (source = cloud_image).",
+						Attributes: map[string]schema.Attribute{
+							"username": schema.StringAttribute{Optional: true},
+							"password": schema.StringAttribute{Optional: true, Sensitive: true},
+							"ssh_keys": schema.ListAttribute{Optional: true, ElementType: types.StringType},
+							"keyboard": schema.StringAttribute{Optional: true},
+						}},
+					"user_data": schema.StringAttribute{Optional: true,
+						Description: "Raw #cloud-config for this member, replacing the generated one (source = cloud_image)."},
 					"memory":    schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(1024), Description: "MiB."},
 					"vcpu":      schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(1)},
 					"disk_size": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(10), Description: "GiB."},
@@ -276,10 +310,24 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 	}
 	s.Members = []apiGroupMemberSpec{}
 	for _, mem := range m.Members {
-		s.Members = append(s.Members, apiGroupMemberSpec{
-			Name: mem.Name.ValueString(), Image: mem.Image.ValueString(), Memory: mem.Memory.ValueInt64(),
-			VCPU: mem.VCPU.ValueInt64(), DiskSize: mem.DiskSize.ValueInt64(), Role: mem.Role.ValueString(), IP: strPtr(mem.IP),
-		})
+		spec := apiGroupMemberSpec{
+			Name: mem.Name.ValueString(), Source: mem.Source.ValueString(), Memory: mem.Memory.ValueInt64(),
+			VCPU: mem.VCPU.ValueInt64(), DiskSize: mem.DiskSize.ValueInt64(), Role: mem.Role.ValueString(),
+			IP: strPtr(mem.IP), ISO: strPtr(mem.ISO), UserData: strPtr(mem.UserData),
+		}
+		if spec.Source == "" || spec.Source == "cloud_image" {
+			spec.Image = strPtr(mem.Image) // the server clears image for iso / empty members
+		}
+		if ci := mem.CloudInit; ci != nil {
+			c := map[string]any{"username": strPtr(ci.Username), "password": strPtr(ci.Password), "keyboard": strPtr(ci.Keyboard)}
+			keys := []string{}
+			if !ci.SSHKeys.IsNull() && !ci.SSHKeys.IsUnknown() {
+				ci.SSHKeys.ElementsAs(context.Background(), &keys, false)
+			}
+			c["ssh_keys"] = keys
+			spec.CloudInit = c
+		}
+		s.Members = append(s.Members, spec)
 	}
 	return s
 }
@@ -382,8 +430,10 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 
 	// Members: IPs only kept in the block when they were set in the config (else computed in member_ips)
 	userIP := map[string]bool{}
+	prior := map[string]groupMemberModel{}
 	for _, mem := range m.Members {
 		userIP[mem.Name.ValueString()] = !mem.IP.IsNull()
+		prior[mem.Name.ValueString()] = mem
 	}
 	byName := map[string]apiGroupMember{}
 	for _, mem := range g.Members {
@@ -393,9 +443,50 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 	ips, macs, vmIDs := map[string]string{}, map[string]string{}, map[string]string{}
 	for _, s := range g.Spec.Members {
 		mm := groupMemberModel{
-			Name: types.StringValue(s.Name), Image: types.StringValue(s.Image), Memory: types.Int64Value(s.Memory),
+			Name: types.StringValue(s.Name), Memory: types.Int64Value(s.Memory),
 			VCPU: types.Int64Value(s.VCPU), DiskSize: types.Int64Value(s.DiskSize), Role: types.StringValue(s.Role),
-			IP: types.StringNull(),
+			IP: types.StringNull(), ISO: types.StringNull(), UserData: types.StringNull(),
+		}
+		mm.Source = types.StringValue("cloud_image")
+		if s.Source != "" {
+			mm.Source = types.StringValue(s.Source)
+		}
+		prev, known := prior[s.Name]
+		switch {
+		case s.Image != nil:
+			mm.Image = types.StringValue(*s.Image)
+		case known: // iso / empty member: the server clears image, keep the configured (default) value
+			mm.Image = prev.Image
+		default:
+			mm.Image = types.StringValue("debian-13")
+		}
+		if s.ISO != nil {
+			mm.ISO = types.StringValue(*s.ISO)
+			// The server stores the resolved volume path: keep the name the config used for it
+			if known && !prev.ISO.IsNull() && (prev.ISO.ValueString() == *s.ISO || strings.HasSuffix(*s.ISO, "/"+prev.ISO.ValueString())) {
+				mm.ISO = prev.ISO
+			}
+		}
+		if s.UserData != nil {
+			mm.UserData = types.StringValue(*s.UserData)
+		}
+		if s.CloudInit != nil {
+			if known && prev.CloudInit != nil {
+				mm.CloudInit = prev.CloudInit // the server keeps what was sent (password included)
+			} else {
+				ci := &memberCloudInitModel{Username: optString(s.CloudInit["username"]), Password: optString(s.CloudInit["password"]),
+					Keyboard: optString(s.CloudInit["keyboard"]), SSHKeys: types.ListNull(types.StringType)}
+				if keys, ok := s.CloudInit["ssh_keys"].([]any); ok && len(keys) > 0 {
+					vals := []string{}
+					for _, k := range keys {
+						if ks, ok := k.(string); ok {
+							vals = append(vals, ks)
+						}
+					}
+					ci.SSHKeys, _ = types.ListValueFrom(context.Background(), types.StringType, vals)
+				}
+				mm.CloudInit = ci
+			}
 		}
 		if userIP[s.Name] && s.IP != nil {
 			mm.IP = types.StringValue(*s.IP)
@@ -488,4 +579,12 @@ func (r *groupResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 
 func (r *groupResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// optString maps a JSON value (string or null) to a types.String
+func optString(v any) types.String {
+	if str, ok := v.(string); ok {
+		return types.StringValue(str)
+	}
+	return types.StringNull()
 }

@@ -36,15 +36,16 @@ Computed: `id`, `path`, `size`. An already downloaded image is adopted. Download
 | Argument | | |
 |---|---|---|
 | `name` | required, replace | |
-| `mode` | `nat` | `nat`, `route`, `open`, `isolated` |
-| `forward_dev`, `domain` | optional | |
+| `mode` | `nat` | `nat`, `route`, `open`, `isolated`, `hostdev` (SR-IOV VF pool) |
+| `forward_dev`, `domain` | optional | `hostdev`: `forward_dev` = the SR-IOV physical function (required); no address/DHCP/domain/`dhcp_hosts` (rejected at plan time) |
 | `ip_address`, `prefix` | optional | host address and prefix length |
 | `dhcp_enabled` | `true` | |
 | `dhcp_start`, `dhcp_end` | optional | server picks the whole subnet if unset |
 | `autostart` | `true` | |
 | `dhcp_hosts` | optional set of `{mac, ip, name}` | static reservations, applied live |
 
-Computed: `id`, `bridge`, `active`. Settings changes restart the network.
+Computed: `id`, `bridge`, `active`. Settings changes restart the network. Switching to/from `hostdev`, or a pool's
+`forward_dev`, replaces the network. VMs get a VF with a `vmmanager_nic` on the pool (see `docs/sriov.md`).
 
 ### `vmmanager_vm`
 | Argument | | |
@@ -98,7 +99,7 @@ A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS,
 | `cloud_init` | optional, replace | `{username, password, ssh_keys, keyboard}` for router and members |
 | `domain` | `<name>.lab`, in place | |
 | `dns_forwarders` | uplink's DNS, in place | |
-| `member` blocks | in place | `name`, `image` (`debian-13`), `memory` (1024), `vcpu` (1), `disk_size` (10), `role`, `ip` (assigned if unset). Added/removed live; changing image/size recreates that member |
+| `member` blocks | in place | `name`, `source` (`cloud_image` / `iso` / `empty`), `image` (`debian-13`, cloud_image), `iso` (ISO volume name or path), `memory` (1024), `vcpu` (1), `disk_size` (10; 0 allowed for iso), `role`, `ip` (assigned if unset), `cloud_init` (`{username, password, ssh_keys, keyboard}` for this member instead of the group's), `user_data` (raw #cloud-config). Added/removed live; changing anything but `ip` recreates that member only. ISO/empty members get no cloud-init, only their reservation + DNS name |
 | `dns_record` blocks | in place, live | `name` (relative to `domain`, `*.x` wildcards), `a` or `cname` |
 | `dhcp_host` blocks | in place, live | static reservation for a non-member machine (e.g. a `vmmanager_vm` on `network_name`): `mac`, `ip` (in `cidr`, not the router's/a member's), optional `hostname` (→ `<hostname>.<domain>`) |
 | `running` | `true`, in place | start (router first) / stop (router last) |
