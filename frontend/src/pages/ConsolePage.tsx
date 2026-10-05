@@ -13,7 +13,7 @@ import {
   Title,
   ToolbarGroup,
 } from '@patternfly/react-core';
-import { ExpandIcon, KeyboardIcon, PowerOffIcon, PlayIcon, RedoIcon, SyncAltIcon } from '@patternfly/react-icons';
+import { CompressIcon, ExpandArrowsAltIcon, ExpandIcon, KeyboardIcon, PowerOffIcon, PlayIcon, RedoIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { DeviceChange, VMDetail } from '../types';
 import { CdromControl } from '../components/vms/VmDevices';
 import { vmApi, vncUrl } from '../services/api';
@@ -21,7 +21,16 @@ import { useLiveEvents } from '../hooks/useEvents';
 import { PENDING_LABELS, useVmPower } from '../hooks/useVmPower';
 import { errorText } from '../utils/format';
 import { StatusLabel } from '../components/common/StatusLabel';
-import { VncConsole, VncConsoleHandle, VncStatus } from '../components/console/VncConsole';
+import { VncConsole, VncConsoleHandle, VncScaling, VncStatus } from '../components/console/VncConsole';
+
+const SCALING_KEY = 'vm-manager.console-scaling';
+const savedScaling = (): VncScaling => {
+  try {
+    return localStorage.getItem(SCALING_KEY) === 'native' ? 'native' : 'fit';
+  } catch {
+    return 'fit';
+  }
+};
 
 export const ConsolePage: React.FC = () => {
   const vmId = Number(useParams().id);
@@ -30,6 +39,12 @@ export const ConsolePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [vncStatus, setVncStatus] = useState<VncStatus>('disconnected');
   const consoleRef = useRef<VncConsoleHandle>(null);
+  const [scaling, setScaling] = useState<VncScaling>(savedScaling);
+  const toggleScaling = () => {
+    const next: VncScaling = scaling === 'fit' ? 'native' : 'fit';
+    setScaling(next);
+    try { localStorage.setItem(SCALING_KEY, next); } catch { /* per-browser convenience only */ }
+  };
   const { pending, run, onVmEvent } = useVmPower(setError);
 
   useEffect(() => {
@@ -88,6 +103,11 @@ export const ConsolePage: React.FC = () => {
                     isDisabled={vncStatus !== 'connected'} style={{ marginRight: 8 }}>
                     Fullscreen
                   </Button>
+                  <Button variant="secondary" icon={scaling === 'fit' ? <CompressIcon /> : <ExpandArrowsAltIcon />} onClick={toggleScaling}
+                    title={scaling === 'fit' ? 'Showing the guest screen scaled to the window: switch to 1 guest pixel = 1 pixel (sharpest, may scroll)' : 'Showing the guest screen at 1:1: switch to scale to the window'}
+                    style={{ marginRight: 8 }}>
+                    {scaling === 'fit' ? '1:1' : 'Fit'}
+                  </Button>
                   <Button variant="secondary" icon={<SyncAltIcon />} onClick={() => consoleRef.current?.reconnect()} style={{ marginRight: 8 }}>
                     Reconnect
                   </Button>
@@ -116,6 +136,7 @@ export const ConsolePage: React.FC = () => {
           ref={consoleRef}
           url={vncUrl(vm.id)}
           enabled={running}
+          scaling={scaling}
           onStatus={setVncStatus}
           disabledMessage={
             <>
