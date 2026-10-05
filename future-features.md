@@ -17,13 +17,14 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | Console fidelity (VNC looked dark) | ✅ done: sharp scaling, 1:1/Fit toggle (§1.7) |
 | §2 Lab groups v1 + static reservations + custom (ISO/empty) members | ✅ done; v2 items open (§2.5) |
 | §3.2 k3s (standalone network) and kubeadm (in a lab group, router haproxy) | ✅ done |
+| Lab remote access: WireGuard on the group router, laptop joins a lab (docs/wireguard.md) | ✅ done |
 | §3.3 OpenShift SNO (agent-based installer) | **next** |
 | Authentication, CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
-`source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`), `_cluster` (k3s, kubeadm,
-`group_id`). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
+`source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`, `wireguard`),
+`_wireguard_peer`, `_cluster` (k3s, kubeadm, `group_id`). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
 
 ---
 
@@ -174,9 +175,19 @@ guest's own grey-on-black text console (not changed: it would alter reproduced c
 > members with fixed MACs/static leases/DNS names + DNS records (A, CNAME, wildcard), live updates through
 > the guest agent, start/stop ordering, delete (keep or delete disks), DB rebuild from libvirt metadata,
 > Groups UI (topology, members, network & DNS, router config, export), `vmmanager_group`, `e2e/groups.js`.
-> Not yet: FRR/BGP, WireGuard, VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
+> Not yet: FRR/BGP, VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
 > flavour, groups without uplink (the EL router installs its packages at first boot), snapshots, templates,
 > export with disks, per-group autostart, `group_id` on `vmmanager_vm`.
+>
+> **Remote access (WireGuard) — ✅ done** (2026-10): `router.wireguard` ("road warrior"): wg0 on the EL router
+> (key pair generated on the router), tunnel /24 from `WG_SUBNET_POOL`, devices = `peers` (public key + tunnel
+> IP, added/removed live with `wg syncconf`), dnsmasq answers on the tunnel. The host reaches the router's
+> NATed uplink through a UDP relay in the app (`WG_HOST_PORTS`, one port per group): libvirt rejects inbound
+> connections to NAT networks and rewrites its rules on every restart, so no DNAT / root. Client config
+> (split tunnel: group CIDR + tunnel + router uplink /32 for LBs / kubeadm API) as file + QR code; Remote access
+> tab, `vmmanager_wireguard_peer`, `e2e/wireguard.js`, docs/wireguard.md. Not yet: site-to-site between groups
+> / hosts (peers with `endpoint` + `allowed_ips` are rendered but have no UI), IPv6, a kernel-path forward for
+> high throughput.
 >
 > **Static reservations for non-members — ✅ done** (2026-10): `spec.dhcp_hosts: [{mac, ip, hostname?}]`
 > for machines attached to `vmm-g-<name>` that aren't members (a VM created from the VMs page, an appliance

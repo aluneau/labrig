@@ -61,7 +61,7 @@ func (p *vmManagerProvider) Configure(ctx context.Context, req provider.Configur
 }
 
 func (p *vmManagerProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{NewCloudImageResource, NewNetworkResource, NewVMResource, NewDiskResource, NewNicResource, NewGroupResource, NewClusterResource}
+	return []func() resource.Resource{NewCloudImageResource, NewNetworkResource, NewVMResource, NewDiskResource, NewNicResource, NewGroupResource, NewClusterResource, NewWireGuardPeerResource}
 }
 
 func (p *vmManagerProvider) DataSources(_ context.Context) []func() datasource.DataSource {

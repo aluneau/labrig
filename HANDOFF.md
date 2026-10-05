@@ -45,7 +45,7 @@ group-dhcp clusters kubeadm` (+ `scripts/check-python.py`, backend import, `tsc`
 
 - **No authentication.** Listens on 127.0.0.1 by default; needed before `--listen 0.0.0.0` on shared machines.
 - An existing VM's CPU/memory can't be edited. One-shot boot only applies to starts through the app.
-- Groups: no FRR/BGP, WireGuard, VLANs, VyOS, snapshots, templates, export with disks; no group without an
+- Groups: no FRR/BGP, VLANs, VyOS, snapshots, templates, export with disks; no group without an
   uplink (the router installs packages at first boot); empty-disk members boot nothing without an ISO (no PXE).
   `missing` groups (network deleted outside the app) are kept as records; they no longer block the name/subnet.
 - Clusters: k3s with 3 control planes points `api` at ctlplane-0 only. kubeadm: no upgrades, etcd backups or
@@ -73,7 +73,7 @@ its own scratch dir.
 2. **OpenShift SNO** with the agent-based installer (future-features §3.3) in a lab group: reuse
    `GroupClusterNetwork`, owned DNS records (incl. `*.apps`), router `load_balancers`, ISO + boot order.
    Then compact 3-node, OKD, disconnected.
-3. Groups v2 (§2.5): no-uplink groups (needed for disconnected OpenShift), BGP/WireGuard/VLANs, snapshots,
+3. Groups v2 (§2.5): no-uplink groups (needed for disconnected OpenShift), BGP/VLANs, site-to-site WireGuard, snapshots,
    templates, export, PXE; NIC options (e.g. igb workers) in member/cluster specs for SR-IOV operator labs.
 4. Before sharing widely: authentication, a remote + CI (`scripts/check-python.py`, backend import, frontend
    build, `go vet`, `e2e/smoke.js`), per-group resource budget.

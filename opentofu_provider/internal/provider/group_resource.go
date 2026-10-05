@@ -86,6 +86,20 @@ type groupModel struct {
 	MemberIPs     types.Map            `tfsdk:"member_ips"`
 	MemberMACs    types.Map            `tfsdk:"member_macs"`
 	MemberVMIDs   types.Map            `tfsdk:"member_vm_ids"`
+	WireGuard     types.Bool           `tfsdk:"wireguard"`
+	WGListenPort  types.Int64          `tfsdk:"wireguard_listen_port"`
+	WGHostPort    types.Int64          `tfsdk:"wireguard_host_port"`
+	WGSubnet      types.String         `tfsdk:"wireguard_subnet"`
+	WGPublicKey   types.String         `tfsdk:"wireguard_public_key"`
+}
+
+// apiWireGuard is the spec's router.wireguard block (devices: vmmanager_wireguard_peer)
+type apiWireGuard struct {
+	Enabled    bool    `json:"enabled"`
+	ListenPort int64   `json:"listen_port,omitempty"`
+	HostPort   *int64  `json:"host_port,omitempty"`
+	Subnet     *string `json:"subnet,omitempty"`
+	PublicKey  *string `json:"public_key,omitempty"`
 }
 
 // API payloads
@@ -130,6 +144,7 @@ type apiGroupSpec struct {
 			Forwarders []string       `json:"forwarders"`
 			Records    []apiDNSRecord `json:"records"`
 		} `json:"dns"`
+		WireGuard *apiWireGuard `json:"wireguard,omitempty"`
 	} `json:"router"`
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
@@ -164,6 +179,7 @@ type apiGroup struct {
 				Forwarders []string       `json:"forwarders"`
 				Records    []apiDNSRecord `json:"records"`
 			} `json:"dns"`
+			WireGuard *apiWireGuard `json:"wireguard"`
 		} `json:"router"`
 		Members   []apiGroupMemberSpec `json:"members"`
 		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
@@ -218,6 +234,16 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"member_ips":    schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> IP."},
 			"member_macs":   schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> MAC."},
 			"member_vm_ids": schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> vmmanager VM id."},
+			"wireguard": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "Remote access: WireGuard on the router, relayed from UDP wireguard_host_port of the host. Add devices " +
+					"with vmmanager_wireguard_peer. false after true disables it and keeps devices and keys. Applied live."},
+			"wireguard_listen_port": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(51820),
+				Description: "UDP port of WireGuard on the router (its uplink address)."},
+			"wireguard_host_port": schema.Int64Attribute{Optional: true, Computed: true,
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+				Description:   "UDP port on the host that devices connect to (default: first free port of the server's WG_HOST_PORTS)."},
+			"wireguard_subnet":     schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "Tunnel subnet (the router has its first address, also the DNS server)."},
+			"wireguard_public_key": schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "The router's WireGuard public key."},
 		},
 		Blocks: map[string]schema.Block{
 			"member": schema.ListNestedBlock{
@@ -303,6 +329,17 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 		}
 		c["ssh_keys"] = keys
 		s.CloudInit = c
+	}
+	switch {
+	case m.WireGuard.ValueBool():
+		s.Router.WireGuard = &apiWireGuard{Enabled: true, ListenPort: m.WGListenPort.ValueInt64()}
+		if !m.WGHostPort.IsNull() && !m.WGHostPort.IsUnknown() {
+			port := m.WGHostPort.ValueInt64()
+			s.Router.WireGuard.HostPort = &port
+		}
+	case !m.WGSubnet.IsNull() && !m.WGSubnet.IsUnknown():
+		// was enabled: disable, keeping the router's key and the devices
+		s.Router.WireGuard = &apiWireGuard{Enabled: false, ListenPort: m.WGListenPort.ValueInt64()}
 	}
 	s.DHCPHosts = []apiGroupDHCPHost{}
 	for _, h := range m.DHCPHosts {
@@ -517,6 +554,22 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		hosts = append(hosts, groupDHCPHostModel{MAC: types.StringValue(h.MAC), IP: types.StringValue(h.IP), Hostname: strOrNull(h.Hostname)})
 	}
 	m.DHCPHosts = hosts
+	if wg := g.Spec.Router.WireGuard; wg != nil {
+		m.WireGuard = types.BoolValue(wg.Enabled)
+		m.WGListenPort = types.Int64Value(wg.ListenPort)
+		if wg.HostPort != nil {
+			m.WGHostPort = types.Int64Value(*wg.HostPort)
+		} else {
+			m.WGHostPort = types.Int64Null()
+		}
+		m.WGSubnet, m.WGPublicKey = strOrNull(wg.Subnet), strOrNull(wg.PublicKey)
+	} else {
+		m.WireGuard = types.BoolValue(false)
+		if m.WGListenPort.IsNull() || m.WGListenPort.IsUnknown() {
+			m.WGListenPort = types.Int64Value(51820)
+		}
+		m.WGHostPort, m.WGSubnet, m.WGPublicKey = types.Int64Null(), types.StringNull(), types.StringNull()
+	}
 	m.MemberIPs, _ = types.MapValueFrom(ctx, types.StringType, ips)
 	m.MemberMACs, _ = types.MapValueFrom(ctx, types.StringType, macs)
 	m.MemberVMIDs, _ = types.MapValueFrom(ctx, types.StringType, vmIDs)
