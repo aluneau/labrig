@@ -46,7 +46,8 @@ frontend/src/
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
   pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _group, _cluster
+docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _cluster
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s (cluster)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
@@ -90,6 +91,14 @@ e2e/                  Playwright browser tests against the real app (see below)
   else reports `pending`. VM delete with disks takes disks from both live and saved XML.
 - DB schema: `database.init_db()` creates tables and adds missing **nullable** columns (no migration
   tool); new columns must be nullable or have a server default.
+- **NICs** are identified by MAC (`/vms/{id}/nics/{mac}`), same live+config pattern as disks (hot-plug, unplug
+  waits for DEVICE_REMOVED, else pending); link state / network changes use `updateDeviceFlags`. A NIC on a
+  hostdev ("SR-IOV VF pool") network runs as `<interface type='hostdev'>` (live XML has no source network:
+  read it from the saved config; `vf: true`). Debian/Ubuntu cloud-image VMs get a network-config with DHCP on
+  every NIC (primary by MAC keeps the default route; EL's NetworkManager does it by itself).
+- **vIOMMU** = `<iommu model='intel'>` + `<ioapic driver='qemu'/>` (domain_xml.set_iommu), saved config only:
+  applies at the next cold start. Host SR-IOV state is read from sysfs (`sriov_service`); VF counts go through
+  the helper (`sriov-set-numvfs`). This rig has no IOMMU: test VF pools nested (docs/sriov.md).
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
 - **Lab groups**: the `GroupSpec` (schemas/group.py) is the source of truth; `normalize()` assigns router
@@ -143,7 +152,7 @@ e2e/                  Playwright browser tests against the real app (see below)
 cd backend && venv/bin/python -c "import app.main"            # backend imports
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
-node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
+node lifecycle.js | devices.js | nics.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
 node console.js                                                 # console fidelity: virsh screenshot vs canvas vs page, several viewports/DPRs
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 KUBECTL=… node clusters.js                                      # k3s: create, host kubectl, copy-paste kubectl commands in bash + fish, stop/start, delete

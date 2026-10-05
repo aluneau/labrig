@@ -21,7 +21,7 @@ tar -c \
   --exclude='opentofu_provider/terraform-provider-vmmanager' \
   --exclude='.terraform' --exclude='*.tfstate*' --exclude='.terraform.lock.hcl' \
   --exclude='e2e/node_modules' --exclude='e2e/screenshots' \
-  README.md CLAUDE.md HANDOFF.md future-features.md run.sh scripts backend frontend opentofu_provider examples e2e \
+  README.md CLAUDE.md HANDOFF.md future-features.md run.sh docs scripts backend frontend opentofu_provider examples e2e \
   | tar -x -C "$STAGE/$NAME"
 echo "$VERSION" > "$STAGE/$NAME/VERSION"
 
