@@ -22,7 +22,8 @@ import {
   TextArea,
   TextInput,
 } from '@patternfly/react-core';
-import { CloudImage, Group, GroupCloudInit, ISOImage, MemberSpec, Network, VMCreate } from '../../types';
+import { CloudImage, Group, GroupCloudInit, ISOImage, MemberSpec, Network, NicModel, VMCreate } from '../../types';
+import { NIC_MODELS, networkLabel } from './VmDevices';
 import { groupApi, networkApi, storageApi, vmApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 
@@ -84,6 +85,9 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
   const [keyboard, setKeyboard] = useState(defaultKeyboard);
   const [start, setStart] = useState(true);
   const [autostart, setAutostart] = useState(false);
+  const [extraNics, setExtraNics] = useState<{ network: string; model: NicModel }[]>([]);
+  const [iommu, setIommu] = useState(false);
+  const [kernelArgs, setKernelArgs] = useState('intel_iommu=on iommu=pt');
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -185,6 +189,8 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
       start,
       autostart,
     };
+    if (extraNics.length) data.extra_nics = extraNics;
+    if (iommu) data.iommu = true;
     if (source === 'cloud') {
       data.cloud_image_id = Number(cloudImageId);
       data.cloudinit_username = username || undefined;
@@ -192,6 +198,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
       data.cloudinit_ssh_keys = sshKeys.split('\n').map((k) => k.trim()).filter(Boolean);
       data.cloudinit_userdata = userData.trim() || undefined;
       data.cloudinit_keyboard = keyboard;
+      if (iommu && kernelArgs.trim()) data.guest_kernel_args = kernelArgs.trim();
     } else if (source === 'iso') {
       data.iso_path = isoPath;
     }
@@ -202,6 +209,8 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
       await vmApi.create(data);
       setName('');
       setPassword('');
+      setExtraNics([]);
+      setIommu(false);
       onCreated();
       onClose();
     } catch (err) {
@@ -395,6 +404,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
                     ? 'cloud-init sets the hostname.'
                     : 'No cloud-init here: configure the installed OS for DHCP and it gets its reserved IP and name.'}{' '}
                   The VM starts and stops with the group (now if the router is running) and is deleted with it.
+                  Extra NICs (e.g. igb for SR-IOV) and the virtual IOMMU are set from the VM details once it exists.
                 </HelperTextItem>
               </HelperText>
             </FormHelperText>
@@ -404,11 +414,54 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
         {!group && <>
         <FormGroup label="Network" fieldId="vm-network">
           <FormSelect id="vm-network" value={network} onChange={(_e, v) => setNetwork(v)}>
-            {networks.map((n) => (
+            {networks.filter((n) => n.forward_mode !== 'hostdev').map((n) => (
               <FormSelectOption key={n.id} value={n.name} label={`${n.name}${n.active ? '' : ' (inactive)'}`} />
             ))}
           </FormSelect>
         </FormGroup>
+
+        <ExpandableSection toggleText={`More network interfaces, SR-IOV${extraNics.length || iommu ? ' (set)' : ''}`}>
+          {extraNics.map((nic, i) => {
+            const vfPool = networks.find((n) => n.name === nic.network)?.forward_mode === 'hostdev';
+            const set = (patch: Partial<typeof nic>) => setExtraNics(extraNics.map((n, j) => (j === i ? { ...n, ...patch } : n)));
+            return (
+              <Grid hasGutter key={i} style={{ marginBottom: 8 }}>
+                <GridItem span={5}>
+                  <FormSelect id={`vm-nic-${i}-network`} aria-label={`NIC ${i + 2} network`} value={nic.network}
+                    onChange={(_e, v) => set({ network: v })}>
+                    {networks.map((n) => <FormSelectOption key={n.id} value={n.name} label={networkLabel(n)} />)}
+                  </FormSelect>
+                </GridItem>
+                <GridItem span={5}>
+                  <FormSelect id={`vm-nic-${i}-model`} aria-label={`NIC ${i + 2} model`} value={vfPool ? '' : nic.model}
+                    isDisabled={vfPool} onChange={(_e, v) => set({ model: v as NicModel })}>
+                    {vfPool && <FormSelectOption value="" label="SR-IOV VF" />}
+                    {NIC_MODELS.map(([value, label]) => <FormSelectOption key={value} value={value} label={label} />)}
+                  </FormSelect>
+                </GridItem>
+                <GridItem span={2}>
+                  <Button variant="link" isDanger onClick={() => setExtraNics(extraNics.filter((_n, j) => j !== i))}>Remove</Button>
+                </GridItem>
+              </Grid>
+            );
+          })}
+          <Button variant="secondary" size="sm" id="vm-add-nic"
+            onClick={() => setExtraNics([...extraNics, { network: network || networks[0]?.name || 'default', model: 'virtio' }])}>
+            Add network interface
+          </Button>
+          <Checkbox id="vm-iommu" style={{ marginTop: 12 }}
+            label="Virtual IOMMU (needed for VF passthrough / vfio in the guest)"
+            description="Intel vIOMMU with interrupt remapping. Pair it with an igb NIC to create SR-IOV VFs in the guest and bind them to vfio-pci (DPDK, SR-IOV CNI vfio mode)."
+            isChecked={iommu} onChange={(_e, v) => setIommu(v)} />
+          {iommu && source === 'cloud' && (
+            <FormGroup label="Guest kernel arguments" fieldId="vm-kernel-args" style={{ marginTop: 8 }}>
+              <TextInput id="vm-kernel-args" value={kernelArgs} onChange={(_e, v) => setKernelArgs(v)} />
+              <FormHelperText>
+                <HelperText><HelperTextItem>Added by cloud-init (grubby / update-grub), then the VM reboots once. Ignored with custom user-data.</HelperTextItem></HelperText>
+              </FormHelperText>
+            </FormGroup>
+          )}
+        </ExpandableSection>
 
         <FormGroup fieldId="vm-flags" isStack>
           <Checkbox id="vm-start" label="Start after creation" isChecked={start} onChange={(_e, v) => setStart(v)} />

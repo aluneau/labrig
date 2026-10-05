@@ -182,9 +182,18 @@ type apiVM struct {
 		Addresses []string `json:"addresses"`
 	} `json:"interfaces"`
 	Nics []struct {
-		Network *string `json:"network"`
-		MAC     *string `json:"mac"`
+		Network   *string `json:"network"`
+		MAC       *string `json:"mac"`
+		Type      *string `json:"type"`
+		Model     *string `json:"model"`
+		LinkState *string `json:"link_state"`
+		Pending   *string `json:"pending"`
+		VF        bool    `json:"vf"`
 	} `json:"nics"`
+	Iommu *struct {
+		Enabled bool  `json:"enabled"`
+		Active  *bool `json:"active"`
+	} `json:"iommu"`
 	Console *struct {
 		Port *int64 `json:"port"`
 	} `json:"console"`

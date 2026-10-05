@@ -127,6 +127,19 @@ Design:
 
 ---
 
+### 1.6 Networking: multiple NICs and SR-IOV (M) — ✅ done
+
+- **Done**: NICs add (hot-plug) / remove (hot-unplug) / link up-down / move to another network, models virtio,
+  e1000e, igb, e1000, rtl8139; extra NICs at creation; DHCP on every NIC for Debian/Ubuntu cloud images;
+  virtual IOMMU (intel, intremap, caching mode) + guest kernel args via cloud-init; igb = emulated SR-IOV
+  (7 VFs, igbvf, vfio-pci bind + DPDK testpmd verified in Debian 13 / AlmaLinux 10); host SR-IOV view + VF
+  count (helper `sriov-set-numvfs`); "SR-IOV VF pool" networks (`forward mode='hostdev'`), VF hot-plug, verified
+  nested (L2 on a VF of L1's igb). `vmmanager_nic`, `iommu` / `guest_kernel_args` on `vmmanager_vm`.
+  docs/sriov.md has the OpenShift operator settings (82576 is not in OpenShift's supported list).
+- **Not yet**: macvtap / bridge-type NICs (only libvirt networks), VLAN trunks on NICs, NIC options in group /
+  cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs), persisting VF counts from the UI,
+  `<driver queues>` (multiqueue) and NIC MTU.
+
 ## 2. Lab groups
 
 > **Status: v1 done** (2026-10). Isolated network + EL router (dnsmasq + nftables, AlmaLinux 9/10) +

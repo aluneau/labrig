@@ -85,3 +85,38 @@ class LibvirtAction(BaseModel):
     status: LibvirtStatus
     task: Optional[Task] = None  # "shutdown" mode: background task shutting VMs down, then stopping libvirt
     warning: Optional[str] = None
+
+
+class SriovVF(BaseModel):
+    index: int
+    pci: Optional[str] = None
+    driver: Optional[str] = None  # igbvf, iavf, mlx5_core, vfio-pci (passed through), None
+    netdev: Optional[str] = None
+
+
+class SriovPF(BaseModel):
+    name: str  # network interface
+    pci: Optional[str] = None
+    driver: Optional[str] = None
+    vendor_id: Optional[str] = None  # e.g. 8086
+    device_id: Optional[str] = None  # e.g. 10c9 (82576)
+    vf_device_id: Optional[str] = None  # e.g. 10ca
+    total_vfs: int
+    num_vfs: int
+    operstate: Optional[str] = None
+    vfs: List[SriovVF] = []
+
+
+class IommuStatus(BaseModel):
+    enabled: bool
+    groups: int = 0
+    message: Optional[str] = None  # why VF passthrough is impossible, and how to fix it
+
+
+class SriovStatus(BaseModel):
+    iommu: IommuStatus
+    pfs: List[SriovPF] = []
+
+
+class SriovNumVfs(BaseModel):
+    num_vfs: int = Field(..., ge=0, le=4096)

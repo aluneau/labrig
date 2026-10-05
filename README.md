@@ -5,7 +5,11 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **VMs**: create from a cloud image (configured with cloud-init), an install ISO, or an empty disk;
   start / shut down / reboot / pause / force off / delete; see IPs and disks. Insert / eject ISOs
   live (also from the console page), boot order and "boot from CD next start", add / grow / detach
-  disks (hot-plugged while running).
+  disks (hot-plugged while running), add / remove NICs (virtio, e1000e, igb…; hot-plug, link up/down,
+  move to another network).
+- **SR-IOV labs**: igb NICs (Intel 82576, emulated SR-IOV: up to 7 VFs inside the guest) + a virtual IOMMU
+  for vfio/DPDK in the guest, on any host; on hosts with real SR-IOV NICs, set VF counts and hand VFs to VMs
+  through "SR-IOV VF pool" networks. See [docs/sriov.md](docs/sriov.md) (incl. OpenShift operator settings).
 - **In-browser console** (noVNC) with Ctrl+Alt+Del, fullscreen, power buttons; the guest keyboard
   layout is set by cloud-init (defaults to your browser language, e.g. AZERTY for `fr`).
 - **Live status**: libvirt events are pushed to the browser (Server-Sent Events), so a VM shutting
@@ -130,6 +134,7 @@ cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
 cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
 cd examples/opentofu/devices                               # extra disk, ISO in the CD-ROM, boot order
+cd examples/opentofu/sriov                                 # virtio + igb NIC (vmmanager_nic), vIOMMU
 cd examples/opentofu/group                                 # lab group: router + 2 members + DNS records
 ```
 
@@ -140,7 +145,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
-`devices.js`, `groups.js`, `group-members.js`).
+`devices.js`, `nics.js`, `groups.js`, `group-members.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 
 ## API overview
@@ -152,6 +157,9 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `PUT /api/v1/vms/{id}/cdrom` `{iso_path\|null}` | Insert / eject an ISO (live) |
 | `PUT /api/v1/vms/{id}/boot` `{order?, once?}` | Boot order; `once: true` = boot the CD on the next start only |
 | `POST /api/v1/vms/{id}/disks`, `PUT/DELETE …/disks/{target}` | Add (hot-plug), grow, detach disks (`?delete_volume=true`) |
+| `POST /api/v1/vms/{id}/nics` `{network, model?, mac?, link_state?}`, `PUT/DELETE …/nics/{mac}` | Add (hot-plug), change link state / network (live), remove NICs |
+| `PUT /api/v1/vms/{id}/iommu` `{enabled}` | Virtual IOMMU (applies at the next cold start) |
+| `GET /api/v1/hosts/sriov`, `PUT /api/v1/hosts/sriov/{pf}` `{num_vfs}` | Host IOMMU state, SR-IOV PFs / VFs; set the VF count (helper) |
 | `GET /api/v1/storage/cloud-images`, `POST` (download), `GET …/distributions` | Cloud images |
 | `GET /api/v1/storage/isos`, `POST …/isos/upload`, `POST …/isos/download` | ISOs |
 | `/api/v1/storage/pools`, `/api/v1/storage/volumes` | Pools and volumes |

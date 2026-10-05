@@ -1,4 +1,4 @@
-"""VM device endpoints: CD-ROM media, boot order, disks
+"""VM device endpoints: CD-ROM media, boot order, disks, NICs, virtual IOMMU
 
 Mounted under /vms before the vms router, so /vms/{id}/disks isn't taken for a power action.
 """
@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import VM
-from app.schemas import DeviceChange, VMBootUpdate, VMCdromUpdate, VMDiskCreate, VMDiskResize
+from app.schemas import (
+    DeviceChange, VMBootUpdate, VMCdromUpdate, VMDiskCreate, VMDiskResize, VMIommuUpdate, VMNicCreate, VMNicUpdate,
+)
 from app.services.vm_service import vm_service
 
 router = APIRouter()
@@ -65,3 +67,32 @@ def detach_disk(
     """Detach a disk (hot-unplug when running; pending=true if the guest hasn't released it,
     then it goes away at the next shutdown). The boot disk can't be detached."""
     return _run(vm_service.detach_disk, db, _vm(vm_id, db), target, delete_volume)
+
+
+@router.post("/{vm_id}/nics", response_model=DeviceChange, status_code=201)
+def add_nic(vm_id: int, data: VMNicCreate, db: Session = Depends(get_db)):
+    """Add a NIC on a libvirt network (hot-plugged when running; target = its MAC). Models: virtio,
+    e1000e, igb (Intel 82576, emulated SR-IOV: up to 7 VFs in the guest), e1000, rtl8139. On an SR-IOV
+    VF pool network (forward mode hostdev) the VM gets a VF from the host instead (needs a host IOMMU)."""
+    return _run(vm_service.add_nic, db, _vm(vm_id, db), data.network, data.model, data.mac, data.link_state)
+
+
+@router.put("/{vm_id}/nics/{mac}", response_model=DeviceChange)
+def update_nic(vm_id: int, mac: str, data: VMNicUpdate, db: Session = Depends(get_db)):
+    """Set the link state (up / down = cable unplugged) and/or move the NIC to another network,
+    live when running and in the saved config"""
+    return _run(vm_service.update_nic, db, _vm(vm_id, db), mac, data.link_state, data.network)
+
+
+@router.delete("/{vm_id}/nics/{mac}", response_model=DeviceChange)
+def remove_nic(vm_id: int, mac: str, db: Session = Depends(get_db)):
+    """Remove a NIC (hot-unplug when running; pending=true if the guest hasn't released it,
+    then it goes away at the next shutdown)"""
+    return _run(vm_service.remove_nic, db, _vm(vm_id, db), mac)
+
+
+@router.put("/{vm_id}/iommu", response_model=DeviceChange)
+def set_iommu(vm_id: int, data: VMIommuUpdate, db: Session = Depends(get_db)):
+    """Enable / disable the virtual IOMMU (intel-iommu, interrupt remapping, caching mode) in the saved
+    config. It applies at the next cold start (power off + start), not on a guest reboot."""
+    return _run(vm_service.set_iommu, db, _vm(vm_id, db), data.enabled)
