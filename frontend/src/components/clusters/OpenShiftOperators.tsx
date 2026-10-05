@@ -170,7 +170,7 @@ const quickAddons = (cluster: Cluster): QuickAddon[] => {
     },
     {
       request: { kind: 'odf' }, title: 'OpenShift Data Foundation', available: storage === 'none' && nodes >= 3,
-      reason: storage !== 'none' ? `storage: ${storage}` : nodes < 3 ? 'needs 3 nodes' : undefined,
+      reason: nodes < 3 ? 'needs 3 nodes' : storage !== 'none' ? `storage: ${storage}` : undefined,
       text: 'Adds a disk per storage node, installs Local Storage + ODF (lean profile). Needs about +8 vCPU / +24 GiB '
         + 'per storage node on top of the node sizes.',
     },
@@ -190,12 +190,14 @@ const quickAddons = (cluster: Cluster): QuickAddon[] => {
 
 export const OperatorsTab: React.FC<{
   cluster: Cluster; status: InstallStatus | null; onChanged: () => void;
-}> = ({ cluster, onChanged }) => {
+}> = ({ cluster, status, onChanged }) => {
   const [operators, setOperators] = useState<InstalledOperator[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [confirm, setConfirm] = useState<QuickAddon | null>(null);
   const usable = cluster.status === 'ready';
+  // The operator list is readable once the API is up (add-ons phase of the install, or ready)
+  const readable = usable || status?.phase === 'addons';
 
   const load = useCallback(async () => {
     try {
@@ -208,7 +210,7 @@ export const OperatorsTab: React.FC<{
   }, [cluster.id]);
 
   // Reload when a task (operator install) finishes
-  useEffect(() => { if (usable) load(); }, [usable, load, cluster.task_running]);
+  useEffect(() => { if (readable) load(); }, [readable, load, cluster.task_running, cluster.task_progress]);
 
   const addons = quickAddons(cluster);
   const run = async (req: AddonRequest) => {
@@ -247,7 +249,7 @@ export const OperatorsTab: React.FC<{
             <>
               <Button variant="primary" icon={<PlusIcon />} onClick={() => setInstallOpen(true)} isDisabled={!usable}
                 id="os-install-operator">Install operator</Button>
-              <Button variant="plain" aria-label="Refresh" onClick={load} isDisabled={!usable}><SyncAltIcon /></Button>
+              <Button variant="plain" aria-label="Refresh" onClick={load} isDisabled={!readable}><SyncAltIcon /></Button>
             </>
           ),
         }}>
@@ -255,7 +257,7 @@ export const OperatorsTab: React.FC<{
         </CardHeader>
         <CardBody>
           {error && <Alert variant="warning" isInline isPlain title={error} style={{ marginBottom: 8 }} />}
-          {!usable && !operators ? <>The cluster is {cluster.status}.</> : !operators ? <Spinner size="md" /> : (
+          {!readable && !operators ? <>The cluster is {cluster.status}.</> : !operators ? <Spinner size="md" /> : (
             <Table aria-label="Installed operators" variant="compact" id="os-operators-table">
               <Thead><Tr><Th>Name</Th><Th>Namespace</Th><Th>Version</Th><Th>Channel</Th><Th>Source</Th><Th>Status</Th></Tr></Thead>
               <Tbody>
