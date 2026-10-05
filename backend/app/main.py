@@ -129,6 +129,10 @@ if (_frontend / "index.html").is_file():
 
     @app.get("/{path:path}", include_in_schema=False)
     def frontend(path: str):
+        if path == "api" or path.startswith("api/"):
+            # an API path no router knows (e.g. a UI newer than the running backend): JSON, not the page
+            return JSONResponse({"detail": f"Not found: /{path} (is the backend up to date? restart it)"},
+                                status_code=404)
         file = (_frontend / path).resolve()
         if path and file.is_file() and file.is_relative_to(_frontend):
             return FileResponse(file)
