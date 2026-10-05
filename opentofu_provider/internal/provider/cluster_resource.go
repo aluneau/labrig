@@ -125,7 +125,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"worker_vcpu":        intAttr(2, ""),
 			"worker_disk_size":   intAttr(20, "GiB."),
 			"cloud_image_id":     schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "vmmanager_cloud_image id. Default: Debian 13, else AlmaLinux 9."},
-			"domain":             schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("lab"), PlanModifiers: replaceStr, Description: "Base domain: the API is api.<name>.<domain>."},
+			"domain":             schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Base domain: the API is api.<name>.<domain>. Default: lab; kubeadm in an existing group: the group's domain."},
 			"network":            schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: existing network for the nodes. Default: a new NAT network vmm-k-<name>, deleted with the cluster. kubeadm: the group's network (computed)."},
 			"group_id": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr,
 				Description: "kubeadm: id of an existing vmmanager_group to put the nodes in (deleting the cluster leaves the group and its members). Default: a group named after the cluster, deleted with it."},
@@ -219,7 +219,6 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		"workers":   plan.Workers.ValueInt64(),
 		"ctlplane":  map[string]any{"memory": plan.CtlplaneMemory.ValueInt64(), "vcpu": plan.CtlplaneVCPU.ValueInt64(), "disk_size": plan.CtlplaneDisk.ValueInt64()},
 		"worker":    map[string]any{"memory": plan.WorkerMemory.ValueInt64(), "vcpu": plan.WorkerVCPU.ValueInt64(), "disk_size": plan.WorkerDisk.ValueInt64()},
-		"domain":    plan.Domain.ValueString(),
 		"network":   strPtr(plan.Network),
 		"router_memory": func() any {
 			if plan.RouterMemory.IsNull() || plan.RouterMemory.IsUnknown() {
@@ -231,6 +230,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		"extra_args": strPtr(plan.ExtraArgs),
 		"username":   strPtr(plan.Username),
 		"password":   strPtr(plan.Password),
+	}
+	if d := strPtr(plan.Domain); d != nil {
+		body["domain"] = *d
 	}
 	if gid := strPtr(plan.GroupID); gid != nil {
 		n, err := strconv.ParseInt(*gid, 10, 64)

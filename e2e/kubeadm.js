@@ -166,9 +166,8 @@ const countReady = (t) => (t.match(/\sReady\s/g) || []).length;
     await page.getByRole('tab', { name: 'Network & DNS' }).click();
     await page.getByText(`api.${NAME}.`).first().waitFor();
     await shot('group-dns');
-    await page.goBack();
-    await page.goBack();
-    await page.waitForURL(/\/clusters\/\d+$/);
+    await page.goto(`${BASE}/clusters/${id}`);
+    await page.locator('#kubectl-output').waitFor({ timeout: 30000 });
 
     // --- HA: ctlplane-0 off, the API still answers through haproxy
     if (HA && CTLPLANES >= 3) {
