@@ -286,8 +286,9 @@ class LibvirtClient:
     def create_vm(self, name: str, memory: int, vcpu: int,
                   disk_xml: str, network_xml: str,
                   arch: str = "x86_64", boot_devs: Optional[List[str]] = None,
-                  metadata_xml: str = "") -> str:
-        """Define a new VM. memory is in MiB. metadata_xml goes inside <metadata>."""
+                  metadata_xml: str = "", iommu: bool = False) -> str:
+        """Define a new VM. memory is in MiB. metadata_xml goes inside <metadata>.
+        iommu: add a virtual IOMMU (domain_xml.set_iommu), for vfio / VF passthrough in the guest."""
         conn = self.connect()
         boot_xml = "\n".join(f"<boot dev='{d}'/>" for d in (boot_devs or ["hd"]))
         listen = quoteattr(settings.VNC_LISTEN)
@@ -312,6 +313,7 @@ class LibvirtClient:
             <features>
                 <acpi/>
                 <apic/>
+                {"<ioapic driver='qemu'/>" if iommu else ""}
             </features>
             <cpu mode='host-passthrough' check='none'/>
             <clock offset='utc'/>
@@ -344,6 +346,7 @@ class LibvirtClient:
                 <vsock model='virtio'>
                     <cid auto='yes'/>
                 </vsock>
+                {domain_xml.IOMMU_XML if iommu else ""}
             </devices>
         </domain>
         """
@@ -448,18 +451,151 @@ class LibvirtClient:
         }
 
     def get_vm_nics(self, name: str) -> List[Dict[str, Any]]:
-        """Configured NICs (available even when the VM is off)"""
-        xml = self.get_vm_xml(name)
-        if xml is None:
+        """NICs of the running and saved definitions, in device order (available when the VM is off).
+
+        Each: {network, mac, type, model, link_state, device, pending}; pending (running VM only) is
+        "attach" (appears at next start), "detach" (goes away when the guest releases it / at shutdown)
+        or "change" (saved network / link state differ from the running ones).
+        """
+        try:
+            domain = self._domain(name)
+        except libvirt.libvirtError:
             return []
-        nics = []
-        for iface in ET.fromstring(xml).findall("./devices/interface"):
-            source, mac = iface.find("source"), iface.find("mac")
-            nics.append({
-                "network": source.get("network") or source.get("bridge") if source is not None else None,
-                "mac": mac.get("address") if mac is not None else None,
-            })
+        live, config = self._xml_roots(domain)
+        current = live if live is not None else config
+        nics, seen = [], set()
+        for root in (current, config):
+            for el in domain_xml.interface_elements(root):
+                info = domain_xml.nic_info(el)
+                if info["mac"] in seen:
+                    continue
+                seen.add(info["mac"])
+                info.pop("alias")
+                info["pending"] = None
+                if live is not None and info["mac"]:
+                    el_live = domain_xml.find_interface(live, info["mac"])
+                    el_config = domain_xml.find_interface(config, info["mac"])
+                    if el_live is None:
+                        info["pending"] = "attach"
+                    elif el_config is None:
+                        info["pending"] = "detach"
+                    else:
+                        saved = domain_xml.nic_info(el_config)
+                        if (saved["network"], saved["link_state"]) != (info["network"], info["link_state"]):
+                            info["pending"] = "change"
+                nics.append(info)
         return nics
+
+    def vm_has_iommu(self, name: str) -> Dict[str, Any]:
+        """{"enabled": in the saved config, "active": in the running instance (None when shut off)}"""
+        live, config = self._xml_roots(self._domain(name))
+        return {"enabled": domain_xml.has_iommu(config),
+                "active": domain_xml.has_iommu(live) if live is not None else None}
+
+    def set_vm_iommu(self, name: str, enabled: bool) -> None:
+        """Add / remove the vIOMMU in the saved config (applies at the next cold start)"""
+        domain = self._domain(name)
+        _live, config = self._xml_roots(domain)
+        if domain_xml.has_iommu(config) == enabled:
+            return
+        if config.find("./os/type") is None or "q35" not in (config.find("./os/type").get("machine") or ""):
+            raise ValueError("A virtual IOMMU needs a q35 machine")
+        domain_xml.set_iommu(config, enabled)
+        self.connect().defineXML(ET.tostring(config, encoding="unicode"))
+        self._publish_vm(domain, "devices")
+
+    def attach_nic(self, name: str, xml: str) -> Dict[str, Any]:
+        """Attach a NIC (hot-plug when running, like attach_disk); returns {"pending", "error", "mac"}"""
+        result = self.attach_disk(name, xml)  # generic attach: live + config, config-only fallback
+        el = ET.fromstring(xml)
+        mac = domain_xml.nic_info(el)["mac"]
+        if mac is None:
+            # libvirt generated the MAC: the newest interface of the saved config
+            _live, config = self._xml_roots(self._domain(name))
+            ifaces = domain_xml.interface_elements(config)
+            mac = domain_xml.nic_info(ifaces[-1])["mac"] if ifaces else None
+        return {**result, "mac": mac}
+
+    def detach_nic(self, name: str, mac: str, timeout: float = 15.0) -> Dict[str, Any]:
+        """Detach a NIC; when running, hot-unplug and wait for the guest to release it (DEVICE_REMOVED).
+        Returns {"pending"}: True = removed from the saved config, still plugged until the next shutdown."""
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        el_config = domain_xml.find_interface(config, mac)
+        el_live = domain_xml.find_interface(live, mac) if live is not None else None
+        if el_config is None and el_live is None:
+            raise LookupError(f"VM {name} has no NIC {mac}")
+
+        if el_live is None:
+            domain.detachDeviceFlags(ET.tostring(el_config, encoding="unicode"), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            self._publish_vm(domain, "devices")
+            return {"pending": False}
+
+        key = (domain.UUIDString(), domain_xml.nic_info(el_live)["alias"])
+        with self._removed_cv:
+            self._removed.discard(key)
+        flags = libvirt.VIR_DOMAIN_AFFECT_LIVE | (libvirt.VIR_DOMAIN_AFFECT_CONFIG if el_config is not None else 0)
+        try:
+            domain.detachDeviceFlags(ET.tostring(el_live, encoding="unicode"), flags)
+        except libvirt.libvirtError as e:
+            if el_config is None:
+                raise
+            logger.warning(f"Hot-unplug of NIC {mac} from {name} refused, detaching at next shutdown: {e}")
+            domain.detachDeviceFlags(ET.tostring(el_config, encoding="unicode"), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            self._publish_vm(domain, "devices")
+            return {"pending": True}
+
+        def gone() -> bool:
+            return not domain.isActive() or domain_xml.find_interface(ET.fromstring(domain.XMLDesc(0)), mac) is None
+
+        deadline = time.monotonic() + timeout
+        with self._removed_cv:
+            while key not in self._removed and time.monotonic() < deadline:
+                self._removed_cv.wait(min(deadline - time.monotonic(), 2.0))
+                if key not in self._removed and gone():
+                    break
+            self._removed.discard(key)
+        removed = gone()
+        self._publish_vm(domain, "devices")
+        return {"pending": not removed}
+
+    def update_nic(self, name: str, mac: str, link_state: Optional[str] = None,
+                   network: Optional[str] = None) -> Dict[str, Any]:
+        """Change a NIC's link state (up/down: cable plugged or not) and/or source network, live when
+        running and in the saved config. Returns {"pending", "error"}: pending = only saved (the running
+        instance refused the change, e.g. a hostdev VF can't change network live)."""
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        el_config = domain_xml.find_interface(config, mac)
+        el_live = domain_xml.find_interface(live, mac) if live is not None else None
+        if el_config is None and el_live is None:
+            raise LookupError(f"VM {name} has no NIC {mac}")
+        pending, error = False, None
+        if el_live is not None:
+            try:
+                domain.updateDeviceFlags(domain_xml.nic_update_xml(el_live, link_state, network),
+                                         libvirt.VIR_DOMAIN_AFFECT_LIVE)
+            except libvirt.libvirtError as e:
+                if el_config is None:
+                    raise
+                pending, error = True, e.get_error_message() or str(e)
+        elif live is not None:
+            pending = True  # attached for the next start only
+        if el_config is not None:
+            domain.updateDeviceFlags(domain_xml.nic_update_xml(el_config, link_state, network),
+                                     libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+        self._publish_vm(domain, "devices")
+        return {"pending": pending, "error": error}
+
+    def network_forward_mode(self, name: str) -> Optional[str]:
+        """Forward mode of a libvirt network (nat, route, bridge, hostdev, ...; "isolated" without
+        <forward>), None if it doesn't exist"""
+        try:
+            root = ET.fromstring(self.connect().networkLookupByName(name).XMLDesc(0))
+        except libvirt.libvirtError:
+            return None
+        forward = root.find("forward")
+        return forward.get("mode", "nat") if forward is not None else "isolated"
 
     def get_vm_interfaces(self, name: str) -> List[Dict[str, Any]]:
         """Interfaces with IPs from DHCP leases (only for running VMs)"""

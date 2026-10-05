@@ -74,6 +74,7 @@ class VMService:
             "boot": {"order": devices["boot_order"], "once": vm.next_boot.split(",") if vm.next_boot else None},
             "interfaces": libvirt_client.get_vm_interfaces(vm.name),
             "nics": libvirt_client.get_vm_nics(vm.name),
+            "iommu": libvirt_client.vm_has_iommu(vm.name),
             "console": libvirt_client.get_vm_console(vm.name),
         }
 
@@ -114,6 +115,7 @@ class VMService:
                         custom=vm_data.cloudinit_userdata,
                         keyboard=vm_data.cloudinit_keyboard,
                         fqdn=fqdn,
+                        kernel_args=vm_data.guest_kernel_args,
                     )
                 seed = cloud_image_service.build_seed_iso(hostname or vm_data.name, user_data, network_config)
                 seed_path = libvirt_client.upload_volume(
@@ -129,11 +131,13 @@ class VMService:
                 vcpu=vm_data.vcpu,
                 disk_xml=self._build_disk_xml(disk_path, vm_data.iso_path, seed_path),
                 network_xml="\n".join(
-                    self._build_network_xml(network, mac) for network, mac in
-                    (nics or [(vm_data.network_name or settings.DEFAULT_NETWORK, vm_data.mac_address)])),
+                    [self._build_network_xml(network, mac) for network, mac in
+                     (nics or [(vm_data.network_name or settings.DEFAULT_NETWORK, vm_data.mac_address)])]
+                    + [self._nic_xml(n.network, n.model, n.mac, n.link_state) for n in vm_data.extra_nics]),
                 arch=vm_data.arch,
                 boot_devs=["hd", "cdrom"] if vm_data.iso_path else ["hd"],
                 metadata_xml=metadata_xml,
+                iommu=vm_data.iommu,
             )
         except Exception:
             for path in created:
@@ -319,6 +323,91 @@ class VMService:
         if disk is None or disk["device"] != "disk":
             raise LookupError(f"VM {vm.name} has no disk {target}")
         return disk
+
+    # Devices: NICs, vIOMMU
+
+    def _nic_xml(self, network: str, model: str = "virtio", mac: Optional[str] = None,
+                 link_state: str = "up") -> str:
+        """Interface XML for a libvirt network. SR-IOV VF pool networks (forward mode hostdev) give the
+        guest a VF: no emulated model / link state, and the host needs an IOMMU."""
+        from app.services.sriov_service import sriov_service
+
+        mode = libvirt_client.network_forward_mode(network)
+        if mode is None:
+            raise ValueError(f"Network '{network}' does not exist")
+        if mode == "hostdev":
+            iommu = sriov_service.iommu()
+            if not iommu["enabled"]:
+                raise ValueError(f"'{network}' is an SR-IOV VF pool: {iommu['message']}")
+            return domain_xml.nic_xml(network, None, mac)
+        return domain_xml.nic_xml(network, model, mac, link_state)
+
+    def add_nic(self, db: Session, vm: VM, network: str, model: str, mac: Optional[str],
+                link_state: str = "up") -> Dict[str, Any]:
+        if mac and mac.lower() in libvirt_client.all_macs():
+            raise ValueError(f"MAC {mac} is already used by a VM on this host")
+        result = libvirt_client.attach_nic(vm.name, self._nic_xml(network, model, mac, link_state))
+        hostdev = libvirt_client.network_forward_mode(network) == "hostdev"
+        what = f"an SR-IOV VF from '{network}'" if hostdev else f"a {model} NIC on '{network}'"
+        message = f"Added {what} ({result['mac']})"
+        if result["pending"]:
+            message += "; it appears at the next start"
+            if result["error"]:
+                message += f" (hot-plug failed: {result['error']})"
+        elif vm.status in ("running", "paused"):
+            message += ("; hot-plugged: the guest sees a new interface (configure it inside the guest "
+                        "if its network setup doesn't pick up new NICs)")
+        return {"message": message, "pending": result["pending"], "target": result["mac"]}
+
+    def remove_nic(self, db: Session, vm: VM, mac: str) -> Dict[str, Any]:
+        result = libvirt_client.detach_nic(vm.name, mac)
+        if result["pending"]:
+            return {"message": f"NIC {mac} is removed from the configuration, but the guest has not released it "
+                               "yet: it goes away at the next shutdown", "pending": True, "target": mac}
+        return {"message": f"Removed NIC {mac}", "pending": False, "target": mac}
+
+    def update_nic(self, db: Session, vm: VM, mac: str, link_state: Optional[str],
+                   network: Optional[str]) -> Dict[str, Any]:
+        if not link_state and not network:
+            raise ValueError("Nothing to change: give link_state and/or network")
+        nic = next((n for n in libvirt_client.get_vm_nics(vm.name) if n["mac"] == mac.lower()), None)
+        if nic is None:
+            raise LookupError(f"VM {vm.name} has no NIC {mac}")
+        if network and network != nic["network"]:
+            mode = libvirt_client.network_forward_mode(network)
+            if mode is None:
+                raise ValueError(f"Network '{network}' does not exist")
+            current = libvirt_client.network_forward_mode(nic["network"]) if nic["network"] else None
+            if "hostdev" in (mode, current):
+                raise ValueError("A NIC can't move between an SR-IOV VF pool and a regular network: "
+                                 "remove it and add a new one")
+        elif network:
+            network = None
+        result = libvirt_client.update_nic(vm.name, mac.lower(), link_state, network)
+        changes = []
+        if link_state:
+            changes.append("link up (cable plugged)" if link_state == "up" else "link down (cable unplugged)")
+        if network:
+            changes.append(f"moved to network '{network}'")
+        message = f"NIC {mac}: {', '.join(changes)}"
+        if result["pending"]:
+            message += "; applies at the next start" + (f" ({result['error']})" if result["error"] else "")
+        return {"message": message, "pending": result["pending"], "target": mac}
+
+    def set_iommu(self, db: Session, vm: VM, enabled: bool) -> Dict[str, Any]:
+        before = libvirt_client.vm_has_iommu(vm.name)
+        libvirt_client.set_vm_iommu(vm.name, enabled)
+        state = "enabled" if enabled else "disabled"
+        if before["enabled"] == enabled:
+            return {"message": f"The virtual IOMMU is already {state}", "pending": before["active"] not in (None, enabled)}
+        running = before["active"] is not None
+        message = f"Virtual IOMMU {state}"
+        if running:
+            message += ("; it applies after a full power off and start (a reboot from inside the guest "
+                        "is not enough)")
+        if enabled:
+            message += ". For vfio in the guest, boot it with intel_iommu=on iommu=pt"
+        return {"message": message, "pending": running}
 
     def get_console(self, db: Session, vm_id: int) -> Optional[Dict[str, Any]]:
         vm = self.get_vm(db, vm_id)

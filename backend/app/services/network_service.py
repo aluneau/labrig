@@ -67,6 +67,8 @@ class NetworkService:
         if db.query(Network).filter(Network.name == net_data.name).first():
             raise ValueError(f"Network with name '{net_data.name}' already exists")
 
+        if not net_data.xml_config and net_data.forward_mode == "hostdev":
+            self._check_pf(net_data.forward_dev)
         xml = net_data.xml_config or self._build_network_xml(net_data)
         net_uuid = libvirt_client.create_network(net_data.name, xml, autostart=net_data.autostart)
         self.sync_networks(db)
@@ -139,6 +141,9 @@ class NetworkService:
         if not net:
             return None
         root = ET.fromstring(libvirt_client.get_network_xml(net.name))
+        if root.find("./forward[@mode='hostdev']") is not None:
+            raise ValueError("This is an SR-IOV VF pool (forward mode hostdev): it has no subnet or DHCP to edit. "
+                             "Change its PF in the XML editor, or delete and recreate it.")
 
         # forward (kept as-is when unchanged, so custom <nat> options survive)
         current = root.find("forward")
@@ -315,7 +320,23 @@ class NetworkService:
         if not ok:
             raise ValueError(f"{label} {value} is outside {subnet}")
 
+    @staticmethod
+    def _check_pf(pf: Optional[str]) -> None:
+        from app.services.sriov_service import sriov_service
+
+        if not pf:
+            raise ValueError("An SR-IOV VF pool needs a physical function (forward_dev): see GET /hosts/sriov")
+        if sriov_service.get_pf(pf) is None:
+            raise ValueError(f"{pf} is not an SR-IOV capable interface on this host (see GET /hosts/sriov)")
+
     def _build_network_xml(self, net_data: NetworkCreate) -> str:
+        if net_data.forward_mode == "hostdev":
+            # SR-IOV VF pool: libvirt hands out the PF's free VFs to <interface type='network'> NICs as PCI
+            # passthrough (managed = bound to vfio-pci on VM start, given back on stop). No bridge / IP / DHCP.
+            return f"""<network>
+            <name>{escape(net_data.name)}</name>
+            <forward mode='hostdev' managed='yes'><pf dev={quoteattr(net_data.forward_dev)}/></forward>
+        </network>"""
         ip_xml = ""
         if net_data.ip_address and net_data.prefix:
             dhcp_xml = ""
@@ -361,7 +382,8 @@ class NetworkService:
         return {
             "type": mode,
             "forward_mode": mode,
-            "forward_dev": forward.get("dev") if forward is not None else None,
+            "forward_dev": (forward.get("dev") or (forward.find("pf").get("dev") if forward.find("pf") is not None
+                                                   else None)) if forward is not None else None,
             "bridge_name": bridge.get("name") if bridge is not None else None,
             "domain": domain.get("name") if domain is not None else None,
             "ip_address": ip.get("address") if ip is not None else None,
