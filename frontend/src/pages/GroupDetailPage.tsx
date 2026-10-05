@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   AlertActionCloseButton,
@@ -286,7 +286,8 @@ export const GroupDetailPage: React.FC = () => {
   const [images, setImages] = useState<CloudImage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [tab, setTab] = useState<string | number>('topology');
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState<string | number>(() => searchParams.get('tab') || 'topology');
   const [progress, setProgress] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteDisks, setDeleteDisks] = useState(true);

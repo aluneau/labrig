@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Alert,
   AlertActionCloseButton,
@@ -23,14 +23,17 @@ import {
   Spinner,
   Stack,
   StackItem,
+  Tab,
+  Tabs,
+  TabTitleText,
   Title,
   ToggleGroup,
   ToggleGroupItem,
 } from '@patternfly/react-core';
-import { DesktopIcon, DownloadIcon, PlayIcon, PlusIcon, PowerOffIcon, SyncAltIcon, TrashIcon } from '@patternfly/react-icons';
+import { DesktopIcon, DownloadIcon, ExternalLinkAltIcon, KeyIcon, PlayIcon, PlusIcon, PowerOffIcon, SyncAltIcon, TrashIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { Cluster, ClusterCommandOutput } from '../types';
-import { clusterApi } from '../services/api';
+import { Cluster, ClusterCommandOutput, InstallStatus } from '../types';
+import { clusterApi, vmApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatDate } from '../utils/format';
 
@@ -38,6 +41,39 @@ import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { ClusterStatus } from './ClustersPage';
 import { CLUSTER_TYPE_HELP } from '../components/clusters/CreateClusterModal';
+import { ConsoleAccess, InstallPanel } from '../components/clusters/OpenShiftInstall';
+import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
+import { MetalLBLab } from '../components/clusters/MetalLBLab';
+
+const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
+const STORAGE_NAMES: Record<string, string> = { none: 'none', lvms: 'LVM Storage', odf: 'OpenShift Data Foundation' };
+
+/** OpenShift install status: every 10 s until ready, and on cluster events */
+function useInstallStatus(cluster: Cluster | null) {
+  const [status, setStatus] = useState<InstallStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const id = cluster?.type === 'openshift' ? cluster.id : null;
+  const load = useCallback(async () => {
+    if (id == null) return;
+    try {
+      setStatus(await clusterApi.installStatus(id));
+      setError(null);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, [id]);
+  const done = status?.phase === 'ready' || status?.phase === 'stopped';
+  const clusterStatus = cluster?.status;
+  const taskRunning = cluster?.task_running;
+  const updated = cluster?.updated_at;
+  useEffect(() => {
+    load();
+    if (done || id == null) return undefined;
+    const timer = setInterval(() => { if (!document.hidden) load(); }, 10000);
+    return () => clearInterval(timer);
+  }, [load, done, id, clusterStatus, taskRunning, updated]);
+  return { status, error, reload: load };
+}
 
 /** Where the nodes live, for the delete confirmation */
 export const clusterDeleteText = (c: Cluster) => {
@@ -138,6 +174,8 @@ export const ClusterDetailPage: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toRemove, setToRemove] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') || 'overview';
 
   const reload = useCallback(async () => {
     try {
@@ -167,10 +205,14 @@ export const ClusterDetailPage: React.FC = () => {
     reload();
   };
 
+  const install = useInstallStatus(cluster);
+
   if (!cluster) {
     return <PageSection>{loadError ? <Alert variant="danger" isInline title={loadError} /> : <Spinner size="xl" />}</PageSection>;
   }
   const busy = cluster.task_running;
+  const isOpenShift = cluster.type === 'openshift';
+  const os = cluster.spec?.openshift || {};
 
   return (
     <>
@@ -186,8 +228,16 @@ export const ClusterDetailPage: React.FC = () => {
           </FlexItem>
           <FlexItem>
             <Flex spaceItems={{ default: 'spaceItemsSm' }}>
+              {isOpenShift && (
+                <Button variant="primary" icon={<ExternalLinkAltIcon />} iconPosition="end" isDisabled={!cluster.console_url || cluster.status !== 'ready'}
+                  component="a" href={cluster.console_url || undefined} target="_blank" rel="noreferrer" id="os-console-link">Console</Button>
+              )}
               <Button variant="secondary" icon={<DownloadIcon />} isDisabled={!cluster.has_kubeconfig}
                 component="a" href={clusterApi.kubeconfigUrl(cluster.id)}>Kubeconfig</Button>
+              {isOpenShift && (
+                <Button variant="secondary" icon={<KeyIcon />} component="a" href={clusterApi.sshKeyUrl(cluster.id)}
+                  id="os-ssh-key" title="Private key of the nodes' core user (ssh core@<node>, from the router)">SSH key</Button>
+              )}
               {cluster.status === 'stopped' ? (
                 <Button variant="secondary" icon={<PlayIcon />} isDisabled={busy}
                   onClick={() => run(() => clusterApi.start(cluster.id))}>Start</Button>
@@ -195,15 +245,37 @@ export const ClusterDetailPage: React.FC = () => {
                 <Button variant="secondary" icon={<PowerOffIcon />} isDisabled={busy}
                   onClick={() => run(() => clusterApi.stop(cluster.id))}>Stop</Button>
               )}
-              <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'}
-                onClick={() => run(() => clusterApi.addWorkers(cluster.id, 1))}>Add worker</Button>
+              {!isOpenShift && (
+                <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'}
+                  onClick={() => run(() => clusterApi.addWorkers(cluster.id, 1))}>Add worker</Button>
+              )}
               <Button variant="danger" icon={<TrashIcon />} onClick={() => setConfirmDelete(true)}>Delete</Button>
             </Flex>
           </FlexItem>
         </Flex>
       </PageSection>
 
+      {isOpenShift && (
+        <PageSection type="tabs" variant="light" padding={{ default: 'noPadding' }}>
+          <Tabs activeKey={tab} onSelect={(_e, k) => setParams(k === 'overview' ? {} : { tab: String(k) }, { replace: true })}
+            usePageInsets aria-label="Cluster sections">
+            <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
+            <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" />
+            <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" />
+          </Tabs>
+        </PageSection>
+      )}
+
       <PageSection>
+        {isOpenShift && tab !== 'overview' && (error || loadError) && (
+          <Alert variant="danger" isInline title={error || loadError} style={{ marginBottom: 16 }}
+            actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
+        )}
+        {isOpenShift && tab === 'operators' && (
+          <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
+        )}
+        {isOpenShift && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
+        {(!isOpenShift || tab === 'overview') && (
         <Stack hasGutter>
           {(error || loadError) && (
             <StackItem>
@@ -211,14 +283,18 @@ export const ClusterDetailPage: React.FC = () => {
                 actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
             </StackItem>
           )}
+          {isOpenShift && install.status?.phase !== 'ready' && (
+            <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>
+          )}
           <StackItem>
             <Card>
               <CardBody>
-                <DescriptionList columnModifier={{ default: '3Col' }}>
+                <DescriptionList columnModifier={{ default: '1Col', md: '2Col', xl: '3Col' }}>
                   <DescriptionListGroup>
                     <DescriptionListTerm>Type</DescriptionListTerm>
                     <DescriptionListDescription>
-                      {cluster.type} {cluster.version || '(stable channel)'}
+                      {isOpenShift ? 'OpenShift' : cluster.type} {cluster.version || (isOpenShift ? `(latest of ${os.channel || 'stable'})` : '(stable channel)')}
+                      {isOpenShift && os.topology && <>, {TOPOLOGY_NAMES[os.topology] || os.topology}</>}
                       <div id="cluster-type-help" style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
                         {CLUSTER_TYPE_HELP[cluster.type]}
                       </div>
@@ -262,14 +338,41 @@ export const ClusterDetailPage: React.FC = () => {
                       </DescriptionListDescription>
                     </DescriptionListGroup>
                   )}
-                  <DescriptionListGroup>
-                    <DescriptionListTerm>Node image</DescriptionListTerm>
-                    <DescriptionListDescription>{cluster.spec?.image || '—'}</DescriptionListDescription>
-                  </DescriptionListGroup>
-                  <DescriptionListGroup>
-                    <DescriptionListTerm>Pod / service networks</DescriptionListTerm>
-                    <DescriptionListDescription>{cluster.spec?.pod_cidr || '—'} / {cluster.spec?.service_cidr || '—'}</DescriptionListDescription>
-                  </DescriptionListGroup>
+                  {isOpenShift ? (
+                    <>
+                      <DescriptionListGroup>
+                        <DescriptionListTerm>Storage</DescriptionListTerm>
+                        <DescriptionListDescription id="os-storage-value">
+                          {STORAGE_NAMES[os.storage] || os.storage || 'none'}
+                          {os.storage && os.storage !== 'none' && os.storage_disk_size ? ` (${os.storage_disk_size} GiB disk per node)` : ''}
+                        </DescriptionListDescription>
+                      </DescriptionListGroup>
+                      <DescriptionListGroup>
+                        <DescriptionListTerm>Networking add-ons</DescriptionListTerm>
+                        <DescriptionListDescription>
+                          MetalLB: {os.metallb?.enabled ? <>L2, pool <code>{os.metallb.pool || 'pending'}</code></> : 'off'}
+                          <br />SR-IOV: {os.sriov?.enabled ? `${os.sriov.nics} igb NIC(s) × ${os.sriov.vfs} VFs (${os.sriov.device_type})` : 'off'}
+                        </DescriptionListDescription>
+                      </DescriptionListGroup>
+                      {(os.operators || []).length > 0 && (
+                        <DescriptionListGroup>
+                          <DescriptionListTerm>Requested operators</DescriptionListTerm>
+                          <DescriptionListDescription>{os.operators.map((o: { name: string }) => o.name).join(', ')}</DescriptionListDescription>
+                        </DescriptionListGroup>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <DescriptionListGroup>
+                        <DescriptionListTerm>Node image</DescriptionListTerm>
+                        <DescriptionListDescription>{cluster.spec?.image || '—'}</DescriptionListDescription>
+                      </DescriptionListGroup>
+                      <DescriptionListGroup>
+                        <DescriptionListTerm>Pod / service networks</DescriptionListTerm>
+                        <DescriptionListDescription>{cluster.spec?.pod_cidr || '—'} / {cluster.spec?.service_cidr || '—'}</DescriptionListDescription>
+                      </DescriptionListGroup>
+                    </>
+                  )}
                   <DescriptionListGroup>
                     <DescriptionListTerm>Created</DescriptionListTerm>
                     <DescriptionListDescription>{formatDate(cluster.created_at)}</DescriptionListDescription>
@@ -278,10 +381,14 @@ export const ClusterDetailPage: React.FC = () => {
               </CardBody>
             </Card>
           </StackItem>
+          {isOpenShift && install.status?.phase === 'ready' && (
+            <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>
+          )}
+          {isOpenShift && <StackItem><ConsoleAccess cluster={cluster} /></StackItem>}
           {cluster.has_kubeconfig && (
             <StackItem>
               <Card>
-                <CardTitle>Use with kubectl</CardTitle>
+                <CardTitle>Use with {isOpenShift ? 'oc / kubectl' : 'kubectl'}</CardTitle>
                 <CardBody><KubectlCommands cluster={cluster} /></CardBody>
               </Card>
             </StackItem>
@@ -309,8 +416,13 @@ export const ClusterDetailPage: React.FC = () => {
                               aria-label={`Open console of ${n.name}`} onClick={() => navigate(`/vms/${n.vm_id}/console`)}>
                               Console
                             </Button>
-                            {n.role === 'worker' && (
+                            {n.role === 'worker' && !isOpenShift && (
                               <ActionsColumn items={[{ title: 'Remove worker', isDisabled: busy, onClick: () => setToRemove(n.name) }]} />
+                            )}
+                            {isOpenShift && n.vm_id && (
+                              <ActionsColumn items={[n.state === 'running'
+                                ? { title: 'Stop node', onClick: () => run(() => vmApi.power(n.vm_id!, 'stop')) }
+                                : { title: 'Start node', onClick: () => run(() => vmApi.power(n.vm_id!, 'start')) }]} />
                             )}
                           </Flex>
                         </Td>
@@ -323,6 +435,7 @@ export const ClusterDetailPage: React.FC = () => {
           </StackItem>
           <StackItem><Kubectl key={`${cluster.status}-${cluster.nodes.length}`} cluster={cluster} /></StackItem>
         </Stack>
+        )}
       </PageSection>
 
       <ConfirmModal title={`Delete cluster ${cluster.name}?`} isOpen={confirmDelete} confirmLabel="Delete"

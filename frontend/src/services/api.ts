@@ -5,6 +5,8 @@ import {
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
+  PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
@@ -54,6 +56,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     if (response.status === 503 && body?.libvirt === 'stopped') window.dispatchEvent(new Event(LIBVIRT_STOPPED_EVENT));
     throw new ApiError(response.status, errorMessage(body, response.status));
   }
+  if (response.status === 204) return undefined as T;
   return response.json();
 }
 
@@ -193,6 +196,25 @@ export const clusterApi = {
   kubectl: (id: number, view: 'nodes' | 'pods') => request<ClusterCommandOutput>(`/clusters/${id}/kubectl/${view}`),
   /** Plain link: the backend sends it as an attachment named <cluster>-kubeconfig.yaml */
   kubeconfigUrl: (id: number) => `${API_BASE}/api/v1/clusters/${id}/kubeconfig`,
+  // OpenShift
+  installStatus: (id: number) => request<InstallStatus>(`/clusters/${id}/openshift/install-status`),
+  credentials: (id: number) => request<ClusterCredentials>(`/clusters/${id}/openshift/credentials`),
+  /** Plain link: private key of the nodes' core user (text/plain attachment) */
+  sshKeyUrl: (id: number) => `${API_BASE}/api/v1/clusters/${id}/openshift/ssh-key`,
+  operators: (id: number) => request<InstalledOperator[]>(`/clusters/${id}/openshift/operators`),
+  packageManifests: (id: number) => request<PackageManifest[]>(`/clusters/${id}/openshift/packagemanifests`),
+  addAddon: (id: number, data: AddonRequest) => post<Task>(`/clusters/${id}/openshift/addons`, data),
+  metallb: (id: number) => request<MetalLBScenario>(`/clusters/${id}/openshift/metallb`),
+};
+
+export const openshiftApi = {
+  pullSecret: () => request<PullSecretStatus>('/openshift/pull-secret'),
+  setPullSecret: (data: PullSecretIn) =>
+    request<PullSecretStatus>('/openshift/pull-secret', { method: 'PUT', body: JSON.stringify(data) }),
+  deletePullSecret: () => del<PullSecretStatus>('/openshift/pull-secret'),
+  channels: () => request<OpenShiftChannel[]>('/openshift/channels'),
+  versions: (channel: string) => request<OpenShiftVersion[]>(`/openshift/versions?channel=${encodeURIComponent(channel)}`),
+  catalog: () => request<CatalogOperator[]>('/openshift/catalog'),
 };
 
 export const hostApi = {
