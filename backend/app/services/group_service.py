@@ -224,16 +224,37 @@ class GroupService:
             if net.overlaps(ipaddress.IPv4Network(other["cidr"])):
                 raise ValueError(f"{net} overlaps network '{other['network']}' ({other['cidr']})")
         for group in db.query(Group).all():
+            # Group networks have no host <ip>, so their subnets are only known here; a "missing"
+            # group's network is gone and its subnet is free again
+            if group.status == "missing":
+                continue
             if group.id != group_id and net.overlaps(ipaddress.IPv4Network(group.cidr)):
                 raise ValueError(f"{net} overlaps group '{group.name}' ({group.cidr})")
 
     # Create
 
+    @staticmethod
+    def _nothing_left(group: Group, net_names: set) -> bool:
+        """True when none of the group's libvirt objects (network, router, member VMs) exist"""
+        if network_name(group.name) in net_names:
+            return False
+        members = [m.get("name") for m in (group.spec or {}).get("members", [])]
+        vm_names = [group.router_vm_name or router_vm_name(group.name)] + [
+            member_vm_name(group.name, name) for name in members if name]
+        return all(libvirt_client.get_vm(name) is None for name in vm_names)
+
     def create_group(self, db: Session, spec: GroupSpec) -> Tuple[Group, Task]:
         self.sync_groups(db)
-        if db.query(Group).filter(Group.name == spec.name).first():
-            raise ValueError(f"Group '{spec.name}' already exists")
         net_names = {n["name"] for n in libvirt_client.list_networks()}
+        existing = db.query(Group).filter(Group.name == spec.name).first()
+        if existing is not None:
+            if existing.status != "missing" or not self._nothing_left(existing, net_names):
+                raise ValueError(f"Group '{spec.name}' already exists")
+            # Its network, router and members are all gone (deleted outside this app): the row is
+            # only a record of it, so a new group may take the name
+            logger.info(f"Replacing missing group {existing.name} (nothing left in libvirt)")
+            db.delete(existing)
+            db.commit()
         if network_name(spec.name) in net_names:
             raise ValueError(f"Network '{network_name(spec.name)}' already exists")
         vm_names = [router_vm_name(spec.name)] + [member_vm_name(spec.name, m.name) for m in spec.members]
