@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -54,7 +55,7 @@ func (r *nicResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Description: "Fixed MAC; generated if unset."},
 			"link_state": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("up"),
 				Description: "up, or down (cable unplugged). Changed in place, live."},
-			"vf": schema.BoolAttribute{Computed: true, Description: "True when the NIC is an SR-IOV VF passed through from the host."},
+			"vf": schema.BoolAttribute{Computed: true, PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}, Description: "True when the NIC is an SR-IOV VF passed through from the host."},
 		},
 	}
 }
