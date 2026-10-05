@@ -1,11 +1,13 @@
 """libvirt connection wrapper"""
 import libvirt
 import threading
+import time
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 from typing import Optional, List, Dict, Any, BinaryIO
 import logging
 
+from app import domain_xml
 from app.config import settings
 from app.events import event_bus
 
@@ -69,6 +71,9 @@ class LibvirtClient:
         self.uri = uri or settings.LIBVIRT_URI
         self.conn: Optional[libvirt.virConnect] = None
         self._lock = threading.Lock()
+        # (domain uuid, device alias) reported by DEVICE_REMOVED events, for detach_disk()
+        self._removed = set()
+        self._removed_cv = threading.Condition()
 
     def connect(self) -> libvirt.virConnect:
         """Connect to libvirt (reuses a live connection)"""
@@ -106,6 +111,12 @@ class LibvirtClient:
             event_bus.publish({"kind": "vm", "event": "rebooted", "uuid": dom.UUIDString(),
                                "name": dom.name(), "state": "running"})
 
+        def on_device_removed(_conn, dom, alias, _opaque):
+            with self._removed_cv:
+                self._removed.add((dom.UUIDString(), alias))
+                self._removed_cv.notify_all()
+            self._publish_vm(dom, "device_removed", device=alias)
+
         def on_network(_conn, net, event, _detail, _opaque):
             event_bus.publish({"kind": "network", "event": event, "name": net.name()})
 
@@ -116,6 +127,8 @@ class LibvirtClient:
             lambda: conn.registerCloseCallback(on_close, None),
             lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_LIFECYCLE, on_domain, None),
             lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_REBOOT, on_reboot, None),
+            lambda: conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_DEVICE_REMOVED,
+                                                on_device_removed, None),
             lambda: conn.networkEventRegisterAny(None, libvirt.VIR_NETWORK_EVENT_ID_LIFECYCLE, on_network, None),
             lambda: conn.storagePoolEventRegisterAny(None, libvirt.VIR_STORAGE_POOL_EVENT_ID_LIFECYCLE, on_pool, None),
         ]
@@ -124,6 +137,15 @@ class LibvirtClient:
                 register()
             except libvirt.libvirtError as e:
                 logger.warning(f"Could not register libvirt event callback: {e}")
+
+    @staticmethod
+    def _publish_vm(dom: libvirt.virDomain, event: str, **extra) -> None:
+        try:
+            state = DOMAIN_STATES.get(dom.state()[0], "unknown")
+        except libvirt.libvirtError:
+            state = "undefined"
+        event_bus.publish({"kind": "vm", "event": event, "uuid": dom.UUIDString(), "name": dom.name(),
+                           "state": state, **extra})
 
     def disconnect(self):
         """Disconnect from libvirt"""
@@ -179,6 +201,10 @@ class LibvirtClient:
         conn = self.connect()
         boot_xml = "\n".join(f"<boot dev='{d}'/>" for d in (boot_devs or ["hd"]))
         listen = quoteattr(settings.VNC_LISTEN)
+        # libvirt only creates as many pcie-root-ports as the devices need, and hot-plugging a
+        # disk or NIC on q35 needs a free one: declare 16 (~8 spare after the built-in devices)
+        root_ports = "<controller type='pci' index='0' model='pcie-root'/>" + \
+            "<controller type='pci' model='pcie-root-port'/>" * 16
 
         # No <emulator> and machine='q35': libvirt resolves the emulator binary
         # and the latest q35 machine version from the host's capabilities.
@@ -204,6 +230,7 @@ class LibvirtClient:
             <devices>
                 {disk_xml}
                 {network_xml}
+                {root_ports}
                 <serial type='pty'>
                     <target port='0'/>
                 </serial>
@@ -269,13 +296,15 @@ class LibvirtClient:
 
         disk_paths = []
         if delete_disks:
-            root = ET.fromstring(domain.XMLDesc(0))
-            for disk in root.findall("./devices/disk"):
-                source = disk.find("source")
-                path = source.get("file") if source is not None else None
-                # Data disks and our generated cloud-init seed, never shared install ISOs
-                if path and (disk.get("device") == "disk" or path.endswith("-cidata.iso")):
-                    disk_paths.append(path)
+            # Running + saved config: disks attached or detached for the next start count too
+            roots = [ET.fromstring(domain.XMLDesc(0)),
+                     ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))]
+            for root in roots:
+                for disk in domain_xml.disk_elements(root):
+                    path = domain_xml.disk_info(disk)["path"]
+                    # Data disks and our generated cloud-init seed, never shared install ISOs
+                    if path and path not in disk_paths and (disk.get("device") == "disk" or domain_xml.is_seed(path)):
+                        disk_paths.append(path)
 
         if domain.isActive():
             domain.destroy()
@@ -313,21 +342,6 @@ class LibvirtClient:
             "port": port if port > 0 else None,
         }
 
-    def get_vm_disks(self, name: str) -> List[Dict[str, Any]]:
-        xml = self.get_vm_xml(name)
-        if xml is None:
-            return []
-        disks = []
-        for disk in ET.fromstring(xml).findall("./devices/disk"):
-            source = disk.find("source")
-            target = disk.find("target")
-            disks.append({
-                "device": disk.get("device"),
-                "path": source.get("file") if source is not None else None,
-                "target": target.get("dev") if target is not None else None,
-            })
-        return disks
-
     def get_vm_nics(self, name: str) -> List[Dict[str, Any]]:
         """Configured NICs (available even when the VM is off)"""
         xml = self.get_vm_xml(name)
@@ -363,6 +377,238 @@ class LibvirtClient:
             }
             for iface_name, data in ifaces.items()
         ]
+
+    # VM devices: CD-ROM, boot order, disks
+
+    def _domain(self, name: str) -> libvirt.virDomain:
+        return self.connect().lookupByName(name)
+
+    @staticmethod
+    def _xml_roots(domain: libvirt.virDomain):
+        """(running XML or None if shut off, saved persistent XML)"""
+        live = ET.fromstring(domain.XMLDesc(0)) if domain.isActive() else None
+        config = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE | libvirt.VIR_DOMAIN_XML_SECURE))
+        return live, config
+
+    def get_vm_devices(self, name: str) -> Optional[Dict[str, Any]]:
+        """Disks (with size and pending changes), the user CD-ROM and the boot order"""
+        try:
+            domain = self._domain(name)
+        except libvirt.libvirtError:
+            return None
+        live, config = self._xml_roots(domain)
+        current = live if live is not None else config
+        boot = domain_xml.boot_disk(config)
+        boot_target = domain_xml.disk_info(boot)["target"] if boot is not None else None
+
+        disks = []
+        seen = set()
+        for root in (current, config):
+            for el in domain_xml.disk_elements(root):
+                info = domain_xml.disk_info(el)
+                if info["target"] in seen:
+                    continue
+                seen.add(info["target"])
+                info.pop("alias")
+                info.pop("boot_order")
+                info["boot"] = info["target"] == boot_target
+                info["pending"] = None
+                if live is not None:
+                    in_live = domain_xml.find_disk(live, info["target"]) is not None
+                    in_config = domain_xml.find_disk(config, info["target"]) is not None
+                    info["pending"] = "attach" if not in_live else "detach" if not in_config else None
+                info["capacity"] = self._disk_capacity(
+                    domain, info, in_live=live is not None and info["pending"] != "attach")
+                disks.append(info)
+
+        cdrom = None
+        cd_config = domain_xml.user_cdrom(config)
+        cd_live = domain_xml.user_cdrom(live) if live is not None else None
+        if cd_config is not None or cd_live is not None:
+            info = domain_xml.disk_info(cd_live if cd_live is not None else cd_config)
+            cdrom = {"target": info["target"], "path": info["path"],
+                     # added while running: the device only exists from the next start
+                     "pending": live is not None and cd_live is None}
+        return {"disks": disks, "cdrom": cdrom, "boot_order": domain_xml.boot_order(config)}
+
+    def _disk_capacity(self, domain: libvirt.virDomain, info: Dict[str, Any], in_live: bool) -> Optional[int]:
+        if info["device"] != "disk" or not info["path"]:
+            return None
+        try:
+            if in_live:
+                return domain.blockInfo(info["target"])[0]
+            return self.connect().storageVolLookupByPath(info["path"]).info()[1]
+        except libvirt.libvirtError:
+            return None
+
+    def set_cdrom(self, name: str, iso_path: Optional[str]) -> Dict[str, Any]:
+        """Insert (or eject with None) the user CD-ROM's media; adds a SATA CD-ROM if the VM has none.
+
+        Returns {"target", "pending"}: pending=True when it only applies at the next start.
+        """
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        cd_config = domain_xml.user_cdrom(config)
+        cd_live = domain_xml.user_cdrom(live) if live is not None else None
+
+        if cd_config is None and cd_live is None:
+            if not iso_path:
+                return {"target": None, "pending": False}
+            # SATA CD-ROMs can't be hot-plugged: add it to the saved config
+            target = domain_xml.next_target([r for r in (live, config) if r is not None], "sd")
+            domain.attachDeviceFlags(domain_xml.cdrom_xml(target, iso_path), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            self._publish_vm(domain, "devices")
+            return {"target": target, "pending": live is not None, "added": True}
+
+        if cd_live is not None:
+            # Two calls: the running and saved definitions may differ (e.g. a one-shot boot order
+            # puts <boot order='1'/> on the running CD-ROM only). FORCE: eject even if the tray is locked.
+            domain.updateDeviceFlags(domain_xml.media_change_xml(cd_live, iso_path),
+                                     libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_DEVICE_MODIFY_FORCE)
+            if cd_config is not None:
+                domain.updateDeviceFlags(domain_xml.media_change_xml(cd_config, iso_path),
+                                         libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            pending = False
+        else:
+            domain.updateDeviceFlags(domain_xml.media_change_xml(cd_config, iso_path),
+                                     libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            pending = live is not None
+        self._publish_vm(domain, "devices")
+        target = domain_xml.disk_info(cd_live if cd_live is not None else cd_config)["target"]
+        return {"target": target, "pending": pending, "added": False}
+
+    def set_boot_order(self, name: str, order: List[str]) -> None:
+        """Persistent boot order (applies at the next cold start)"""
+        domain = self._domain(name)
+        _live, config = self._xml_roots(domain)
+        domain_xml.set_boot_order(config, order)
+        self.connect().defineXML(ET.tostring(config, encoding="unicode"))
+        self._publish_vm(domain, "devices")
+
+    def start_vm_with_boot_order(self, name: str, order: List[str]) -> None:
+        """One-shot boot order: define it, start, then restore the saved definition.
+
+        The running instance keeps this order (guest reboots too); the next cold start uses the original.
+        """
+        conn = self.connect()
+        domain = conn.lookupByName(name)
+        original = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE | libvirt.VIR_DOMAIN_XML_SECURE)
+        once = ET.fromstring(original)
+        domain_xml.set_boot_order(once, order)
+        conn.defineXML(ET.tostring(once, encoding="unicode"))
+        try:
+            domain.create()
+        finally:
+            conn.defineXML(original)
+        logger.info(f"Started VM {name} with one-shot boot order {order}")
+
+    def attach_disk(self, name: str, xml: str) -> Dict[str, Any]:
+        """Attach a disk to the saved config and, if running, live (hot-plug).
+
+        Returns {"pending", "error"}: pending=True when it only applies at the next start
+        (error = why hot-plug failed, if it was tried).
+        """
+        domain = self._domain(name)
+        if domain.isActive():
+            try:
+                domain.attachDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_LIVE | libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+                self._publish_vm(domain, "devices")
+                return {"pending": False, "error": None}
+            except libvirt.libvirtError as e:
+                logger.warning(f"Hot-plug into {name} failed, attaching for next start: {e}")
+                domain.attachDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+                self._publish_vm(domain, "devices")
+                return {"pending": True, "error": e.get_error_message() or str(e)}
+        domain.attachDeviceFlags(xml, libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+        self._publish_vm(domain, "devices")
+        return {"pending": False, "error": None}
+
+    def detach_disk(self, name: str, target: str, timeout: float = 15.0) -> Dict[str, Any]:
+        """Detach a disk; when running, hot-unplug and wait for the guest to release it.
+
+        Returns {"pending", "path"}: pending=True when the guest didn't release it in time (or the bus
+        can't hot-unplug). It is removed from the saved config either way, so it goes away at the
+        next shutdown.
+        """
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        el_config = domain_xml.find_disk(config, target)
+        el_live = domain_xml.find_disk(live, target) if live is not None else None
+        if el_config is None and el_live is None:
+            raise ValueError(f"No disk {target}")
+        path = domain_xml.disk_info(el_live if el_live is not None else el_config)["path"]
+
+        if el_live is None:
+            domain.detachDeviceFlags(ET.tostring(el_config, encoding="unicode"), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            self._publish_vm(domain, "devices")
+            return {"pending": False, "path": path}
+
+        key = (domain.UUIDString(), domain_xml.disk_info(el_live)["alias"])
+        with self._removed_cv:
+            self._removed.discard(key)
+        flags = libvirt.VIR_DOMAIN_AFFECT_LIVE | (libvirt.VIR_DOMAIN_AFFECT_CONFIG if el_config is not None else 0)
+        try:
+            domain.detachDeviceFlags(ET.tostring(el_live, encoding="unicode"), flags)
+        except libvirt.libvirtError as e:
+            if el_config is None:
+                raise
+            logger.warning(f"Hot-unplug of {target} from {name} refused, detaching at next shutdown: {e}")
+            domain.detachDeviceFlags(ET.tostring(el_config, encoding="unicode"), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            self._publish_vm(domain, "devices")
+            return {"pending": True, "path": path}
+
+        def gone() -> bool:
+            return not domain.isActive() or domain_xml.find_disk(ET.fromstring(domain.XMLDesc(0)), target) is None
+
+        # The guest must acknowledge the unplug: wait for libvirt's DEVICE_REMOVED event
+        deadline = time.monotonic() + timeout
+        with self._removed_cv:
+            while key not in self._removed and time.monotonic() < deadline:
+                self._removed_cv.wait(min(deadline - time.monotonic(), 2.0))
+                if key not in self._removed and gone():
+                    break  # event missed (e.g. libvirt reconnected); the device is gone anyway
+            self._removed.discard(key)
+        removed = gone()
+        self._publish_vm(domain, "devices")
+        return {"pending": not removed, "path": path}
+
+    def resize_disk(self, name: str, target: str, capacity: int) -> None:
+        """Grow a disk to capacity bytes: blockResize when running (QEMU owns the image), else vol.resize"""
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        el_live = domain_xml.find_disk(live, target) if live is not None else None
+        el = el_live if el_live is not None else domain_xml.find_disk(config, target)
+        if el is None or el.get("device") != "disk":
+            raise ValueError(f"No disk {target}")
+        if el_live is not None:
+            domain.blockResize(target, int(capacity), libvirt.VIR_DOMAIN_BLOCK_RESIZE_BYTES)
+        else:
+            self.connect().storageVolLookupByPath(domain_xml.disk_info(el)["path"]).resize(int(capacity), 0)
+        self._publish_vm(domain, "devices")
+
+    def next_disk_target(self, name: str, prefix: str) -> str:
+        """First free vdX / sdX across the running and saved configs"""
+        live, config = self._xml_roots(self._domain(name))
+        return domain_xml.next_target([r for r in (live, config) if r is not None], prefix)
+
+    def publish_vm_event(self, name: str, event: str) -> None:
+        try:
+            self._publish_vm(self._domain(name), event)
+        except libvirt.libvirtError:
+            pass
+
+    def free_volume_name(self, pool_name: str, stem: str, ext: str) -> str:
+        """<stem>1.<ext>, <stem>2.<ext>, ...: first name not taken in the pool"""
+        pool = self.connect().storagePoolLookupByName(pool_name)
+        try:
+            pool.refresh(0)  # files created outside libvirt
+        except libvirt.libvirtError:
+            pass  # refused while another volume job (e.g. a clone) runs in the pool
+        taken = set(pool.listVolumes())
+        n = 1
+        while f"{stem}{n}.{ext}" in taken:
+            n += 1
+        return f"{stem}{n}.{ext}"
 
     # Storage Operations
 
@@ -520,7 +766,17 @@ class LibvirtClient:
 
     def refresh_pool(self, pool_name: str) -> None:
         """Rescan a pool (picks up the real format of uploaded images)"""
-        self.connect().storagePoolLookupByName(pool_name).refresh(0)
+        pool = self.connect().storagePoolLookupByName(pool_name)
+        # Refused while another volume job (e.g. a cloud image clone) runs in the pool: retry
+        for attempt in range(30):
+            try:
+                pool.refresh(0)
+                return
+            except libvirt.libvirtError as e:
+                if attempt == 29:
+                    logger.warning(f"Could not refresh pool {pool_name}: {e}")
+                    return
+                time.sleep(2)
 
     def clone_volume(self, pool_name: str, source_path: str, name: str, capacity: int) -> str:
         """Full qcow2 copy of source_path, grown to at least capacity bytes; returns its path"""

@@ -188,4 +188,32 @@ type apiVM struct {
 	Console *struct {
 		Port *int64 `json:"port"`
 	} `json:"console"`
+	Disks []apiVMDisk `json:"disks"`
+	Cdrom *struct {
+		Target *string `json:"target"`
+		Path   *string `json:"path"`
+	} `json:"cdrom"`
+	Boot *struct {
+		Order []string `json:"order"`
+		Once  []string `json:"once"`
+	} `json:"boot"`
+}
+
+type apiVMDisk struct {
+	Device   *string `json:"device"`
+	Path     *string `json:"path"`
+	Target   *string `json:"target"`
+	Bus      *string `json:"bus"`
+	Format   *string `json:"format"`
+	Capacity *int64  `json:"capacity"`
+	Boot     bool    `json:"boot"`
+	Pending  *string `json:"pending"`
+}
+
+// apiDeviceChange is the result of PUT /cdrom, PUT /boot and the /disks calls.
+type apiDeviceChange struct {
+	Message string  `json:"message"`
+	Pending bool    `json:"pending"`
+	Target  *string `json:"target"`
+	Path    *string `json:"path"`
 }

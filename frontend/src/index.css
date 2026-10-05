@@ -43,3 +43,10 @@
   background: rgba(0, 0, 0, 0.6);
   z-index: 1;
 }
+
+/* VM details: boot order list */
+.boot-order {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+}

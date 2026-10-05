@@ -14,9 +14,47 @@ export interface VM {
 }
 
 export interface VMDisk {
-  device?: string | null;
+  device?: string | null; // disk | cdrom
   path?: string | null;
+  target?: string | null; // vda, sda, ...
+  bus?: string | null;
+  format?: string | null;
+  capacity?: number | null; // bytes (disks only)
+  boot: boolean; // the boot disk (can't be detached)
+  // running VM only: 'attach' = appears at next start, 'detach' = goes away when the guest releases it / at shutdown
+  pending?: 'attach' | 'detach' | null;
+}
+
+export interface VMCdrom {
   target?: string | null;
+  path?: string | null; // inserted ISO, null = empty
+  pending: boolean; // drive added while running: exists from the next start
+}
+
+export type BootDevice = 'hd' | 'cdrom' | 'network';
+
+export interface VMBoot {
+  order: BootDevice[]; // persistent order (next cold start)
+  once?: BootDevice[] | null; // one-shot order for the next start through this app
+}
+
+export interface VMBootUpdate {
+  order?: BootDevice[];
+  once?: boolean;
+}
+
+export interface VMDiskCreate {
+  size_gb: number;
+  pool?: string;
+  format?: 'qcow2' | 'raw';
+  bus?: 'virtio' | 'sata';
+}
+
+export interface DeviceChange {
+  message: string;
+  pending: boolean; // applies at the next start / shutdown, not now
+  target?: string | null;
+  path?: string | null;
 }
 
 export interface VMInterface {
@@ -36,6 +74,8 @@ export interface VMDetail extends VM {
   disks: VMDisk[];
   interfaces: VMInterface[];
   console?: ConsoleInfo | null;
+  cdrom?: VMCdrom | null;
+  boot?: VMBoot | null;
   xml_config?: string | null;
 }
 

@@ -57,8 +57,20 @@ Computed: `id`, `bridge`, `active`. Settings changes restart the network.
 | `description`, `autostart` | updated in place | |
 | `running` | `true`, in place | graceful shutdown (forced after 2 min) / start; drift is detected |
 | `wait_for_ip` | `false` | wait up to 5 min for a DHCP address |
+| `boot_order` | computed, in place | list of `hd`, `cdrom`, `network`; applies at the next start |
+| `cdrom` | computed, in place | ISO volume path in the CD-ROM drive, `""` = empty (live when running) |
 
 Computed: `id`, `uuid`, `status`, `ip_addresses`, `vnc_port`. Destroy deletes the VM's disks.
+
+### `vmmanager_disk`
+| Argument | | |
+|---|---|---|
+| `vm_id` | required, replace | |
+| `size_gb` | required, in place | grow only (live when running); shrinking is an error at plan time |
+| `pool`, `bus` (`virtio`/`sata`), `format` (`qcow2`/`raw`) | optional, replace | default pool, virtio, qcow2 |
+
+Computed: `id` (`<vm_id>/<target>`), `target` (vdb, …), `path`. Hot-plugged when the VM runs. Destroy
+detaches it and deletes the volume.
 
 All resources support `tofu import <address> <id>` (ids are the API ids).
 
@@ -69,4 +81,4 @@ make build && make test   # go vet
 ```
 
 Code: `internal/provider/` (`client.go` HTTP client + API payloads, one file per resource).
-Example: `examples/opentofu/lab`.
+Examples: `examples/opentofu/lab`, `examples/opentofu/devices`.

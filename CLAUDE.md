@@ -44,7 +44,7 @@ frontend/src/
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
   pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal, console/VncConsole
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk
 examples/opentofu/lab tofu example (network with DHCP reservations + 2 Debian VMs)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
@@ -65,6 +65,17 @@ e2e/                  Playwright browser tests against the real app (see below)
   pool (`/var/lib/libvirt/images`, created if missing). Cloud-image VMs get a full copy of the image
   plus `<name>-cidata.iso` (NoCloud seed, built with pycdlib); delete with `delete_disks` removes both.
 - Background jobs (downloads) use `task_service.start(...)`; task bodies must poll `is_cancelled()`.
+- **Devices** (`domain_xml.py` = pure XML helpers, calls in `libvirt_client`, endpoints `vm_devices.py`
+  mounted before `vms` so `POST /vms/{id}/disks` isn't a power action): new VMs get an empty SATA CD-ROM
+  `sda` (seed moves to `sdb`) and 16 `pcie-root-port`s (hot-plug needs free ports; older VMs fall back
+  to "attached at next start"). "User CD-ROM" = first non-`-cidata.iso` CD-ROM. Media changes use
+  separate LIVE and CONFIG `updateDeviceFlags` calls (running and saved XML can differ). Boot order keeps
+  the XML's style (`<os><boot dev>` or per-device `<boot order>`, never mixed), switching to per-device
+  when several CD-ROMs exist. One-shot boot = `vms.next_boot` in the DB, applied by `vm_service._start`
+  (define with CD first, start, redefine original). Hot-unplug waits for the DEVICE_REMOVED event (15 s),
+  else reports `pending`. VM delete with disks takes disks from both live and saved XML.
+- DB schema: `database.init_db()` creates tables and adds missing **nullable** columns (no migration
+  tool); new columns must be nullable or have a server default.
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
 
@@ -96,6 +107,7 @@ cd backend && venv/bin/python -c "import app.main"            # backend imports
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
 node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
+node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```
 

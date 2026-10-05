@@ -36,7 +36,7 @@ command such as `vmm-helper dhcp-release <network> <mac>`). Never give the app s
 
 API: `DELETE /api/v1/networks/{id}/leases/{mac}`. OpenTofu: none.
 
-### 1.2 Attach / eject an ISO from the VMs tab (S)
+### 1.2 Attach / eject an ISO from the VMs tab (S) — ✅ done
 
 - `PUT /api/v1/vms/{id}/cdrom {iso_path | null}`. If the VM has no CD-ROM device: add a SATA one
   with `attachDeviceFlags(..., CONFIG)`. SATA CD-ROMs can't be hot-added, so it takes effect at next
@@ -47,7 +47,7 @@ API: `DELETE /api/v1/networks/{id}/leases/{mac}`. OpenTofu: none.
 - UI: VM details → "CD/DVD" row: ISO dropdown (from `GET /storage/isos`) plus an Eject button. The same
   control goes in the console page toolbar, which is where you need it during an install.
 
-### 1.3 Boot order and "boot from ISO on next boot" (S–M)
+### 1.3 Boot order and "boot from ISO on next boot" (S–M) — ✅ done (recommended option; up/down list in the UI)
 
 The domain XML currently uses `<os><boot dev='hd'/><boot dev='cdrom'/></os>`. Two options:
 
@@ -66,7 +66,10 @@ The domain XML currently uses `<os><boot dev='hd'/><boot dev='cdrom'/></os>`. Tw
 API: `PUT /vms/{id}/boot {order: ["cdrom","hd"], once?: true}`. OpenTofu: `boot_order` on `vmmanager_vm`
 (in-place).
 
-### 1.4 Add / remove disks on an existing VM (S–M)
+### 1.4 Add / remove disks on an existing VM (S–M) — ✅ done (+ `vmmanager_disk`, `boot_order`/`cdrom` on `vmmanager_vm`)
+
+Note: libvirt does **not** add spare pcie-root-ports by itself; new VMs now declare 16. VMs created
+before that have ~1 free port, further hot-adds are attached for the next start.
 
 - `POST /vms/{id}/disks {size_gb, pool?, format=qcow2, bus=virtio}` creates a volume
   `<vm>-disk<N>.qcow2`, then `attachDeviceFlags(<disk … target dev='vdX'/>, LIVE|CONFIG)`.

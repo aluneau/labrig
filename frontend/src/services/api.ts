@@ -1,5 +1,5 @@
 import {
-  VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo,
+  VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo, DeviceChange, VMBootUpdate, VMDiskCreate,
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
@@ -56,6 +56,15 @@ export const vmApi = {
   delete: (id: number, deleteDisks = false) => del(`/vms/${id}?delete_disks=${deleteDisks}`),
   power: (id: number, action: VMPowerAction) => post<VM>(`/vms/${id}/${action}`),
   console: (id: number) => request<ConsoleInfo>(`/vms/${id}/console`),
+  setCdrom: (id: number, isoPath: string | null) =>
+    request<DeviceChange>(`/vms/${id}/cdrom`, { method: 'PUT', body: JSON.stringify({ iso_path: isoPath }) }),
+  setBoot: (id: number, data: VMBootUpdate) =>
+    request<DeviceChange>(`/vms/${id}/boot`, { method: 'PUT', body: JSON.stringify(data) }),
+  addDisk: (id: number, data: VMDiskCreate) => post<DeviceChange>(`/vms/${id}/disks`, data),
+  resizeDisk: (id: number, target: string, sizeGb: number) =>
+    request<DeviceChange>(`/vms/${id}/disks/${target}`, { method: 'PUT', body: JSON.stringify({ size_gb: sizeGb }) }),
+  detachDisk: (id: number, target: string, deleteVolume: boolean) =>
+    del<DeviceChange>(`/vms/${id}/disks/${target}?delete_volume=${deleteVolume}`),
 };
 
 export const storageApi = {

@@ -18,10 +18,12 @@ import {
   PageSection,
   Spinner,
   Switch,
+  Title,
 } from '@patternfly/react-core';
 import { ActionsColumn, ExpandableRowContent, IAction, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { DesktopIcon, VirtualMachineIcon } from '@patternfly/react-icons';
-import { VM, VMDetail, VMPowerAction } from '../types';
+import { DeviceChange, VM, VMDetail, VMPowerAction } from '../types';
+import { BootControl, CdromControl, DisksTable } from '../components/vms/VmDevices';
 import { vmApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { useLiveEvents } from '../hooks/useEvents';
@@ -34,12 +36,18 @@ import { CreateVMModal } from '../components/vms/CreateVMModal';
 
 const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: string) => void }> = ({ vmId, uuid, onError }) => {
   const { data: vm, error, reload } = usePolling<VMDetail>(() => vmApi.get(vmId), 10000);
+  const [result, setResult] = useState<DeviceChange | null>(null);
   useLiveEvents(['vm'], (event) => {
     if (event.uuid === uuid) reload();
   });
 
   if (error) return <Alert variant="danger" isInline isPlain title={error} />;
   if (!vm) return <Spinner size="md" />;
+
+  const onResult = (change: DeviceChange) => {
+    setResult(change);
+    reload();
+  };
 
   const ips = vm.interfaces.flatMap((i) => i.addresses);
   const vnc = vm.console?.port ? `${vm.console.host}:${vm.console.port}` : null;
@@ -53,6 +61,17 @@ const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: s
   };
 
   return (
+    <>
+    {result && (
+      <Alert
+        variant={result.pending ? 'warning' : 'success'}
+        isInline
+        isPlain
+        title={result.message}
+        actionClose={<AlertActionCloseButton onClose={() => setResult(null)} />}
+        style={{ marginBottom: 12 }}
+      />
+    )}
     <DescriptionList isHorizontal isCompact columnModifier={{ lg: '2Col' }}>
       <DescriptionListGroup>
         <DescriptionListTerm>IP addresses</DescriptionListTerm>
@@ -73,11 +92,15 @@ const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: s
         </DescriptionListDescription>
       </DescriptionListGroup>
       <DescriptionListGroup>
-        <DescriptionListTerm>Disks</DescriptionListTerm>
+        <DescriptionListTerm>CD/DVD</DescriptionListTerm>
         <DescriptionListDescription>
-          {vm.disks.length
-            ? vm.disks.map((d) => <div key={d.target || d.path}>{d.target} ({d.device}): {d.path || '—'}</div>)
-            : '—'}
+          <CdromControl vm={vm} onResult={onResult} onError={onError} />
+        </DescriptionListDescription>
+      </DescriptionListGroup>
+      <DescriptionListGroup>
+        <DescriptionListTerm>Boot order</DescriptionListTerm>
+        <DescriptionListDescription>
+          <BootControl vm={vm} onResult={onResult} onError={onError} />
         </DescriptionListDescription>
       </DescriptionListGroup>
       <DescriptionListGroup>
@@ -95,6 +118,9 @@ const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: s
         <DescriptionListDescription>{vm.uuid}</DescriptionListDescription>
       </DescriptionListGroup>
     </DescriptionList>
+    <Title headingLevel="h4" size="md" style={{ margin: '16px 0 4px' }}>Disks</Title>
+    <DisksTable vm={vm} onResult={onResult} onError={onError} />
+    </>
   );
 };
 
