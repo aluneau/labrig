@@ -80,6 +80,13 @@ class LibvirtUnavailable(Exception):
 
 # Errors from libvirt.open() meaning "nothing listens on the socket" (daemon and its sockets stopped)
 _UNAVAILABLE_CODES = {libvirt.VIR_ERR_SYSTEM_ERROR, libvirt.VIR_ERR_NO_CONNECT}
+# Objects deleted by another request/client while we iterate over a listing
+_VANISHED_CODES = {libvirt.VIR_ERR_NO_DOMAIN, libvirt.VIR_ERR_NO_NETWORK,
+                   libvirt.VIR_ERR_NO_STORAGE_POOL, libvirt.VIR_ERR_NO_STORAGE_VOL}
+
+
+def _vanished(exc: libvirt.libvirtError) -> bool:
+    return exc.get_error_code() in _VANISHED_CODES
 
 
 class LibvirtClient:
@@ -740,12 +747,16 @@ class LibvirtClient:
         conn = self.connect()
         pools = []
         for pool in conn.listAllStoragePools(0):
-            if pool.isActive():
-                try:
-                    pool.refresh(0)
-                except libvirt.libvirtError:
-                    pass
-            pools.append(self._pool_dict(pool))
+            try:
+                if pool.isActive():
+                    try:
+                        pool.refresh(0)
+                    except libvirt.libvirtError:
+                        pass
+                pools.append(self._pool_dict(pool))
+            except libvirt.libvirtError as e:
+                if not _vanished(e):
+                    raise
         return pools
 
     def create_storage_pool(self, name: str, path: str,
@@ -813,8 +824,14 @@ class LibvirtClient:
             return []
         volumes = []
         for vol in pool.listAllVolumes(0):
-            vol_type, capacity, allocation = vol.info()
-            root = ET.fromstring(vol.XMLDesc(0))
+            try:
+                vol_type, capacity, allocation = vol.info()
+                xml = vol.XMLDesc(0)
+            except libvirt.libvirtError as e:
+                if _vanished(e):
+                    continue  # deleted meanwhile (e.g. a VM removed with its disks)
+                raise
+            root = ET.fromstring(xml)
             fmt = root.find("./target/format")
             volumes.append({
                 "name": vol.name(),
@@ -941,17 +958,21 @@ class LibvirtClient:
     def list_networks(self) -> List[Dict[str, Any]]:
         """List all networks (active and inactive)"""
         conn = self.connect()
-        return [
-            {
-                "uuid": net.UUIDString(),
-                "name": net.name(),
-                "active": bool(net.isActive()),
-                "autostart": bool(net.autostart()),
-                "persistent": bool(net.isPersistent()),
-                "xml": net.XMLDesc(0),
-            }
-            for net in conn.listAllNetworks(0)
-        ]
+        networks = []
+        for net in conn.listAllNetworks(0):
+            try:
+                networks.append({
+                    "uuid": net.UUIDString(),
+                    "name": net.name(),
+                    "active": bool(net.isActive()),
+                    "autostart": bool(net.autostart()),
+                    "persistent": bool(net.isPersistent()),
+                    "xml": net.XMLDesc(0),
+                })
+            except libvirt.libvirtError as e:
+                if not _vanished(e):
+                    raise
+        return networks
 
     def create_network(self, name: str, xml: str, autostart: bool = True) -> str:
         net = self.connect().networkDefineXML(xml)

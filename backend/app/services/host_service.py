@@ -28,7 +28,9 @@ class HostService:
     def get_host_info(self, db: Session) -> Dict[str, Any]:
         lv = libvirt_client.get_host_info()
 
-        vms = vm_service.list_vms(db)
+        # Read the statuses now: the syncs below commit, which expires these rows, and a VM
+        # deleted meanwhile would then fail to reload (ObjectDeletedError -> 500)
+        statuses = [vm.status for vm in vm_service.list_vms(db)]
         pools = storage_service.list_pools(db)
         volumes = storage_service.list_volumes(db)
         networks = network_service.list_networks(db)
@@ -53,10 +55,10 @@ class HostService:
             "emulator_available": lv["emulator_available"],
             "issues": self._issues(lv, pools, networks),
             "resources": self.get_resources(),
-            "total_vms": len(vms),
-            "running_vms": sum(1 for vm in vms if vm.status == "running"),
-            "stopped_vms": sum(1 for vm in vms if vm.status in ("shutoff", "shutdown", "crashed")),
-            "paused_vms": sum(1 for vm in vms if vm.status in ("paused", "pmsuspended")),
+            "total_vms": len(statuses),
+            "running_vms": sum(1 for s in statuses if s == "running"),
+            "stopped_vms": sum(1 for s in statuses if s in ("shutoff", "shutdown", "crashed")),
+            "paused_vms": sum(1 for s in statuses if s in ("paused", "pmsuspended")),
             "total_pools": len(pools),
             "total_volumes": len(volumes),
             "total_networks": len(networks),
