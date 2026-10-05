@@ -302,6 +302,10 @@ class ELRouterBackend(RouterBackend):
         # Routers created before BGP was supported: install frr once. bgpd on in /etc/frr/daemons; a config
         # change is applied by frr-reload (systemctl reload: sessions stay up), a first start restarts frr
         return ("{ rpm -q frr >/dev/null || dnf -y -q install frr; }"
+                # ECMP over ports too (routers created before BGP have only ip_forward in their sysctl file)
+                " && { grep -q fib_multipath_hash_policy /etc/sysctl.d/90-vmm-router.conf"
+                " || echo 'net.ipv4.fib_multipath_hash_policy = 1' >> /etc/sysctl.d/90-vmm-router.conf; }"
+                " && sysctl -qw net.ipv4.fib_multipath_hash_policy=1"
                 " && if grep -q '^bgpd=yes' /etc/frr/daemons; then fresh=0;"
                 " else sed -i 's/^bgpd=.*/bgpd=yes/' /etc/frr/daemons && fresh=1; fi"
                 f" && chown frr:frr {FRR_CONF} && chmod 640 {FRR_CONF}"
@@ -384,7 +388,8 @@ class ELRouterBackend(RouterBackend):
                 "ExecStart=/usr/bin/qemu-ga --method=virtio-serial --path=/dev/virtio-ports/org.qemu.guest_agent.0\n"),
             "/etc/dnsmasq.conf": "user=dnsmasq\ngroup=dnsmasq\nconf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig\n",
             "/etc/sysconfig/nftables.conf": f'include "{NFT_CONF}"\n',
-            "/etc/sysctl.d/90-vmm-router.conf": "net.ipv4.ip_forward = 1\n",
+            # ECMP (BGP routes with several next hops): hash on ports too, so connections spread over them
+            "/etc/sysctl.d/90-vmm-router.conf": "net.ipv4.ip_forward = 1\nnet.ipv4.fib_multipath_hash_policy = 1\n",
         }
         config["write_files"] = [{"path": p, "content": c, "permissions": "0600" if p == WG_CONF else "0644"}
                                  for p, c in {**static_files, **files}.items()]
