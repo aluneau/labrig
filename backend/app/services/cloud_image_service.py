@@ -214,6 +214,17 @@ class CloudImageService:
             config["ssh_authorized_keys"] = ssh_keys
         return config
 
+    @staticmethod
+    def dhcp_all_network_config() -> str:
+        """network-config v2: DHCP on every NIC, including ones hot-plugged later (netplan + networkd on
+        Debian / Ubuntu; cloud-init's default only configures the first NIC there). optional: boot doesn't
+        wait for NICs on networks without DHCP. EL images don't need it: NetworkManager already runs DHCP
+        on new NICs by itself."""
+        return yaml.safe_dump({"version": 2, "ethernets": {
+            "all-en": {"match": {"name": "en*"}, "dhcp4": True, "optional": True},
+            "all-eth": {"match": {"name": "eth*"}, "dhcp4": True, "optional": True},
+        }}, sort_keys=False)
+
     def build_seed_iso(self, hostname: str, user_data: str, network_config: Optional[str] = None) -> bytes:
         """NoCloud seed: ISO9660 volume labelled 'cidata' with user-data, meta-data
         and optionally network-config (cloud-init network config v2)"""

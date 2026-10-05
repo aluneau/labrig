@@ -117,6 +117,8 @@ class VMService:
                         fqdn=fqdn,
                         kernel_args=vm_data.guest_kernel_args,
                     )
+                if network_config is None and image.distribution in ("debian", "ubuntu"):
+                    network_config = cloud_image_service.dhcp_all_network_config()  # extra / hot-plugged NICs
                 seed = cloud_image_service.build_seed_iso(hostname or vm_data.name, user_data, network_config)
                 seed_path = libvirt_client.upload_volume(
                     pool_name, f"{vm_data.name}-cidata.iso", len(seed), io.BytesIO(seed))
