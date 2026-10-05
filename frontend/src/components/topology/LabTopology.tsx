@@ -167,6 +167,15 @@ function badgeRows(badges: Badge[], width: number): Badge[][] {
   return rows;
 }
 
+/** Header lines of the virtual IPs zone: label, then the range (too long for one line) */
+function poolLines(t: GroupTopology): string[] {
+  return [
+    ...t.clusters.filter((c) => c.metallb_enabled && c.metallb_pool)
+      .flatMap((c) => [`MetalLB ${c.metallb_mode?.toUpperCase() || ''} pool (${c.name}):`, `${c.metallb_pool}`]),
+    ...(t.bgp.enabled ? t.bgp.announce_ranges.filter((r) => !r.owner).flatMap((r) => ['BGP range:', r.prefix]) : []),
+  ];
+}
+
 // ---------------------------------------------------------------- layout
 
 function computeLayout(t: GroupTopology, width: number): Layout {
@@ -177,10 +186,7 @@ function computeLayout(t: GroupTopology, width: number): Layout {
   const zones: Zone[] = [];
   const machines = t.machines;
   const showVips = t.vips.length > 0 || (t.bgp.configured && t.bgp.enabled) || t.clusters.some((c) => c.metallb_enabled);
-  const pools: string[] = [
-    ...t.clusters.filter((c) => c.metallb_enabled && c.metallb_pool).map((c) => `MetalLB ${c.metallb_mode?.toUpperCase() || ''} pool ${c.metallb_pool}`),
-    ...(t.bgp.enabled ? t.bgp.announce_ranges.filter((r) => !r.owner).map((r) => `BGP range ${r.prefix}`) : []),
-  ];
+  const pools = poolLines(t);
   const wgOn = t.wireguard.enabled;
   const placeBadges = (r: Rect, top: number) => {
     const rows = badgeRows(routerBadges(t), r.w - 20);
@@ -537,11 +543,8 @@ const Diagram: React.FC<DiagramProps> = ({ t, width, step, onTip }) => {
             {trunc(z.label, z.r.w - 16, 12.5)}
           </text>
           {z.sub && <text x={z.r.x + 10 + (z.indent || 0)} y={z.r.y + 33} fontSize={11} fill={C.sub}>{trunc(z.sub, z.r.w - 16, 11)}</text>}
-          {z.key === 'z-vip' && [
-            ...t.clusters.filter((c) => c.metallb_enabled && c.metallb_pool).map((c) => `MetalLB ${c.metallb_mode?.toUpperCase() || ''} pool ${c.metallb_pool}`),
-            ...(t.bgp.enabled ? t.bgp.announce_ranges.filter((a) => !a.owner).map((a) => `BGP range ${a.prefix}`) : []),
-          ].map((p, i) => (
-            <text key={p} x={z.r.x + 10} y={z.r.y + 50 + i * 16} fontSize={11} fill={C.bgp}>{trunc(p, z.r.w - 16, 11)}</text>
+          {z.key === 'z-vip' && poolLines(t).map((p, i) => (
+            <text key={`${p}-${i}`} x={z.r.x + 10} y={z.r.y + 50 + i * 16} fontSize={11} fill={C.bgp} fontWeight={i % 2 ? 600 : undefined}>{trunc(p, z.r.w - 16, 11)}</text>
           ))}
         </g>
       ))}

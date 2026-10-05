@@ -1029,7 +1029,7 @@ class OpenShiftInstaller:
         hops = [names.get(h["ip"], h["ip"]) for h in (route or {}).get("nexthops", [])]
         result["bgp_nexthops"] = hops
         checks.append({"name": f"The router has a BGP route to {ip}", "ok": bool(route and route.get("installed")),
-                       "detail": f"via {', '.join(hops)} ({len(hops)} next hop{'s' if len(hops) != 1 else ''}, ECMP)"
+                       "detail": f"via {', '.join(hops)}" + (f" ({len(hops)} next hops, ECMP)" if len(hops) > 1 else "")
                        if route else "no route learned yet"})
 
 
