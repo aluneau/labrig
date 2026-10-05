@@ -18,6 +18,8 @@ import { hostApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { formatBytes } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
+import { LibvirtCard } from '../components/host/LibvirtCard';
+import { useLibvirt } from '../hooks/useLibvirt';
 
 const Item: React.FC<{ term: string; children: React.ReactNode }> = ({ term, children }) => (
   <DescriptionListGroup>
@@ -29,14 +31,28 @@ const Item: React.FC<{ term: string; children: React.ReactNode }> = ({ term, chi
 const yesNo = (ok: boolean) => <Label color={ok ? 'green' : 'red'}>{ok ? 'Yes' : 'No'}</Label>;
 
 export const HostsPage: React.FC = () => {
+  const { status } = useLibvirt();
+  const running = status?.state === 'running';
+  return (
+    <>
+      <PageHeader title="Host" />
+      <PageSection>
+        <div style={{ marginBottom: 16 }}><LibvirtCard /></div>
+      </PageSection>
+      {running && <HostDetails />}
+    </>
+  );
+};
+
+/** Needs libvirt: only mounted while it runs */
+const HostDetails: React.FC = () => {
   const { data: host, error, loading } = usePolling(hostApi.info, 15000);
 
   if (loading) return <Bullseye><Spinner size="xl" /></Bullseye>;
 
   return (
     <>
-      <PageHeader title="Host" description={host?.hostname} />
-      <PageSection>
+      <PageSection style={{ paddingTop: 0 }}>
         {error && <Alert variant="danger" isInline title={error} style={{ marginBottom: 16 }} />}
         {host?.issues.map((issue) => (
           <Alert key={issue} variant="warning" isInline title="Host setup" style={{ marginBottom: 16 }}>{issue}</Alert>
@@ -44,7 +60,7 @@ export const HostsPage: React.FC = () => {
         {host && (
           <Gallery hasGutter minWidths={{ default: '360px' }}>
             <Card>
-              <CardTitle>System</CardTitle>
+              <CardTitle>System · {host.hostname}</CardTitle>
               <CardBody>
                 <DescriptionList isHorizontal isCompact>
                   <Item term="Hostname">{host.hostname}</Item>
