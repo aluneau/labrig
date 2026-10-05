@@ -71,7 +71,7 @@ export const defaultOsDraft = (): OsDraft => ({
   operators: [],
   extraOperators: [],
   sriov: { enabled: false, nics: 1, vfs: 4, device_type: 'netdevice', ipam_range: '192.168.50.0/24' },
-  metallb: { enabled: false, addresses: 16, demo: true },
+  metallb: { enabled: false, mode: 'l2', addresses: 16, demo: true },
   disableUpdates: true,
 });
 
@@ -122,7 +122,7 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
     storage_disk_size: Number(d.storageDisk) || 100,
     operators: names.map((name) => ({ name, source: source(name) })),
     sriov: d.sriov,
-    metallb: { enabled: d.metallb.enabled, addresses: d.metallb.addresses, demo: d.metallb.demo },
+    metallb: { enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo },
     disable_updates: d.disableUpdates,
   };
   // The backend adds ODF's overhead only when no sizes are sent: the UI always sends them, so it adds it itself
@@ -515,26 +515,34 @@ export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
   const set = (p: Partial<MetalLBOptions>) => patch({ metallb: { ...m, ...p } });
   return (
     <FormSection title="MetalLB" titleElement="h3">
-      <Switch id="os-metallb" label="MetalLB in L2 mode (LoadBalancer services)" isChecked={m.enabled}
+      <Switch id="os-metallb" label="MetalLB (LoadBalancer services)" isChecked={m.enabled}
         onChange={(_e, v) => set({ enabled: v })} />
-      <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
-        An address pool is carved out of the lab group network (kept out of the router's DHCP range); one node
-        answers ARP for each service IP.
-      </div>
       {m.enabled && (
-        <Grid hasGutter md={6}>
-          <GridItem>
-            <FormGroup label="Pool size (addresses)" fieldId="os-metallb-size">
-              <TextInput id="os-metallb-size" type="number" min={2} max={64} value={String(m.addresses)} style={{ maxWidth: 120 }}
-                onChange={(_e, v) => set({ addresses: Math.min(64, Math.max(2, Number(v) || 2)) })} />
-            </FormGroup>
-          </GridItem>
-          <GridItem>
-            <Checkbox id="os-metallb-demo" isChecked={m.demo} onChange={(_e, v) => set({ demo: v })}
-              label="Deploy the MetalLB L2 lab demo"
-              description="A hello Deployment behind a LoadBalancer Service, with DNS name hello.<domain> (see the cluster's MetalLB lab tab)." />
-          </GridItem>
-        </Grid>
+        <>
+          <FormGroup role="radiogroup" fieldId="os-metallb-mode" label="Mode" isStack>
+            <Radio id="os-metallb-l2" name="os-metallb-mode" label="L2 (ARP)" isChecked={(m.mode || 'l2') === 'l2'}
+              onChange={() => set({ mode: 'l2' })}
+              description="A pool carved out of the lab group network (kept out of the router's DHCP range); one node answers ARP for each service IP. Failover, no load balancing." />
+            <Radio id="os-metallb-bgp" name="os-metallb-mode" label="BGP" isChecked={m.mode === 'bgp'}
+              onChange={() => set({ mode: 'bgp' })}
+              description="A /27 outside the lab network; every node tells the group router over BGP to send the service IPs to it, and the router spreads traffic over the nodes (ECMP). BGP is enabled on the router." />
+          </FormGroup>
+          <Grid hasGutter md={6}>
+            {(m.mode || 'l2') === 'l2' && (
+              <GridItem>
+                <FormGroup label="Pool size (addresses)" fieldId="os-metallb-size">
+                  <TextInput id="os-metallb-size" type="number" min={2} max={64} value={String(m.addresses)} style={{ maxWidth: 120 }}
+                    onChange={(_e, v) => set({ addresses: Math.min(64, Math.max(2, Number(v) || 2)) })} />
+                </FormGroup>
+              </GridItem>
+            )}
+            <GridItem>
+              <Checkbox id="os-metallb-demo" isChecked={m.demo} onChange={(_e, v) => set({ demo: v })}
+                label="Deploy the MetalLB lab demo"
+                description="A hello Deployment behind a LoadBalancer Service, with DNS name hello.<domain> (see the cluster's MetalLB lab tab)." />
+            </GridItem>
+          </Grid>
+        </>
       )}
     </FormSection>
   );

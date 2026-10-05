@@ -18,12 +18,13 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | §2 Lab groups v1 + static reservations + custom (ISO/empty) members | ✅ done; v2 items open (§2.5) |
 | §3.2 k3s (standalone network) and kubeadm (in a lab group, router haproxy) | ✅ done |
 | Lab remote access: WireGuard on the group router, laptop joins a lab (docs/wireguard.md) | ✅ done |
+| BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift SNO (agent-based installer) | **next** |
 | Authentication, CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
-`source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`, `wireguard`),
+`source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`, `wireguard`, `bgp`),
 `_wireguard_peer`, `_cluster` (k3s, kubeadm, `group_id`). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
 
 ---
@@ -175,7 +176,7 @@ guest's own grey-on-black text console (not changed: it would alter reproduced c
 > members with fixed MACs/static leases/DNS names + DNS records (A, CNAME, wildcard), live updates through
 > the guest agent, start/stop ordering, delete (keep or delete disks), DB rebuild from libvirt metadata,
 > Groups UI (topology, members, network & DNS, router config, export), `vmmanager_group`, `e2e/groups.js`.
-> Not yet: FRR/BGP, VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
+> Not yet: VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
 > flavour, groups without uplink (the EL router installs its packages at first boot), snapshots, templates,
 > export with disks, per-group autostart, `group_id` on `vmmanager_vm`.
 >
@@ -329,6 +330,15 @@ idea as the live DHCP reservations, but with the router as the target.
   "BGP + MetalLB", "proxy-only egress", "MTU 1400 path", "disconnected (no uplink) + mirror registry".
   You'd pick a template, fill in a case number, and press Create.
 
+> **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the
+> group CIDR, AS 64512 ← 64513, announce ranges from `BGP_ANNOUNCE_POOL` filtered `le 32`, ECMP over ports), live
+> sessions / routes (`GET /groups/{id}/bgp`), BGP tab (settings, sessions, routes, copy-paste FRR / MetalLB configs),
+> WireGuard clients route the announce ranges. MetalLB `mode: bgp` for OpenShift (create or day-2 switch). Topology tab
+> (group + OpenShift cluster): zones laptop → host → router (role badges) → L2 segment → virtual IPs, tooltips,
+> legend, "Follow a packet" stepper, explainers. `vmmanager_group.bgp`, `vmmanager_cluster.openshift.metallb_mode`,
+> `e2e/bgp.js`. Not yet: inter-group BGP peering (§2.5), BFD, IPv6, a "BGP + MetalLB" kubeadm recipe automated
+> by the app (the BGP tab gives the manifests).
+
 ---
 
 ## 3. Kubernetes / OpenShift on top of groups
@@ -469,8 +479,8 @@ No "add workers" in v1 (`oc adm node-image create` later).
   range is shrunk to keep it free) + `L2Advertisement`. **Scenario "MetalLB L2 lab"**: a demo `hello`
   Deployment + `Service type=LoadBalancer`, DNS record `hello.<domain>` -> its external IP, a diagram in
   the UI (laptop -WireGuard-> router -> L2/ARP -> announcing node -> pods), checks (curl from the router,
-  which node announces), failover demo (stop the announcing node). Later: BGP mode with FRR on the router
-  (needs the router `bgp` block).
+  which node announces), failover demo (stop the announcing node). BGP mode: ✅ done (2026-10, `metallb.mode`,
+  docs/bgp.md).
 
 **API**: `ClusterCreate.type = "openshift"` + `openshift: {version, channel, topology, storage, operators[],
 sriov{enabled, nics, vfs}, metallb{enabled, addresses, demo}}`; `/openshift/{pull-secret, channels, versions,

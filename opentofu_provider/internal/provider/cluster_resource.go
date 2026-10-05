@@ -81,6 +81,7 @@ type openshiftModel struct {
 	MetalLB         types.Bool   `tfsdk:"metallb"`
 	MetalLBAddrs    types.Int64  `tfsdk:"metallb_addresses"`
 	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
+	MetalLBMode     types.String `tfsdk:"metallb_mode"`
 	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
 }
 
@@ -193,7 +194,8 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"sriov_device_type": osStr("netdevice (default) or vfio-pci."),
 					"metallb":           osBool("MetalLB L2 with a pool kept free in the group network."),
 					"metallb_addresses": osInt("Pool size (default 16)."),
-					"metallb_demo":      osBool("Deploy the MetalLB L2 lab demo (hello.<group domain>), default true."),
+					"metallb_demo":      osBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
+					"metallb_mode":      osStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
 				},
 			},
@@ -354,6 +356,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			if !os.MetalLBDemo.IsNull() {
 				mlb["demo"] = os.MetalLBDemo.ValueBool()
+			}
+			if !os.MetalLBMode.IsNull() && os.MetalLBMode.ValueString() != "" {
+				mlb["mode"] = os.MetalLBMode.ValueString()
 			}
 			if len(mlb) > 0 {
 				opts["metallb"] = mlb

@@ -11,9 +11,9 @@ GroupSpec is the declarative description of a lab (also what OpenTofu sends):
 
 Fields marked "assigned by the app" are filled in when the group is created
 (fixed MACs, member IPs) and kept in the stored spec, so a re-render gives the
-same router config. bgp / vlans are part of the schema so specs can already carry
+same router config. vlans are part of the schema so specs can already carry
 them, but routers reject them until they are implemented. wireguard (remote access)
-is implemented by the "el" router.
+and bgp (FRR) are implemented by the "el" router.
 """
 import base64
 import binascii
@@ -86,16 +86,71 @@ class DNSSpec(BaseModel):
         return [_ipv4(f, "Forwarder") for f in v]
 
 
-# v2 blocks: bgp / vlans are accepted in the schema, rejected by the router backends for now
+# BGP on the router (FRR). vlans: accepted in the schema, rejected by the router backends for now
+
+BGP_ROUTER_ASN = 64512   # the router
+BGP_PEER_ASN = 64513     # what lab machines (cluster nodes, MetalLB speakers) use by default
+
 
 class BGPNeighbor(BaseModel):
+    """An explicit BGP peer of the router (machines of the group network also peer without one,
+    through the listen range)"""
     ip: str
     asn: int = Field(..., ge=1, le=4294967295)
+    name: Optional[str] = Field(None, pattern=HOST_LABEL)  # description only
+    owner: Optional[str] = None
+
+    @field_validator("ip")
+    @classmethod
+    def _ip(cls, v: str) -> str:
+        return _ipv4(v, "BGP neighbor")
+
+
+class BGPAnnounceRange(BaseModel):
+    """Prefixes the router accepts from its BGP peers (that prefix and anything more specific, e.g.
+    the /32 of a MetalLB service). Routes for anything else are refused."""
+    prefix: str
+    name: Optional[str] = Field(None, pattern=HOST_LABEL)
+    owner: Optional[str] = None  # "cluster:<name>" (MetalLB BGP pool): managed by the app
+
+    @field_validator("prefix")
+    @classmethod
+    def _prefix(cls, v: str) -> str:
+        return _ipv4_net(v, "Announce range")
 
 
 class BGPSpec(BaseModel):
-    asn: int = Field(..., ge=1, le=4294967295)
+    """The router runs FRR (bgpd): every machine of the group network may open a BGP session to the
+    router's LAN address (dynamic neighbors, `listen` + `peer_asn`), plus explicit `neighbors`.
+    Accepted routes (inside `announce_ranges`) go into the router's routing table, several next hops
+    for one prefix are all used (ECMP). The router announces nothing."""
+    enabled: bool = True
+    asn: int = Field(BGP_ROUTER_ASN, ge=1, le=4294967295)
+    listen: bool = True  # accept sessions from any address of the group network
+    peer_asn: Optional[int] = Field(BGP_PEER_ASN, ge=1, le=4294967295)  # None = any other ASN (eBGP)
     neighbors: List[BGPNeighbor] = []
+    announce_ranges: List[BGPAnnounceRange] = []
+    maximum_paths: int = Field(8, ge=1, le=64)
+
+    def check(self, cidr: str, wg_subnet: Optional[str]) -> None:
+        net = ipaddress.IPv4Network(cidr)
+        ips = [n.ip for n in self.neighbors]
+        dupes = {ip for ip in ips if ips.count(ip) > 1}
+        if dupes:
+            raise ValueError(f"Duplicate BGP neighbors: {', '.join(sorted(dupes))}")
+        for n in self.neighbors:
+            if ipaddress.IPv4Address(n.ip) not in net:
+                raise ValueError(f"BGP neighbor {n.ip} is not on the group network {cidr}")
+        prefixes = [ipaddress.IPv4Network(r.prefix) for r in self.announce_ranges]
+        for i, p in enumerate(prefixes):
+            if p.overlaps(net):
+                raise ValueError(f"Announce range {p} overlaps the group network {cidr}: "
+                                 "BGP routes must be for addresses outside it")
+            if wg_subnet and p.overlaps(ipaddress.IPv4Network(wg_subnet)):
+                raise ValueError(f"Announce range {p} overlaps the WireGuard tunnel subnet {wg_subnet}")
+            clash = next((q for q in prefixes[:i] if q.overlaps(p)), None)
+            if clash is not None:
+                raise ValueError(f"Announce ranges {clash} and {p} overlap")
 
 
 def _wg_key(value: str, label: str) -> str:
@@ -476,6 +531,9 @@ class GroupSpec(BaseModel):
         self._check_dhcp_hosts(net)
         if self.router.wireguard is not None:
             self.router.wireguard.check(self.cidr)
+        if self.router.bgp is not None:
+            wg = self.router.wireguard
+            self.router.bgp.check(self.cidr, wg.subnet if wg else None)
         return self
 
     def _check_dhcp_hosts(self, net: ipaddress.IPv4Network) -> None:
@@ -686,3 +744,169 @@ class WireGuardPeerCreated(BaseModel):
     filename: str
     has_private_key: bool
     warning: Optional[str] = None  # saved, but not applied on the router yet (e.g. it is stopped)
+
+
+# BGP (FRR on the router)
+
+class BGPSettings(BaseModel):
+    """PUT /groups/{id}/bgp: unset fields keep their value. announce_ranges / neighbors replace the
+    user's own entries (entries owned by a cluster always stay)."""
+    enabled: bool = True
+    asn: Optional[int] = Field(None, ge=1, le=4294967295)
+    listen: Optional[bool] = None
+    peer_asn: Optional[int] = Field(None, ge=1, le=4294967295)
+    any_peer_asn: bool = False  # accept any other ASN from the group network (remote-as external)
+    maximum_paths: Optional[int] = Field(None, ge=1, le=64)
+    announce_ranges: Optional[List[BGPAnnounceRange]] = None
+    neighbors: Optional[List[BGPNeighbor]] = None
+
+
+class BGPSession(BaseModel):
+    peer: str
+    name: Optional[str] = None          # member / node owning that address
+    remote_as: Optional[int] = None
+    state: str                          # Established, Active, Connect, Idle...
+    established: bool = False
+    uptime: Optional[str] = None
+    uptime_seconds: Optional[int] = None
+    prefixes_received: Optional[int] = None
+    dynamic: bool = False               # accepted through the listen range
+    description: Optional[str] = None
+
+
+class BGPNextHop(BaseModel):
+    ip: Optional[str] = None
+    name: Optional[str] = None
+    interface: Optional[str] = None
+    active: bool = False
+
+
+class BGPRoute(BaseModel):
+    prefix: str
+    installed: bool = False   # in the router's kernel routing table
+    selected: bool = False
+    nexthops: List[BGPNextHop] = []
+
+
+class BGPStatus(BaseModel):
+    configured: bool = False
+    enabled: bool = False
+    asn: Optional[int] = None
+    router_ip: Optional[str] = None
+    listen: bool = False
+    listen_range: Optional[str] = None
+    peer_asn: Optional[int] = None
+    maximum_paths: Optional[int] = None
+    neighbors: List[BGPNeighbor] = []
+    announce_ranges: List[BGPAnnounceRange] = []
+    router_running: bool = False
+    router_error: Optional[str] = None
+    frr_version: Optional[str] = None
+    sessions: List[BGPSession] = []
+    routes: List[BGPRoute] = []
+
+
+# Topology view (GET /groups/{id}/topology): everything the diagram needs, live
+
+class TopologyMachine(BaseModel):
+    """A machine on the group network: member, cluster node or reserved host"""
+    kind: str                       # member | node | reservation
+    name: str
+    vm_name: Optional[str] = None
+    vm_id: Optional[int] = None
+    role: Optional[str] = None      # member role, or ctlplane / worker
+    cluster: Optional[str] = None
+    ip: Optional[str] = None
+    mac: Optional[str] = None
+    fqdn: Optional[str] = None
+    state: str = "missing"
+    bgp_state: Optional[str] = None  # its BGP session with the router, if any
+    bgp_prefixes: List[str] = []      # prefixes the router routes to it (learned by BGP)
+    l2_announces: List[str] = []      # service IPs it answers ARP for (MetalLB L2)
+
+
+class TopologyVip(BaseModel):
+    """A floating address: a service IP (MetalLB) or a BGP-learned prefix"""
+    address: str                    # 10.45.0.1 or 10.45.0.0/27
+    kind: str                       # metallb-l2 | metallb-bgp | bgp-route
+    name: Optional[str] = None      # e.g. hello
+    hostname: Optional[str] = None  # hello.<domain>
+    cluster: Optional[str] = None
+    via: List[str] = []             # machine names that carry it (ARP owner or BGP next hops)
+
+
+class TopologyCluster(BaseModel):
+    id: int
+    name: str
+    type: str
+    status: str
+    nodes: List[str] = []
+    api_url: Optional[str] = None
+    console_url: Optional[str] = None
+    load_balancer_ports: List[int] = []
+    metallb_enabled: bool = False
+    metallb_mode: Optional[str] = None   # l2 | bgp
+    metallb_pool: Optional[str] = None
+    service_ip: Optional[str] = None
+    service_hostname: Optional[str] = None
+    apps_domain: Optional[str] = None
+
+
+class TopologyLoadBalancer(BaseModel):
+    name: str
+    port: int
+    backends: List[str] = []
+    owner: Optional[str] = None
+
+
+class TopologyRouter(BaseModel):
+    name: str
+    vm_id: Optional[int] = None
+    state: str = "missing"
+    lan_ip: Optional[str] = None
+    uplink_ip: Optional[str] = None
+    uplink_network: Optional[str] = None
+    tunnel_ip: Optional[str] = None
+    roles: List[str] = []           # dhcp, dns, nat, ntp, lb, wireguard, bgp
+    dhcp_range: Optional[str] = None
+    dns_records: int = 0
+    dns_forwarders: List[str] = []
+    load_balancers: List[TopologyLoadBalancer] = []
+    config_applied: bool = False
+
+
+class TopologyWireGuardPeer(BaseModel):
+    name: str
+    ip: Optional[str] = None
+    latest_handshake: Optional[int] = None
+    endpoint: Optional[str] = None
+
+
+class TopologyWireGuard(BaseModel):
+    enabled: bool = False
+    subnet: Optional[str] = None
+    router_ip: Optional[str] = None
+    host_port: Optional[int] = None
+    listen_port: Optional[int] = None
+    endpoint: Optional[str] = None
+    relay_listening: bool = False
+    client_allowed_ips: List[str] = []
+    peers: List[TopologyWireGuardPeer] = []
+
+
+class GroupTopology(BaseModel):
+    id: int
+    name: str
+    cidr: str
+    domain: str
+    network_name: str
+    state: str
+    status: str
+    router: TopologyRouter
+    wireguard: TopologyWireGuard
+    bgp: BGPStatus
+    machines: List[TopologyMachine] = []
+    clusters: List[TopologyCluster] = []
+    vips: List[TopologyVip] = []
+    address_pools: List[AddressPoolSpec] = []
+    errors: List[str] = []

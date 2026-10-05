@@ -71,8 +71,11 @@ Chosen at creation, or later from the cluster's *Operators* tab:
   `igb-<device type>` (resource `openshift.io/igbnetdev`) and a `SriovNetwork` `igb-net` (whereabouts,
   `192.168.50.0/24`) for namespace `sriov-demo`. `vfio-pci` adds `intel_iommu=on iommu=pt` at install.
   See docs/sriov.md for the nested-virtualization details.
-- **MetalLB** (`metallb.enabled`): a pool of addresses after the group's DHCP range is kept free in the
-  group (`address_pools`), MetalLB in L2 mode (`IPAddressPool lab-pool` + `L2Advertisement`).
+- **MetalLB** (`metallb.enabled`, `metallb.mode`): **l2** (default) = a pool of addresses after the group's DHCP
+  range is kept free in the group (`address_pools`), `IPAddressPool lab-pool` + `L2Advertisement`; **bgp** = a /27
+  outside the group network (an announce range of the router, see [bgp.md](bgp.md)), `BGPPeer` to the router
+  (AS 64513 → 64512) + `BGPAdvertisement`. Switch day 2 with the *MetalLB lab* tab's **Switch to BGP/L2 mode**
+  (the demo Service gets an address of the new pool and `hello.<domain>` follows; re-download WireGuard configs).
 
 ## Scenario: MetalLB L2 lab
 
@@ -96,7 +99,11 @@ Things to try:
 - `externalTrafficPolicy: Local` vs `Cluster`: `oc -n metallb-demo patch svc hello -p '{"spec":{"externalTrafficPolicy":"Local"}}'`;
   only nodes with a hello pod announce, and the source IP is preserved.
 
-Not yet: BGP mode (needs FRR on the router), OKD, disconnected installs, `platform: baremetal` with VIPs,
+BGP mode: every node announces the service IP to the router, which routes it to all of them (ECMP); the tab's
+checks show each node's BGP session and the router's next hops; a stopped node's route disappears (≤ 30 s). The
+cluster's *Topology* tab follows a packet from the laptop to a pod in either mode.
+
+Not yet: OKD, disconnected installs, `platform: baremetal` with VIPs,
 adding workers after install, upgrades from the app.
 
 ## Troubleshooting

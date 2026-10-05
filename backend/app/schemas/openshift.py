@@ -29,13 +29,18 @@ class SriovOptions(BaseModel):
 
 
 class MetalLBOptions(BaseModel):
-    """MetalLB in L2 mode with an address pool carved out of the group network (kept out of DHCP and
-    static assignments). demo = the "MetalLB L2 lab" scenario: a hello Deployment + LoadBalancer
-    Service + DNS record hello.<domain>."""
+    """MetalLB with an address pool assigned by the app. demo = the "MetalLB lab" scenario: a hello
+    Deployment + LoadBalancer Service + DNS record hello.<domain>.
+    mode "l2": the pool is carved out of the group network (kept out of DHCP and static assignments),
+    one node answers ARP for each service IP.
+    mode "bgp": the pool is a /27 outside the group network (BGP_ANNOUNCE_POOL, recorded as a BGP
+    announce range of the group router); every node peers with the router (AS 64513 -> 64512) and
+    announces the service IPs, the router spreads traffic over them (ECMP)."""
     enabled: bool = False
-    addresses: int = Field(16, ge=2, le=64)   # size of the pool (assigned by the app)
+    mode: Literal["l2", "bgp"] = "l2"
+    addresses: int = Field(16, ge=2, le=64)   # size of the L2 pool (BGP: always a /27)
     demo: bool = True
-    # assigned by the app: "10.43.5.230-10.43.5.245"
+    # assigned by the app: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
     pool: Optional[str] = None
 
 
@@ -141,8 +146,11 @@ class ScenarioCheck(BaseModel):
 
 
 class MetalLBScenario(BaseModel):
-    """State of the "MetalLB L2 lab" scenario for the diagram + checks"""
+    """State of the "MetalLB lab" scenario for the diagram + checks"""
     enabled: bool
+    mode: str = "l2"
+    bgp_peers: List[Dict[str, Any]] = []      # bgp: [{node, ip, state}] sessions of the nodes with the router
+    bgp_nexthops: List[str] = []              # bgp: nodes the router routes the service IP to (ECMP)
     pool: Optional[str] = None
     service_ip: Optional[str] = None
     hostname: Optional[str] = None          # hello.<domain>

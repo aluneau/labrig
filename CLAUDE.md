@@ -39,6 +39,7 @@ backend/app/
   services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
+                      bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
@@ -50,6 +51,7 @@ frontend/src/
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
 docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
+docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
@@ -111,8 +113,8 @@ e2e/                  Playwright browser tests against the real app (see below)
   `<metadata><vmm:group name role member/>`; the router's also holds the full spec, so `sync_groups()`
   rebuilds the DB. Deletes only touch objects whose metadata names the group. Spec changes are pushed with
   guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
-  permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp,
-  vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
+  permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. `vlans` and flavour
+  `vyos` are in the schema but rejected by the backends ("not supported yet").
   `spec.dhcp_hosts` = static reservations of non-member machines (`dhcp-host=` + `host-record=` lines,
   validated against router/member IPs/MACs/names in `GroupSpec`). Leases are read from the router's
   `/var/lib/dnsmasq/dnsmasq.leases` via guest-exec; releasing one = stop dnsmasq, delete the line, start it.
@@ -131,7 +133,23 @@ e2e/                  Playwright browser tests against the real app (see below)
   side is a **UDP relay thread in the app** (`wireguard_relay`, `reconcile(db)` after create/update/delete/pin and at
   startup, DB only), not DNAT: libvirt rejects inbound connections to NAT networks (both firewall backends) and
   rewrites its rules on restart. setup.sh opens `--wg-ports` (default 51820-51869/udp) in ufw/firewalld.
-  Client AllowedIPs = group CIDR + tunnel + `uplink_ip/32` (load balancers, kubeadm API), DNS = router tunnel IP.
+  Client AllowedIPs = group CIDR + tunnel + `uplink_ip/32` (load balancers, kubeadm API) + BGP announce ranges,
+  DNS = router tunnel IP.
+- **BGP** (docs/bgp.md): `router.bgp` (`asn` 64512, `listen` = dynamic neighbors on the group CIDR with `peer_asn`
+  64513 or any, explicit `neighbors`, `announce_ranges` = prefixes accepted `le 32`, assigned a /27 of
+  `BGP_ANNOUNCE_POOL` when first enabled, unique on the host). FRR is in every new router's packages (older ones
+  `dnf install frr` on the push); `/etc/frr/frr.conf` is a pushed file, `bgpd=yes` sed'ed into `daemons`, applied by
+  `systemctl reload frr`. Out route-map denies all; `fib_multipath_hash_policy=1` so ECMP spreads connections; nft
+  doesn't masquerade towards announce ranges. Status = `vtysh … json` via guest-exec (`GET /groups/{id}/bgp`). Ranges /
+  neighbors owned by `cluster:<name>` survive spec PUTs and block disabling BGP; a bgp block that omits
+  `announce_ranges` / `neighbors` keeps the stored ones (OpenTofu sends `{enabled}` only). MetalLB `mode: bgp`
+  (OpenShift): pool = owned /27 range, `BGPPeer` to the router LAN IP + `BGPAdvertisement`; switching modes removes the
+  other mode's objects, re-creates the demo Service if its IP left the pool and moves `hello.<domain>`.
+- **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
+  Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
+  `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
+  PF variables only (dark theme = `pf-v5-theme-dark` class). Every element has `data-key` and a plain-words tooltip;
+  "Follow a packet" flows are built from the data (keys of boxes/segments to light up + moving packets).
 - **OpenShift** (docs/openshift.md): `openshift_service` (pull secret in `DATA_DIR/openshift/pull-secret.json` 0600,
   never in the DB / API; versions from the upgrade graph API; `openshift-install` + `oc` cached per release in
   `DATA_DIR/openshift/bin/<ver>`, installer cache `XDG_CACHE_HOME=DATA_DIR/openshift/cache`), `openshift_installer`
@@ -209,6 +227,7 @@ KUBECTL=… node clusters.js                                      # k3s: create,
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
+node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

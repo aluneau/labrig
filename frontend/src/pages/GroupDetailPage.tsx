@@ -32,7 +32,7 @@ import {
   Title,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { CloudImage, GroupDetail, GroupMemberInfo, RouterConfig } from '../types';
+import { CloudImage, GroupDetail, RouterConfig } from '../types';
 import { groupApi, storageApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatMiB } from '../utils/format';
@@ -40,16 +40,11 @@ import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
+import { GroupBgp } from '../components/groups/GroupBgp';
+import { LabTopology } from '../components/topology/LabTopology';
 import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
 import { groupStatus } from './GroupsPage';
-
-const STATE_COLORS: Record<string, string> = {
-  running: 'var(--pf-v5-global--success-color--100)',
-  shutoff: 'var(--pf-v5-global--disabled-color--100)',
-  paused: 'var(--pf-v5-global--warning-color--100)',
-  missing: 'var(--pf-v5-global--danger-color--100)',
-};
 
 /** Hosts, DNS records and load balancers that clusters manage in this group (read-only here) */
 const ClusterEntries: React.FC<{ group: GroupDetail }> = ({ group }) => {
@@ -101,56 +96,6 @@ const ClusterEntries: React.FC<{ group: GroupDetail }> = ({ group }) => {
         </>
       )}
     </div>
-  );
-};
-
-// Topology tab: uplink -> router -> group network bus -> members
-
-const Topology: React.FC<{ group: GroupDetail; onOpen: (m: GroupMemberInfo) => void }> = ({ group, onOpen }) => {
-  const members = group.members;
-  const boxW = 150, boxH = 58, gap = 20;
-  const width = Math.max(560, members.length * (boxW + gap) + gap);
-  const cx = width / 2;
-  const busY = 250;
-  const node = (m: GroupMemberInfo, x: number, y: number, label: string, sub: string) => (
-    <g key={m.name} transform={`translate(${x},${y})`} style={{ cursor: m.vm_id ? 'pointer' : 'default' }}
-      onClick={() => onOpen(m)} role="button" aria-label={`${label} console`}>
-      <rect width={boxW} height={boxH} rx={6} fill="var(--pf-v5-global--BackgroundColor--100)"
-        stroke={STATE_COLORS[m.state] || 'var(--pf-v5-global--BorderColor--100)'} strokeWidth={2} />
-      <circle cx={boxW - 12} cy={12} r={5} fill={STATE_COLORS[m.state] || 'grey'} />
-      <text x={10} y={22} fontWeight="bold" fontSize={14} fill="var(--pf-v5-global--Color--100)">{label}</text>
-      <text x={10} y={40} fontSize={12} fill="var(--pf-v5-global--Color--200)">{sub}</text>
-      <text x={10} y={53} fontSize={11} fill="var(--pf-v5-global--Color--200)">{m.state}</text>
-    </g>
-  );
-  return (
-    <svg viewBox={`0 0 ${width} 380`} width="100%" style={{ maxWidth: width, display: 'block' }} aria-label="Group topology">
-      {group.uplink && (
-        <>
-          <rect x={cx - 90} y={10} width={180} height={36} rx={18} fill="none" stroke="var(--pf-v5-global--BorderColor--100)" strokeDasharray="4 3" />
-          <text x={cx} y={33} textAnchor="middle" fontSize={13} fill="var(--pf-v5-global--Color--100)">uplink: {group.uplink}</text>
-          <line x1={cx} y1={46} x2={cx} y2={110} stroke="var(--pf-v5-global--BorderColor--100)" strokeWidth={2} />
-          <text x={cx + 6} y={80} fontSize={11} fill="var(--pf-v5-global--Color--200)">
-            eth0 {group.router_uplink_ips.join(', ') || '(DHCP)'}
-          </text>
-        </>
-      )}
-      {node(group.router, cx - boxW / 2, 110, 'router', group.router.ip || '')}
-      <line x1={cx} y1={168} x2={cx} y2={busY} stroke="var(--pf-v5-global--BorderColor--100)" strokeWidth={2} />
-      <line x1={gap} y1={busY} x2={width - gap} y2={busY} stroke="var(--pf-v5-global--primary-color--100)" strokeWidth={4} />
-      <text x={gap} y={busY - 8} fontSize={12} fill="var(--pf-v5-global--Color--200)">
-        {group.network_name} · {group.cidr} · {group.domain}
-      </text>
-      {members.map((m, i) => {
-        const x = gap + i * (boxW + gap) + (width - members.length * (boxW + gap) - gap) / 2;
-        return (
-          <g key={m.name}>
-            <line x1={x + boxW / 2} y1={busY} x2={x + boxW / 2} y2={300} stroke="var(--pf-v5-global--BorderColor--100)" strokeWidth={2} />
-            {node(m, x, 300, m.name, m.ip || '')}
-          </g>
-        );
-      })}
-    </svg>
   );
 };
 
@@ -399,7 +344,6 @@ export const GroupDetailPage: React.FC = () => {
       setBusy(false);
     }
   };
-  const openConsole = (m: GroupMemberInfo) => { if (m.vm_id) navigate(`/vms/${m.vm_id}/console`); };
   const spec = group.spec;
 
   return (
@@ -431,7 +375,10 @@ export const GroupDetailPage: React.FC = () => {
 
         <Tabs activeKey={tab} onSelect={(_e, k) => setTab(k)} mountOnEnter>
           <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>}>
-            <PageSection variant="light"><Topology group={group} onOpen={openConsole} /></PageSection>
+            <PageSection variant="light">
+              <LabTopology groupId={group.id}
+                refreshKey={`${group.updated_at}|${group.router.state}|${group.members.map((m) => m.state).join(',')}|${group.hosts.map((h) => h.state).join(',')}`} />
+            </PageSection>
           </Tab>
 
           <Tab eventKey="members" title={<TabTitleText>Members</TabTitleText>}>
@@ -510,6 +457,10 @@ export const GroupDetailPage: React.FC = () => {
 
           <Tab eventKey="remote" title={<TabTitleText>Remote access</TabTitleText>}>
             <PageSection variant="light"><GroupWireGuard group={group} onDone={onDone} onError={onError} /></PageSection>
+          </Tab>
+
+          <Tab eventKey="bgp" title={<TabTitleText>BGP</TabTitleText>}>
+            <PageSection variant="light"><GroupBgp group={group} onDone={onDone} onError={onError} /></PageSection>
           </Tab>
 
           <Tab eventKey="router" title={<TabTitleText>Router</TabTitleText>}>

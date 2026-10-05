@@ -33,9 +33,11 @@ from app.libvirt_client import libvirt_client
 from app.models import CloudImage, Group, GroupMember, Network, Task, VM
 from app.schemas import TaskCreate, VMCreate
 from app.schemas.group import (
-    DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec, WireGuardPeer, WireGuardSpec,
+    BGPAnnounceRange, BGPNeighbor, BGPSpec, DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec,
+    WireGuardPeer, WireGuardSpec,
 )
 from app.services.cloud_image_service import cloud_image_service
+from app.services import bgp_service as bgps
 from app.services import wireguard_service as wgs
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
 from app.services.task_service import task_service
@@ -224,9 +226,14 @@ class GroupService:
             elif m.source == "iso":
                 self.resolve_iso(db, m.iso)
 
+        subnets = None
         if spec.router.wireguard is not None:
-            wgs.assign(db, spec, existing.router.wireguard if existing else None, group_id,
-                       [n["cidr"] for n in libvirt_client.network_subnets()])
+            subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
+            wgs.assign(db, spec, existing.router.wireguard if existing else None, group_id, subnets)
+        if spec.router.bgp is not None:
+            if subnets is None:
+                subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
+            bgps.assign(db, spec, existing.router.bgp if existing else None, group_id, subnets)
 
         try:
             spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
@@ -610,6 +617,27 @@ class GroupService:
         # a spec replacing the group keeps them, and the router's key / assigned subnet and port
         if new.router.wireguard is not None and old.router.wireguard is not None:
             new.router.wireguard.peers = [p.model_copy() for p in old.router.wireguard.peers]
+        # BGP: announce ranges / neighbors of a cluster (MetalLB BGP pool) stay, and so does the block
+        old_bgp = old.router.bgp
+        owned_ranges = [r for r in (old_bgp.announce_ranges if old_bgp else []) if r.owner]
+        owned_neighbors = [n for n in (old_bgp.neighbors if old_bgp else []) if n.owner]
+        if owned_ranges or owned_neighbors:
+            if new.router.bgp is None or not new.router.bgp.enabled:
+                owners = sorted({x.owner.split(":", 1)[-1] for x in owned_ranges + owned_neighbors})
+                raise ValueError(f"BGP is used by cluster {', '.join(owners)} (MetalLB in BGP mode): "
+                                 "it can't be disabled or removed")
+        if new.router.bgp is not None and old_bgp is not None:
+            # a bgp block without these fields (e.g. OpenTofu's `bgp = true`) keeps the current ones
+            given = new.router.bgp.model_fields_set
+            if "announce_ranges" not in given:
+                new.router.bgp.announce_ranges = [r.model_copy() for r in old_bgp.announce_ranges if not r.owner]
+            if "neighbors" not in given:
+                new.router.bgp.neighbors = [n.model_copy() for n in old_bgp.neighbors if not n.owner]
+        if new.router.bgp is not None:
+            new.router.bgp.announce_ranges = ([r for r in new.router.bgp.announce_ranges if not r.owner]
+                                              + [r.model_copy() for r in owned_ranges])
+            new.router.bgp.neighbors = ([n for n in new.router.bgp.neighbors if not n.owner]
+                                        + [n.model_copy() for n in owned_neighbors])
         return new
 
     # Hosts / records / load balancers managed by the app (cluster nodes in a group, §3.2)
@@ -1055,6 +1083,38 @@ class GroupService:
             "router_running": running, "router_error": router_error,
             "peers": [{**p.model_dump(), **live.get(p.public_key, {})} for p in wg.peers],
         }
+
+    # BGP (bgp_service: FRR on the router)
+
+    def set_bgp(self, db: Session, group_id: int, settings_in: Dict[str, Any]) -> Optional[Group]:
+        """Enable / disable / configure BGP on the router (applied live). settings_in: the BGPSettings
+        fields; None = keep. announce_ranges / neighbors given here replace the user's own ones (those
+        owned by a cluster always stay)."""
+        group = self.get_group(db, group_id)
+        if not group:
+            return None
+        spec = GroupSpec.model_validate(group.spec)
+        bgp = spec.router.bgp or BGPSpec(enabled=settings_in.get("enabled", True))
+        bgp.enabled = settings_in.get("enabled", True)
+        for key in ("asn", "listen", "maximum_paths"):
+            if settings_in.get(key) is not None:
+                setattr(bgp, key, settings_in[key])
+        if settings_in.get("any_peer_asn"):
+            bgp.peer_asn = None
+        elif settings_in.get("peer_asn") is not None:
+            bgp.peer_asn = settings_in["peer_asn"]
+        if settings_in.get("announce_ranges") is not None:
+            bgp.announce_ranges = [BGPAnnounceRange.model_validate(r) for r in settings_in["announce_ranges"]]
+        if settings_in.get("neighbors") is not None:
+            bgp.neighbors = [BGPNeighbor.model_validate(n) for n in settings_in["neighbors"]]
+        spec.router.bgp = bgp
+        return self.update_group(db, group_id, spec)
+
+    def bgp_status(self, group: Group) -> Dict[str, Any]:
+        spec = GroupSpec.model_validate(group.spec)
+        rtr = router_vm_name(spec.name)
+        running = (libvirt_client.get_vm(rtr) or {}).get("state") == "running"
+        return bgps.status(spec, rtr, running)
 
     # libvirt -> DB
 

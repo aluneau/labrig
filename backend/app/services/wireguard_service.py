@@ -1,7 +1,8 @@
 """WireGuard remote access to lab groups ("road warrior": a laptop joins a lab)
 
     laptop --udp--> host:<host_port> --relay (wireguard_relay)--> router uplink_ip:<listen_port> (wg0)
-           tunnel <subnet>: router .1, devices .2, .3, ...   AllowedIPs = group CIDR + subnet + uplink_ip/32
+           tunnel <subnet>: router .1, devices .2, .3, ...
+           AllowedIPs = group CIDR + subnet + uplink_ip/32 + BGP announce ranges
 
 The spec's router.wireguard block is the source of truth (peers = public keys + assigned tunnel IPs).
 The router generates its own key pair at first use (/etc/wireguard/private.key, never leaves it); the app
@@ -188,11 +189,15 @@ def assign(db: Session, spec: GroupSpec, old: Optional[WireGuardSpec], group_id:
 
 def client_allowed_ips(spec: GroupSpec) -> List[str]:
     """Split tunnel: the group network, the tunnel, the router's uplink address (load balancers,
-    e.g. a kubeadm API at https://<uplink_ip>:6443) and the networks behind the peers"""
+    e.g. a kubeadm API at https://<uplink_ip>:6443) and the BGP announce ranges (addresses lab
+    machines announce to the router, e.g. MetalLB services in BGP mode)"""
     wg = spec.router.wireguard
     nets = [spec.cidr, wg.subnet]
     if spec.router.uplink_ip:
         nets.append(f"{spec.router.uplink_ip}/32")
+    bgp = spec.router.bgp
+    if bgp is not None and bgp.enabled:
+        nets += [r.prefix for r in bgp.announce_ranges]
     return nets
 
 

@@ -17,6 +17,8 @@ import {
   EmptyStateBody,
   EmptyStateFooter,
   EmptyStateHeader,
+  Flex,
+  FlexItem,
   Grid,
   GridItem,
   List,
@@ -115,7 +117,10 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
   const nodes = cluster.nodes.length ? cluster.nodes
     : Array.from(new Set(s.endpoints.map((e) => e.node))).map((name) => ({ name, role: 'worker', state: 'running' } as ClusterNode));
   const podsOf = (n: ClusterNode) => s.endpoints.filter((e) => sameNode(e.node, n));
-  const announces = (n: ClusterNode) => sameNode(s.announcing_node, n);
+  const bgp = s.mode === 'bgp';
+  // L2: the node answering ARP; BGP: every node the router has a route through
+  const announces = (n: ClusterNode) => (bgp ? (s.bgp_nexthops || []).some((h) => h === n.name || sameNode(h, n))
+    : sameNode(s.announcing_node, n));
   const dot = (n: ClusterNode) => (n.state === 'running' ? C.ok : n.state === 'missing' ? C.danger : C.off);
   const wg = s.wireguard;
   const tunnel = wg ? `WireGuard${s.wireguard_port ? ` UDP ${s.wireguard_port}` : ' tunnel'}` : 'WireGuard (off)';
@@ -135,7 +140,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
   };
   const nodeLines = (n: ClusterNode) => [
     { text: `${n.role === 'ctlplane' ? 'control plane' : 'worker'} · ${n.ip || '?'}` },
-    ...(announces(n) ? [{ text: `answers ARP for ${svcIp}`, color: C.accent, bold: true }] : []),
+    ...(announces(n) ? [{ text: bgp ? `announces ${svcIp} (BGP)` : `answers ARP for ${svcIp}`, color: C.accent, bold: true }] : []),
   ];
   const defs = (
     <defs>
@@ -171,7 +176,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
     const H = rowsY(rows - 1) + nh + (podNet ? 62 : 16);
     const rx = 640, rw = 304;
     svg = (
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="MetalLB L2 lab diagram" id="mlb-diagram">
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="MetalLB lab diagram" id="mlb-diagram">
         {defs}
         <Box x={16} y={y0} w={190} h={bh} {...laptop} accent />
         <Wire d={`M206,${y0 + 46} L328,${y0 + 46}`} label={tunnel} lx={267} ly={y0 + 38} active={wg} dashed={!wg} />
@@ -208,7 +213,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
                 <g transform={`translate(${mid + 8},${busY + 30})`}>
                   <rect x={0} y={-14} width={Math.min(nw / 2 - 12, 150)} height={22} rx={11} fill={C.accent} />
                   <text x={10} y={2} fontSize={11} fill="var(--pf-v5-global--palette--white)" fontWeight="bold">
-                    {trunc(`ARP ${svcIp}`, Math.min(nw / 2 - 30, 130), 6.5)}
+                    {trunc(`${bgp ? 'BGP' : 'ARP'} ${svcIp}`, Math.min(nw / 2 - 30, 130), 6.5)}
                   </text>
                 </g>
               )}
@@ -271,7 +276,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
     });
     parts.push(<line key="spine" x1={spine} y1={busY} x2={spine} y2={Math.max(first, last)} stroke={C.border} strokeWidth={2} />);
     svg = (
-      <svg viewBox={`0 0 ${W} ${y}`} width="100%" role="img" aria-label="MetalLB L2 lab diagram" id="mlb-diagram">
+      <svg viewBox={`0 0 ${W} ${y}`} width="100%" role="img" aria-label="MetalLB lab diagram" id="mlb-diagram">
         {defs}
         {parts}
       </svg>
@@ -313,10 +318,10 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
     return () => clearInterval(timer);
   }, [load, cluster.updated_at, cluster.task_running]);
 
-  const addon = async (kind: 'metallb' | 'metallb-demo') => {
+  const addon = async (kind: 'metallb' | 'metallb-demo', mode?: 'l2' | 'bgp') => {
     try {
       await clusterApi.addAddon(cluster.id, kind === 'metallb'
-        ? { kind, metallb: { enabled: true, addresses: 16, demo: true } } : { kind });
+        ? { kind, metallb: { enabled: true, mode: mode || (s?.mode === 'bgp' ? 'bgp' : 'l2'), addresses: 16, demo: true } } : { kind });
       setError(null);
     } catch (err) {
       setError(errorText(err));
@@ -341,7 +346,8 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
         </EmptyStateBody>
         <EmptyStateFooter>
           <EmptyStateActions>
-            <Button onClick={() => addon('metallb')} isDisabled={!usable} id="mlb-enable">Enable MetalLB + demo</Button>
+            <Button onClick={() => addon('metallb', 'l2')} isDisabled={!usable} id="mlb-enable">Enable MetalLB (L2) + demo</Button>
+            <Button variant="secondary" onClick={() => addon('metallb', 'bgp')} isDisabled={!usable} id="mlb-enable-bgp">Enable MetalLB (BGP) + demo</Button>
           </EmptyStateActions>
         </EmptyStateFooter>
       </EmptyState>
@@ -350,7 +356,9 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
 
   const domain = cluster.domain;
   const hostname = s.hostname || `hello.${domain}`;
-  const announcing = cluster.nodes.find((n) => sameNode(s.announcing_node, n));
+  const bgp = s.mode === 'bgp';
+  const announcing = bgp ? cluster.nodes.find((n) => (s.bgp_nexthops || []).some((h) => h === n.name || sameNode(h, n)))
+    : cluster.nodes.find((n) => sameNode(s.announcing_node, n));
   const demoDeployed = opts.demo !== false && (!!s.service_ip || s.endpoints.length > 0);
   const running = cluster.nodes.filter((n) => n.state === 'running');
 
@@ -370,17 +378,49 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
       <StackItem>
         <Card>
           <CardHeader actions={{ actions: <Button variant="plain" aria-label="Refresh" onClick={load}><SyncAltIcon /></Button> }}>
-            <CardTitle>Request path: {hostname} → {s.service_ip || 'service IP pending'}</CardTitle>
+            <CardTitle>Request path: {hostname} → {s.service_ip || 'service IP pending'} ({bgp ? 'BGP' : 'L2'} mode)</CardTitle>
           </CardHeader>
-          <CardBody><Diagram cluster={cluster} s={s} /></CardBody>
+          <CardBody>
+            <Diagram cluster={cluster} s={s} />
+            <Flex style={{ marginTop: 8 }} alignItems={{ default: 'alignItemsCenter' }}>
+              <FlexItem style={muted}>
+                {bgp ? 'BGP mode: the pool is outside the lab network, every node announces the service IP to the router.'
+                  : 'L2 mode: the pool is in the lab network, one node answers ARP for the service IP.'}
+                {cluster.group_id && <> The <Link to={`/clusters/${cluster.id}?tab=topology`}>Topology</Link> tab follows a packet step by step.</>}
+              </FlexItem>
+              <FlexItem align={{ default: 'alignRight' }}>
+                <Button variant="secondary" id="mlb-switch-mode" isDisabled={!usable} onClick={() => addon('metallb', bgp ? 'l2' : 'bgp')}>
+                  Switch to {bgp ? 'L2' : 'BGP'} mode
+                </Button>
+              </FlexItem>
+            </Flex>
+          </CardBody>
         </Card>
       </StackItem>
       <StackItem>
         <Grid hasGutter lg={6}>
           <GridItem>
             <Card isFullHeight>
-              <CardTitle>How L2 mode works</CardTitle>
+              <CardTitle>How {bgp ? 'BGP' : 'L2'} mode works</CardTitle>
               <CardBody>
+                {bgp ? (
+                  <Stack hasGutter style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
+                    <StackItem>
+                      MetalLB gives the Service an address from its pool ({s.pool || 'not assigned yet'}), outside the lab
+                      network. Each node's <code>speaker</code> opens a BGP session with the group router ({s.router_ip}) and tells
+                      it <em>"send traffic for {s.service_ip || 'the service IP'} to me"</em>.
+                    </StackItem>
+                    <StackItem>
+                      The router puts one route per node in its table and spreads connections over them (ECMP): every node
+                      takes a share of the traffic, then kube-proxy / OVN forwards it to a hello pod.
+                    </StackItem>
+                    <StackItem>
+                      If a node stops, its BGP session closes (or times out after 30 s) and the router drops its route: traffic
+                      goes to the remaining nodes. Your laptop reaches the pool because it is in the WireGuard config (download it
+                      again after switching modes).
+                    </StackItem>
+                  </Stack>
+                ) : (
                 <Stack hasGutter style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
                   <StackItem>
                     MetalLB gives the Service an address from its pool ({s.pool || 'not assigned yet'}), on the same L2
@@ -397,6 +437,7 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     the router updates its ARP cache and the same IP keeps working after a few seconds.
                   </StackItem>
                 </Stack>
+                )}
               </CardBody>
             </Card>
           </GridItem>
@@ -418,9 +459,17 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     <DescriptionListDescription><code>{hostname}</code></DescriptionListDescription>
                   </DescriptionListGroup>
                   <DescriptionListGroup>
-                    <DescriptionListTerm>Announcing node</DescriptionListTerm>
-                    <DescriptionListDescription>{s.announcing_node || '—'}</DescriptionListDescription>
+                    <DescriptionListTerm>{bgp ? 'Router routes via' : 'Announcing node'}</DescriptionListTerm>
+                    <DescriptionListDescription>{bgp ? ((s.bgp_nexthops || []).join(', ') || '—') : (s.announcing_node || '—')}</DescriptionListDescription>
                   </DescriptionListGroup>
+                  {bgp && (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>BGP sessions</DescriptionListTerm>
+                      <DescriptionListDescription>
+                        {(s.bgp_peers || []).map((p) => `${p.node.split('.')[0]}: ${p.state}`).join(', ') || '—'}
+                      </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
                   <DescriptionListGroup>
                     <DescriptionListTerm>Endpoints</DescriptionListTerm>
                     <DescriptionListDescription>
@@ -454,9 +503,19 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                 {!s.wireguard && (
                   <Alert variant="info" isInline isPlain title="WireGuard is not set up on this group: the group network is only reachable through it." style={{ marginBottom: 10 }} />
                 )}
-                <Command title="Which node announces the service (speaker logs):" cmd="oc -n metallb-system logs ds/speaker -c speaker --since=10m | grep -i announc" />
-                <Command title="The service and its external IP:" cmd="oc get svc -n metallb-demo -o wide" />
-                <Command title="Pool and L2 advertisement:" cmd="oc -n metallb-system get ipaddresspools,l2advertisements" />
+                {bgp ? (
+                  <>
+                    <Command title="BGP sessions and routes on the router (router console, as root):" cmd="vtysh -c 'show bgp summary' -c 'show ip route bgp'" />
+                    <Command title="The service and its external IP:" cmd="oc get svc -n metallb-demo -o wide" />
+                    <Command title="Pool, peer and advertisement:" cmd="oc -n metallb-system get ipaddresspools,bgppeers,bgpadvertisements" />
+                  </>
+                ) : (
+                  <>
+                    <Command title="Which node announces the service (speaker logs):" cmd="oc -n metallb-system logs ds/speaker -c speaker --since=10m | grep -i announc" />
+                    <Command title="The service and its external IP:" cmd="oc get svc -n metallb-demo -o wide" />
+                    <Command title="Pool and L2 advertisement:" cmd="oc -n metallb-system get ipaddresspools,l2advertisements" />
+                  </>
+                )}
               </CardBody>
             </Card>
           </GridItem>

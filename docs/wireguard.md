@@ -43,6 +43,7 @@ DNS = 10.44.0.1, case-12345.lab       # the router; the domain becomes a search 
 PublicKey = …                          # the router's
 Endpoint = 192.168.1.20:51820          # this host, relay port
 AllowedIPs = 10.42.7.0/24, 10.44.0.0/24, 192.168.122.50/32   # group, tunnel, router uplink (LB / k8s API)
+                                       # + the BGP announce ranges when BGP is on (docs/bgp.md)
 PersistentKeepalive = 25
 ```
 

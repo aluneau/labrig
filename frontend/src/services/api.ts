@@ -8,7 +8,7 @@ import {
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
   InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
-  WireGuardStatus, WireGuardPeerCreated,
+  WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
 } from '../types';
 
@@ -172,6 +172,10 @@ export const groupApi = {
   removeWgPeer: (id: number, name: string) => del<WireGuardStatus>(`/groups/${id}/wireguard/peers/${encodeURIComponent(name)}`),
   releaseLease: (id: number, mac: string, force = false) =>
     del<LeaseRelease>(`/groups/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
+  bgp: (id: number) => request<BGPStatus>(`/groups/${id}/bgp`),
+  setBgp: (id: number, body: BGPSettings) =>
+    request<BGPStatus>(`/groups/${id}/bgp`, { method: 'PUT', body: JSON.stringify(body) }),
+  topology: (id: number) => request<GroupTopology>(`/groups/${id}/topology`),
 };
 
 export const taskApi = {

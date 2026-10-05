@@ -417,9 +417,10 @@ export interface SriovOptions {
 
 export interface MetalLBOptions {
   enabled: boolean;
-  addresses: number; // pool size (2-64)
+  mode?: 'l2' | 'bgp'; // l2: pool in the group network, ARP; bgp: a /27 outside it, announced to the router
+  addresses: number; // L2 pool size (2-64); BGP pools are a /27
   demo: boolean;
-  pool?: string | null; // assigned: "10.43.5.230-10.43.5.245"
+  pool?: string | null; // assigned: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
 }
 
 export interface OpenShiftOptions {
@@ -519,6 +520,9 @@ export interface MetalLBEndpoint {
 
 export interface MetalLBScenario {
   enabled: boolean;
+  mode?: 'l2' | 'bgp' | string;
+  bgp_peers?: { node: string; ip?: string | null; state: string }[]; // bgp: each node's session with the router
+  bgp_nexthops?: string[]; // bgp: nodes the router sends the service IP to (ECMP)
   pool?: string | null;
   service_ip?: string | null;
   hostname?: string | null; // hello.<domain>
@@ -706,13 +710,172 @@ export interface RouterSpec {
   vcpu?: number;
   disk_size?: number;
   dns?: { forwarders?: string[]; records?: DNSRecord[] };
-  bgp?: unknown;
+  bgp?: BGPSpec | null;
   wireguard?: WireGuardSpec | null;
   vlans?: unknown[];
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
   uplink_ip?: string | null; // fixed (reserved) address on the uplink network
+}
+
+/** BGP on the router (FRR): sessions from the group network (listen) + explicit neighbors */
+export interface BGPNeighbor {
+  ip: string;
+  asn: number;
+  name?: string | null;
+  owner?: string | null;
+}
+
+/** Prefixes the router accepts (and anything more specific) */
+export interface BGPAnnounceRange {
+  prefix: string;
+  name?: string | null;
+  owner?: string | null; // "cluster:<name>" (MetalLB BGP pool)
+}
+
+export interface BGPSpec {
+  enabled?: boolean;
+  asn?: number;
+  listen?: boolean;
+  peer_asn?: number | null; // null = any other ASN
+  neighbors?: BGPNeighbor[];
+  announce_ranges?: BGPAnnounceRange[];
+  maximum_paths?: number;
+}
+
+export interface BGPSettings {
+  enabled: boolean;
+  asn?: number | null;
+  listen?: boolean | null;
+  peer_asn?: number | null;
+  any_peer_asn?: boolean;
+  maximum_paths?: number | null;
+  announce_ranges?: BGPAnnounceRange[] | null;
+  neighbors?: BGPNeighbor[] | null;
+}
+
+export interface BGPSession {
+  peer: string;
+  name?: string | null;
+  remote_as?: number | null;
+  state: string;
+  established: boolean;
+  uptime?: string | null;
+  uptime_seconds?: number | null;
+  prefixes_received?: number | null;
+  dynamic: boolean;
+  description?: string | null;
+}
+
+export interface BGPRoute {
+  prefix: string;
+  installed: boolean;
+  selected: boolean;
+  nexthops: { ip?: string | null; name?: string | null; interface?: string | null; active: boolean }[];
+}
+
+export interface BGPStatus {
+  configured: boolean;
+  enabled: boolean;
+  asn?: number | null;
+  router_ip?: string | null;
+  listen: boolean;
+  listen_range?: string | null;
+  peer_asn?: number | null;
+  maximum_paths?: number | null;
+  neighbors: BGPNeighbor[];
+  announce_ranges: BGPAnnounceRange[];
+  router_running: boolean;
+  router_error?: string | null;
+  frr_version?: string | null;
+  sessions: BGPSession[];
+  routes: BGPRoute[];
+}
+
+/** GET /groups/{id}/topology */
+export interface TopologyMachine {
+  kind: 'member' | 'node' | 'reservation' | string;
+  name: string;
+  vm_name?: string | null;
+  vm_id?: number | null;
+  role?: string | null;
+  cluster?: string | null;
+  ip?: string | null;
+  mac?: string | null;
+  fqdn?: string | null;
+  state: string;
+  bgp_state?: string | null;
+  bgp_prefixes: string[];
+  l2_announces: string[];
+}
+
+export interface TopologyVip {
+  address: string;
+  kind: 'metallb-l2' | 'metallb-bgp' | 'bgp-route' | string;
+  name?: string | null;
+  hostname?: string | null;
+  cluster?: string | null;
+  via: string[];
+}
+
+export interface TopologyCluster {
+  id: number;
+  name: string;
+  type: string;
+  status: string;
+  nodes: string[];
+  api_url?: string | null;
+  console_url?: string | null;
+  apps_domain?: string | null;
+  load_balancer_ports: number[];
+  metallb_enabled: boolean;
+  metallb_mode?: 'l2' | 'bgp' | null;
+  metallb_pool?: string | null;
+  service_ip?: string | null;
+  service_hostname?: string | null;
+}
+
+export interface GroupTopology {
+  id: number;
+  name: string;
+  cidr: string;
+  domain: string;
+  network_name: string;
+  state: string;
+  status: string;
+  router: {
+    name: string;
+    vm_id?: number | null;
+    state: string;
+    lan_ip?: string | null;
+    uplink_ip?: string | null;
+    uplink_network?: string | null;
+    tunnel_ip?: string | null;
+    roles: string[];
+    dhcp_range?: string | null;
+    dns_records: number;
+    dns_forwarders: string[];
+    load_balancers: { name: string; port: number; backends: string[]; owner?: string | null }[];
+    config_applied: boolean;
+  };
+  wireguard: {
+    enabled: boolean;
+    subnet?: string | null;
+    router_ip?: string | null;
+    host_port?: number | null;
+    listen_port?: number | null;
+    endpoint?: string | null;
+    relay_listening: boolean;
+    client_allowed_ips: string[];
+    peers: { name: string; ip?: string | null; latest_handshake?: number | null; endpoint?: string | null }[];
+  };
+  bgp: BGPStatus;
+  machines: TopologyMachine[];
+  clusters: TopologyCluster[];
+  vips: TopologyVip[];
+  address_pools: { name: string; start: string; end: string; owner?: string | null }[];
+  errors: string[];
 }
 
 /** A device allowed in through the router's WireGuard (only its public key is stored) */
