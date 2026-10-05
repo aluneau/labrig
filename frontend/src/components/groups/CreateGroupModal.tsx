@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   Form,
   FormGroup,
   FormHelperText,
@@ -53,6 +54,7 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
   const [password, setPassword] = useState('');
   const [sshKey, setSshKey] = useState('');
   const [keyboard, setKeyboard] = useState(defaultKeyboard);
+  const [wireguard, setWireguard] = useState(false);
   const [members, setMembers] = useState<MemberRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -90,7 +92,7 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
       cidr,
       domain: domain || null,
       uplink,
-      router: { flavour: 'el', image: routerImage },
+      router: { flavour: 'el', image: routerImage, wireguard: wireguard ? { enabled: true } : null },
       cloud_init: { username: username || null, password: password || null, ssh_keys: sshKey.trim() ? [sshKey.trim()] : [], keyboard },
       members: members.map((m) => ({
         name: m.name, image: m.image, memory: Math.round(Number(m.memoryGiB) * 1024), ip: m.ip.trim() || null,
@@ -181,6 +183,10 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
             </FormGroup>
           </GridItem>
         </Grid>
+
+        <Checkbox id="g-wireguard" isChecked={wireguard} onChange={(_e, v) => setWireguard(v)}
+          label="Remote access (WireGuard)"
+          description="Devices such as a laptop connect to the lab through the router (Remote access tab: add a device, download its config)." />
 
         <Title headingLevel="h3" size="md">Members</Title>
         {members.map((m, i) => (

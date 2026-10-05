@@ -26,13 +26,17 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import ObjectDeletedError
 
+from app.config import settings
 from app.database import serialized
 from app.events import event_bus
 from app.libvirt_client import libvirt_client
 from app.models import CloudImage, Group, GroupMember, Network, Task, VM
 from app.schemas import TaskCreate, VMCreate
-from app.schemas.group import DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec
+from app.schemas.group import (
+    DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec, WireGuardPeer, WireGuardSpec,
+)
 from app.services.cloud_image_service import cloud_image_service
+from app.services import wireguard_service as wgs
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
@@ -213,6 +217,10 @@ class GroupService:
             elif m.source == "iso":
                 self.resolve_iso(db, m.iso)
 
+        if spec.router.wireguard is not None:
+            wgs.assign(db, spec, existing.router.wireguard if existing else None, group_id,
+                       [n["cidr"] for n in libvirt_client.network_subnets()])
+
         try:
             spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
         except ValidationError as e:  # not the whole spec dump in the API error
@@ -314,6 +322,8 @@ class GroupService:
             group.config_applied, group.config_applied_at, group.config_error = True, _now(), None
             db.commit()
             self.pin_uplink(db, group)
+            self._sync_wg_key(db, group)
+            wgs.reconcile(db)
             progress(60)
 
             for i, member in enumerate(spec.members):
@@ -446,7 +456,8 @@ class GroupService:
         try:
             for path, content in rendered.files.items():
                 self._agent_put(vm_name, path, content.encode())
-            result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", rendered.apply_command], timeout=60)
+            # minutes when an older router first installs haproxy / wireguard-tools
+            result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", rendered.apply_command], timeout=300)
             if result["exitcode"] != 0:
                 raise RuntimeError(f"apply failed ({result['exitcode']}): {(result['stderr'] or result['stdout']).strip()}")
         except Exception as e:
@@ -456,8 +467,27 @@ class GroupService:
             raise RuntimeError(group.config_error)
         group.config_applied, group.config_applied_at, group.config_error = True, _now(), None
         db.commit()
+        self._sync_wg_key(db, group)
         self._publish(group, "updated")
         return True
+
+    def _sync_wg_key(self, db: Session, group: Group) -> None:
+        """Store the router's WireGuard public key (generated on the router at first use)"""
+        spec = GroupSpec.model_validate(group.spec)
+        wg = spec.router.wireguard
+        if wg is None or not wg.enabled:
+            return
+        rtr = router_vm_name(spec.name)
+        key = wgs.read_router_key(rtr)
+        if key is None or key == wg.public_key:
+            return
+        wg.public_key = key
+        group.spec = spec.model_dump(mode="json")
+        db.commit()
+        try:
+            libvirt_client.set_domain_group_metadata(rtr, spec.name, "router", spec=group.spec)
+        except libvirt.libvirtError as e:
+            logger.warning(f"Could not update {rtr} metadata: {e}")
 
     @staticmethod
     def _agent_put(vm_name: str, path: str, data: bytes) -> None:
@@ -548,6 +578,7 @@ class GroupService:
             db.commit()
             vm_service.sync_vms(db)
             self._sync_member_rows(db, group, spec)
+            wgs.reconcile(db)
             self._publish(group, "updated")
         return group
 
@@ -566,6 +597,10 @@ class GroupService:
                               + [lb for lb in old.load_balancers if lb.owner])
         new.owner = old.owner
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
+        # WireGuard peers are added / removed through /wireguard/peers (devices hold their configs):
+        # a spec replacing the group keeps them, and the router's key / assigned subnet and port
+        if new.router.wireguard is not None and old.router.wireguard is not None:
+            new.router.wireguard.peers = [p.model_copy() for p in old.router.wireguard.peers]
         return new
 
     # Hosts / records / load balancers managed by the app (cluster nodes in a group, §3.2)
@@ -587,6 +622,7 @@ class GroupService:
             spec = self.normalize(db, spec, existing=old, group_id=group.id)
             group.spec = spec.model_dump(mode="json")
             db.commit()
+            wgs.reconcile(db)
             self.push_router_config(db, group)
             self._publish(group, "updated")
             return group
@@ -688,6 +724,7 @@ class GroupService:
                 libvirt_client.set_domain_group_metadata(rtr, spec.name, "router", spec=group.spec)
             except libvirt.libvirtError as e:
                 logger.warning(f"Could not update {rtr} metadata: {e}")
+            wgs.reconcile(db)  # the WireGuard relay targets the uplink address
             self._publish(group, "updated")
         return ip
 
@@ -892,8 +929,123 @@ class GroupService:
             vm_service.sync_vms(db)
             db.delete(group)
             db.commit()
+        wgs.reconcile(db)  # stops the group's WireGuard relay
         event_bus.publish({"kind": "group", "event": "deleted", "id": group_id, "name": name})
         return True
+
+    # WireGuard remote access (wireguard_service: relay, keys, client configs)
+
+    def set_wireguard(self, db: Session, group_id: int, enabled: bool, listen_port: Optional[int] = None,
+                      host_port: Optional[int] = None) -> Optional[Group]:
+        """Enable / disable the router's WireGuard (disabled keeps keys and peers)"""
+        group = self.get_group(db, group_id)
+        if not group:
+            return None
+        spec = GroupSpec.model_validate(group.spec)
+        wg = spec.router.wireguard or WireGuardSpec(enabled=enabled)
+        wg.enabled = enabled
+        if listen_port:
+            wg.listen_port = listen_port
+        if host_port:
+            wg.host_port = host_port
+        spec.router.wireguard = wg
+        return self.update_group(db, group_id, spec)
+
+    def add_wg_peer(self, db: Session, group_id: int, name: str, public_key: Optional[str] = None,
+                    endpoint_host: Optional[str] = None, allowed_ips: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Add a device. Without public_key, generates its key pair: the private key is only in the
+        returned config. The router is updated live (wg syncconf)."""
+        group = self.get_group(db, group_id)
+        if group is None:
+            raise LookupError("Group not found")
+        with self._lock(group.name):
+            db.refresh(group)
+            if group.status in ("creating", "deleting"):
+                raise ValueError(f"Group is {group.status}: wait for it to finish")
+            spec = GroupSpec.model_validate(group.spec)
+            wg = spec.router.wireguard
+            if wg is None or not wg.enabled:
+                raise ValueError("Remote access (WireGuard) is not enabled on this group")
+            if any(p.name == name for p in wg.peers):
+                raise ValueError(f"A device named '{name}' already exists")
+            if not wg.public_key:
+                self._sync_wg_key(db, group)
+                spec = GroupSpec.model_validate(group.spec)
+                wg = spec.router.wireguard
+            if not wg.public_key:
+                raise ValueError("The router's WireGuard key is not known yet: start the group (or wait until "
+                                 "its router is ready) and try again")
+            private_key = None
+            if not public_key:
+                private_key, public_key = wgs.generate_keypair()
+            old = spec.model_copy(deep=True)
+            wg.peers.append(WireGuardPeer(name=name, public_key=public_key, allowed_ips=allowed_ips or []))
+            spec = self.normalize(db, GroupSpec.model_validate(spec.model_dump()), existing=old, group_id=group.id)
+            group.spec = spec.model_dump(mode="json")
+            db.commit()
+            warning = None
+            try:
+                if not self.push_router_config(db, group):
+                    warning = group.config_error
+            except RuntimeError as e:
+                warning = str(e)
+        self._publish(group, "updated")
+        peer = next(p for p in spec.router.wireguard.peers if p.name == name)
+        host = endpoint_host or wgs.default_endpoint_host()
+        return {"peer": peer.model_dump(), "config": wgs.client_config(spec, peer, host, private_key),
+                "filename": wgs.config_filename(spec), "has_private_key": private_key is not None,
+                "warning": warning}
+
+    def remove_wg_peer(self, db: Session, group_id: int, name: str) -> Optional[Group]:
+        group = self.get_group(db, group_id)
+        if group is None:
+            return None
+        wg = GroupSpec.model_validate(group.spec).router.wireguard
+        if wg is None or not any(p.name == name for p in wg.peers):
+            raise LookupError(f"No WireGuard device named '{name}'")
+
+        def mutate(spec: GroupSpec) -> None:
+            spec.router.wireguard.peers = [p for p in spec.router.wireguard.peers if p.name != name]
+        return self.update_owned(db, group_id, mutate)
+
+    def wg_peer_config(self, group: Group, name: str, endpoint_host: Optional[str] = None) -> Dict[str, Any]:
+        """A device's config again, without its private key (only shown when it was generated)"""
+        spec = GroupSpec.model_validate(group.spec)
+        wg = spec.router.wireguard
+        peer = next((p for p in (wg.peers if wg else []) if p.name == name), None)
+        if peer is None:
+            raise LookupError(f"No WireGuard device named '{name}'")
+        if not wg.public_key:
+            raise ValueError("The router's WireGuard key is not known yet: start the group")
+        return {"peer": peer.model_dump(), "config": wgs.client_config(spec, peer, endpoint_host or wgs.default_endpoint_host()),
+                "filename": wgs.config_filename(spec), "has_private_key": False, "warning": None}
+
+    def wireguard_status(self, group: Group) -> Dict[str, Any]:
+        spec = GroupSpec.model_validate(group.spec)
+        wg = spec.router.wireguard
+        host = wgs.default_endpoint_host()
+        if wg is None:
+            return {"configured": False, "enabled": False, "endpoint_host": host, "firewall": wgs.host_firewall(),
+                    "host_port_range": settings.WG_HOST_PORTS}
+        rtr = router_vm_name(spec.name)
+        running = (libvirt_client.get_vm(rtr) or {}).get("state") == "running"
+        live: Dict[str, Dict[str, Any]] = {}
+        router_error = None
+        if running and wg.enabled:
+            live, router_error = wgs.read_peers(rtr)
+        listening, relay_error = wgs.relay.status(wg.host_port) if wg.host_port else (False, None)
+        if wg.enabled and not spec.router.uplink_ip:
+            relay_error = "The router's uplink address is not known yet (start the group)"
+        return {
+            "configured": True, "enabled": wg.enabled, "listen_port": wg.listen_port, "host_port": wg.host_port,
+            "subnet": wg.subnet, "router_tunnel_ip": wg.router_ip(), "public_key": wg.public_key,
+            "endpoint_host": host, "endpoint": f"{host}:{wg.host_port}" if wg.host_port else None,
+            "client_allowed_ips": wgs.client_allowed_ips(spec) if wg.subnet else [],
+            "relay_listening": listening, "relay_error": relay_error, "firewall": wgs.host_firewall(),
+            "host_port_range": settings.WG_HOST_PORTS,
+            "router_running": running, "router_error": router_error,
+            "peers": [{**p.model_dump(), **live.get(p.public_key, {})} for p in wg.peers],
+        }
 
     # libvirt -> DB
 
@@ -1165,6 +1317,11 @@ class GroupService:
         model.load_balancers = [lb for lb in model.load_balancers if not lb.owner]
         model.router.uplink_ip = None
         model.owner = None
+        if model.router.wireguard is not None:  # assigned on this host / by this router
+            wg = model.router.wireguard
+            wg.public_key = wg.subnet = wg.host_port = None
+            for peer in wg.peers:
+                peer.ip = None
         spec = model.model_dump(mode="json", exclude_none=True)
         return {"yaml": yaml.safe_dump(spec, sort_keys=False), "spec": spec}
 

@@ -532,12 +532,70 @@ export interface RouterSpec {
   disk_size?: number;
   dns?: { forwarders?: string[]; records?: DNSRecord[] };
   bgp?: unknown;
-  wireguard?: unknown;
+  wireguard?: WireGuardSpec | null;
   vlans?: unknown[];
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
   uplink_ip?: string | null; // fixed (reserved) address on the uplink network
+}
+
+/** A device allowed in through the router's WireGuard (only its public key is stored) */
+export interface WireGuardPeer {
+  name?: string | null;
+  public_key: string;
+  ip?: string | null; // tunnel address (assigned)
+  endpoint?: string | null; // site-to-site peers only
+  allowed_ips?: string[];
+}
+
+/** Remote access: wg0 on the router, relayed from the host's UDP host_port */
+export interface WireGuardSpec {
+  enabled?: boolean;
+  listen_port?: number; // on the router
+  host_port?: number | null; // assigned: UDP port on the host
+  subnet?: string | null; // assigned tunnel subnet
+  public_key?: string | null; // the router's, read back from it
+  peers?: WireGuardPeer[];
+}
+
+export interface WireGuardPeerInfo {
+  name: string;
+  public_key: string;
+  ip?: string | null;
+  allowed_ips: string[];
+  endpoint?: string | null;
+  latest_handshake?: number | null; // epoch s, 0 = never
+  rx_bytes?: number | null;
+  tx_bytes?: number | null;
+}
+
+export interface WireGuardStatus {
+  configured: boolean;
+  enabled: boolean;
+  listen_port?: number | null;
+  host_port?: number | null;
+  subnet?: string | null;
+  router_tunnel_ip?: string | null;
+  public_key?: string | null;
+  endpoint_host: string;
+  endpoint?: string | null;
+  client_allowed_ips: string[];
+  relay_listening: boolean;
+  relay_error?: string | null;
+  host_port_range: string; // WG_HOST_PORTS, e.g. 51820-51869
+  firewall?: string | null; // ufw | firewalld: must let host_port/udp in
+  router_running: boolean;
+  router_error?: string | null;
+  peers: WireGuardPeerInfo[];
+}
+
+export interface WireGuardPeerCreated {
+  peer: WireGuardPeerInfo;
+  config: string;
+  filename: string;
+  has_private_key: boolean;
+  warning?: string | null;
 }
 
 export interface GroupSpec {

@@ -255,6 +255,10 @@ export const ClusterDetailPage: React.FC = () => {
                         <code>{cluster.load_balancer.uplink_ip}:{cluster.load_balancer.port}</code> (host),{' '}
                         <code>{cluster.load_balancer.router_ip}:{cluster.load_balancer.port}</code> (nodes)
                         <br />→ {cluster.load_balancer.backends.join(', ')}
+                        {cluster.group_id && (
+                          <><br />Laptops reach it too (same kubeconfig) through the group's{' '}
+                            <Link to={`/groups/${cluster.group_id}`}>remote access</Link> (WireGuard).</>
+                        )}
                       </DescriptionListDescription>
                     </DescriptionListGroup>
                   )}

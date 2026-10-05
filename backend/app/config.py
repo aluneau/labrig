@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     # Kubernetes clusters get their own NAT network: the first free /24 of this range
     CLUSTER_SUBNET_POOL: str = "10.43.0.0/16"
 
+    # WireGuard remote access to lab groups. The app relays UDP from the host to each group router
+    # (their uplink is NATed by libvirt): one port of WG_HOST_PORTS per group, on WG_RELAY_LISTEN.
+    # Open that range (udp) in the host firewall: scripts/setup.sh does it for ufw / firewalld.
+    WG_HOST_PORTS: str = "51820-51869"
+    WG_RELAY_LISTEN: str = "0.0.0.0"
+    # Host name / address put in client configs ("Endpoint"); empty = the host's primary LAN address
+    WG_ENDPOINT_HOST: str = ""
+    # Tunnel subnets: the first free /24 of this range for each group
+    WG_SUBNET_POOL: str = "10.44.0.0/16"
+
     # Address VNC consoles listen on. 127.0.0.1 keeps them local to the host;
     # set to 0.0.0.0 to reach them from the LAN (they have no password).
     VNC_LISTEN: str = "127.0.0.1"

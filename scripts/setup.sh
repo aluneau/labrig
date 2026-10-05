@@ -6,6 +6,7 @@
 #   scripts/setup.sh --no-service    # everything except the systemd service (use ./run.sh)
 #   scripts/setup.sh --no-boot       # start libvirt and the service now, but don't enable them at boot
 #                                    # (e.g. a gaming PC: sudo systemctl start vm-manager when needed)
+#   scripts/setup.sh --wg-ports 51820-51869   # UDP ports opened for lab WireGuard (WG_HOST_PORTS), none = skip
 #
 # Supported: Arch (and derivatives like CachyOS/Manjaro), Fedora, RHEL / AlmaLinux / Rocky / CentOS Stream,
 # Debian / Ubuntu. Run it as the user who will use VM Manager; it calls sudo when needed.
@@ -17,14 +18,16 @@ PORT="8000"
 INSTALL_SERVICE=1
 AT_BOOT=1
 SERVICE_NAME="vm-manager"
+WG_PORTS="51820-51869"
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) LISTEN="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
     --no-boot) AT_BOOT=0; shift ;;
+    --wg-ports) WG_PORTS="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
@@ -188,11 +191,26 @@ if $SUDO sh -c 'command -v ufw' >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null 
   $SUDO ufw route allow in on 'virbr+' comment 'libvirt NAT out' >/dev/null
   $SUDO ufw route allow out on 'virbr+' comment 'libvirt NAT in' >/dev/null
   ok "ufw: DHCP, DNS and forwarding allowed on libvirt bridges (virbr+)"
+  if [ "$WG_PORTS" != none ]; then
+    # lab groups' WireGuard (remote access): the app relays these UDP ports to the group routers
+    $SUDO ufw allow "${WG_PORTS/-/:}/udp" comment 'vm-manager WireGuard (lab remote access)' >/dev/null
+    ok "ufw: udp $WG_PORTS allowed (lab WireGuard)"
+  fi
 elif systemctl is-active --quiet firewalld 2>/dev/null; then
   if $SUDO firewall-cmd --get-zones | tr ' ' '\n' | grep -qx libvirt; then
     ok "firewalld: libvirt manages its bridges in the 'libvirt' zone, nothing to do"
   else
     warn "firewalld has no 'libvirt' zone: VMs may not get DHCP. Allow dhcp/dns on virbr* interfaces."
+  fi
+  if [ "$WG_PORTS" != none ]; then
+    # default zone (the LAN interface's): runtime + permanent, no reload
+    if ! $SUDO firewall-cmd --query-port="$WG_PORTS/udp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --add-port="$WG_PORTS/udp" >/dev/null
+    fi
+    if ! $SUDO firewall-cmd --permanent --query-port="$WG_PORTS/udp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --permanent --add-port="$WG_PORTS/udp" >/dev/null
+    fi
+    ok "firewalld: udp $WG_PORTS open in zone $($SUDO firewall-cmd --get-default-zone) (lab WireGuard)"
   fi
 else
   ok "no ufw/firewalld active, nothing to do"

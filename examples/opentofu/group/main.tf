@@ -6,6 +6,10 @@
 #   tofu init && tofu apply
 #
 # Adding/removing a member, a dns_record or a dhcp_host is applied in place (live on the router).
+#
+# Remote access (wireguard = true): each entry of var.wireguard_devices gets a client config, e.g.
+#   tofu output -raw wireguard_config_laptop > wg-lab.conf
+#   nmcli connection import type wireguard file wg-lab.conf     (docs/wireguard.md)
 
 terraform {
   required_providers {
@@ -24,6 +28,7 @@ resource "vmmanager_group" "lab" {
   cidr         = var.cidr
   domain       = "${var.name}.lab"
   router_image = "almalinux-9"
+  wireguard    = length(var.wireguard_devices) > 0
 
   cloud_init = {
     username = "admin"
@@ -58,4 +63,14 @@ resource "vmmanager_group" "lab" {
       a    = dns_record.value
     }
   }
+}
+
+# A laptop (or any device) allowed in through the router's WireGuard. No public_key: the server generates
+# the key pair and the config (sensitive output) holds the private key.
+resource "vmmanager_wireguard_peer" "device" {
+  for_each = var.wireguard_devices
+  group_id = vmmanager_group.lab.id
+  name     = each.key
+  # public_key    = "…"            # your own key pair instead (the config then has no private key)
+  endpoint_host = each.value.endpoint_host
 }

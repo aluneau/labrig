@@ -58,3 +58,11 @@ variable "keyboard" {
   type    = string
   default = "fr"
 }
+
+variable "wireguard_devices" {
+  description = "Devices allowed in through WireGuard (remote access), name => {endpoint_host}. Empty map: no WireGuard"
+  type        = map(object({ endpoint_host = optional(string) }))
+  default = {
+    laptop = {}
+  }
+}

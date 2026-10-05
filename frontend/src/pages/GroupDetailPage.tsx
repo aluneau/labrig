@@ -40,6 +40,7 @@ import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
+import { GroupWireGuard } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
 import { groupStatus } from './GroupsPage';
 
@@ -504,6 +505,10 @@ export const GroupDetailPage: React.FC = () => {
 
               <GroupDhcp group={group} onDone={onDone} onError={onError} />
             </PageSection>
+          </Tab>
+
+          <Tab eventKey="remote" title={<TabTitleText>Remote access</TabTitleText>}>
+            <PageSection variant="light"><GroupWireGuard group={group} onDone={onDone} onError={onError} /></PageSection>
           </Tab>
 
           <Tab eventKey="router" title={<TabTitleText>Router</TabTitleText>}>
