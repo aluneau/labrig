@@ -10,6 +10,7 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  ClipboardCopy,
   CodeBlock,
   CodeBlockCode,
   DescriptionList,
@@ -32,9 +33,40 @@ import { Cluster, ClusterCommandOutput } from '../types';
 import { clusterApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatDate } from '../utils/format';
+
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { ClusterStatus } from './ClustersPage';
+
+/** Shell one-liners that fetch the kubeconfig (admin credentials: mode 600) and point kubectl at it.
+ * POSIX sh/bash/zsh and fish 3 all accept `export X=…` and `&&`. */
+const KubectlCommands: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
+  const url = new URL(clusterApi.kubeconfigUrl(cluster.id), window.location.origin).href;
+  const file = `$HOME/.kube/${cluster.name}.yaml`; // not ~: fish doesn't expand it inside X=~/…
+  const fetch = `mkdir -p $HOME/.kube && curl -fsS --create-file-mode 600 ${url} -o ${file} && chmod 600 ${file}`;
+  const thisShell = `${fetch} && export KUBECONFIG=${file} && kubectl get nodes`;
+  // The cluster's file comes first so it wins over a stale context of the same name
+  const merge = `${fetch} && KUBECONFIG=${file}:$HOME/.kube/config kubectl config view --flatten > $HOME/.kube/config.new`
+    + ` && mv $HOME/.kube/config.new $HOME/.kube/config && chmod 600 $HOME/.kube/config`
+    + ` && kubectl config use-context ${cluster.name} && kubectl get nodes`;
+  return (
+    <Stack hasGutter>
+      <StackItem>
+        <div style={{ marginBottom: 4 }}>In this shell only (<code>KUBECONFIG</code> = <code>~/.kube/{cluster.name}.yaml</code>):</div>
+        <div id="kubectl-cmd-shell"><ClipboardCopy variant="inline-compact" isBlock isCode hoverTip="Copy" clickTip="Copied">{thisShell}</ClipboardCopy></div>
+      </StackItem>
+      <StackItem>
+        <div style={{ marginBottom: 4 }}>Or add it to <code>~/.kube/config</code> as context <code>{cluster.name}</code> and switch to it:</div>
+        <div id="kubectl-cmd-context"><ClipboardCopy variant="inline-compact" isBlock isCode hoverTip="Copy" clickTip="Copied">{merge}</ClipboardCopy></div>
+      </StackItem>
+      <StackItem style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
+        Needs <code>kubectl</code> on the machine running the command
+        (<a href="https://kubernetes.io/docs/tasks/tools/#kubectl" target="_blank" rel="noreferrer">install</a>;
+        Arch: <code>pacman -S kubectl</code>) and access to {url.replace(/\/api\/.*$/, '')}.
+      </StackItem>
+    </Stack>
+  );
+};
 
 const Kubectl: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
   const [view, setView] = useState<'nodes' | 'pods'>('nodes');
@@ -204,6 +236,14 @@ export const ClusterDetailPage: React.FC = () => {
               </CardBody>
             </Card>
           </StackItem>
+          {cluster.has_kubeconfig && (
+            <StackItem>
+              <Card>
+                <CardTitle>Use with kubectl</CardTitle>
+                <CardBody><KubectlCommands cluster={cluster} /></CardBody>
+              </Card>
+            </StackItem>
+          )}
           <StackItem>
             <Card>
               <CardTitle>Nodes</CardTitle>

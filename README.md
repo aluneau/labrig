@@ -19,6 +19,12 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Kubernetes clusters (k3s)**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image, on
   their own NAT network with fixed addresses and DNS (`api.<cluster>.<domain>`); ready in ~2 minutes;
   kubeconfig download (works from the host), `kubectl get nodes/pods` in the UI, start/stop, add/remove workers.
+  The cluster page has copy-paste kubectl commands (bash/zsh/fish): one sets `KUBECONFIG` for the current
+  shell, the other merges the cluster into `~/.kube/config` as context `<cluster>`. For example:
+  ```bash
+  mkdir -p $HOME/.kube && curl -fsS --create-file-mode 600 http://127.0.0.1:8000/api/v1/clusters/<id>/kubeconfig \
+    -o $HOME/.kube/<name>.yaml && export KUBECONFIG=$HOME/.kube/<name>.yaml && kubectl get nodes
+  ```
 - **Lab groups**: an isolated network + a router VM (EL cloud image with dnsmasq + nftables: DHCP,
   DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
   plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
