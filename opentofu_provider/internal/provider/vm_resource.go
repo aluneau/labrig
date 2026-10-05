@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -55,6 +56,8 @@ type vmModel struct {
 	Status       types.String    `tfsdk:"status"`
 	IPAddresses  types.List      `tfsdk:"ip_addresses"`
 	VNCPort      types.Int64     `tfsdk:"vnc_port"`
+	BootOrder    types.List      `tfsdk:"boot_order"`
+	Cdrom        types.String    `tfsdk:"cdrom"`
 }
 
 func NewVMResource() resource.Resource { return &vmResource{} }
@@ -103,6 +106,16 @@ func (r *vmResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *r
 			"status":       schema.StringAttribute{Computed: true},
 			"ip_addresses": schema.ListAttribute{Computed: true, ElementType: types.StringType},
 			"vnc_port":     schema.Int64Attribute{Computed: true},
+			"boot_order": schema.ListAttribute{
+				Optional: true, Computed: true, ElementType: types.StringType,
+				Description:   "Persistent boot order: \"hd\", \"cdrom\", \"network\". Updated in place; applies at the next start.",
+				PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+			},
+			"cdrom": schema.StringAttribute{
+				Optional: true, Computed: true,
+				Description:   "ISO volume path in the CD-ROM drive (\"\" = empty). Changed in place, live when running.",
+				PlanModifiers: keep,
+			},
 		},
 	}
 }
@@ -135,8 +148,10 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		"network_name": plan.Network.ValueString(),
 		"mac_address":  strPtr(plan.MACAddress),
 		"autostart":    plan.Autostart.ValueBool(),
-		"start":        plan.Running.ValueBool(),
 	}
+	// Boot order / CD-ROM are set before the first start
+	setDevices := known(plan.BootOrder) || (known(plan.Cdrom) && plan.Cdrom.ValueString() != plan.ISOPath.ValueString())
+	body["start"] = plan.Running.ValueBool() && !setDevices
 	if id := strPtr(plan.CloudImageID); id != nil {
 		n, err := strconv.ParseInt(*id, 10, 64)
 		if err != nil {
@@ -164,6 +179,19 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	}
 	plan.ID = types.StringValue(strconv.FormatInt(created.ID, 10))
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), plan.ID)...)
+
+	if setDevices {
+		if err := r.applyDevices(ctx, plan.ID.ValueString(), plan, nil); err != nil {
+			resp.Diagnostics.AddError("Cannot configure VM devices", err.Error())
+			return
+		}
+		if plan.Running.ValueBool() {
+			if err := r.client.Do(ctx, "POST", "/vms/"+plan.ID.ValueString()+"/start", nil, nil); err != nil {
+				resp.Diagnostics.AddError("Cannot start VM", err.Error())
+				return
+			}
+		}
+	}
 
 	if plan.Running.ValueBool() && plan.WaitForIP.ValueBool() {
 		if err := r.waitForIP(ctx, plan.ID.ValueString()); err != nil {
@@ -216,6 +244,16 @@ func (r *vmResource) refresh(ctx context.Context, m *vmModel, d diags) bool {
 		ips = append(ips, iface.Addresses...)
 	}
 	m.IPAddresses, _ = types.ListValueFrom(ctx, types.StringType, ips)
+	if vm.Boot != nil && len(vm.Boot.Order) > 0 {
+		m.BootOrder, _ = types.ListValueFrom(ctx, types.StringType, vm.Boot.Order)
+	} else {
+		m.BootOrder = types.ListNull(types.StringType)
+	}
+	if vm.Cdrom != nil && vm.Cdrom.Path != nil {
+		m.Cdrom = types.StringValue(*vm.Cdrom.Path)
+	} else {
+		m.Cdrom = types.StringValue("")
+	}
 	if vm.Console != nil && vm.Console.Port != nil {
 		m.VNCPort = types.Int64Value(*vm.Console.Port)
 	} else {
@@ -261,6 +299,11 @@ func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 		}
 	}
 
+	if err := r.applyDevices(ctx, id, plan, &state); err != nil {
+		resp.Diagnostics.AddError("Cannot update VM devices", err.Error())
+		return
+	}
+
 	if !plan.Running.Equal(state.Running) {
 		if plan.Running.ValueBool() {
 			if err := r.client.Do(ctx, "POST", "/vms/"+id+"/start", nil, nil); err != nil {
@@ -280,6 +323,37 @@ func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+}
+
+// applyDevices sets the CD-ROM media and the boot order when the plan differs from state (nil = new VM).
+func (r *vmResource) applyDevices(ctx context.Context, id string, plan vmModel, state *vmModel) error {
+	if known(plan.Cdrom) && (state == nil || !plan.Cdrom.Equal(state.Cdrom)) {
+		var iso *string
+		if plan.Cdrom.ValueString() != "" {
+			iso = strPtr(plan.Cdrom)
+		}
+		if err := r.client.Do(ctx, "PUT", "/vms/"+id+"/cdrom", map[string]any{"iso_path": iso}, nil); err != nil {
+			return err
+		}
+	}
+	if known(plan.BootOrder) && (state == nil || !plan.BootOrder.Equal(state.BootOrder)) {
+		var order []string
+		if diags := plan.BootOrder.ElementsAs(ctx, &order, false); diags.HasError() {
+			return fmt.Errorf("invalid boot_order")
+		}
+		if err := r.client.Do(ctx, "PUT", "/vms/"+id+"/boot", map[string]any{"order": order}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// known: set in the configuration (not null / unknown)
+func known(v interface {
+	IsNull() bool
+	IsUnknown() bool
+}) bool {
+	return !v.IsNull() && !v.IsUnknown()
 }
 
 // shutdown asks the guest to power off (ACPI) and forces it off after 2 minutes.
