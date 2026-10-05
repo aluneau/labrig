@@ -27,6 +27,10 @@ class EventBus:
         with self._lock:
             self._subscribers = {s for s in self._subscribers if s[1] is not queue}
 
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
     def publish(self, event: Dict[str, Any]) -> None:
         """Thread-safe: may be called from any thread"""
         data = json.dumps(event, default=str)

@@ -226,8 +226,20 @@ export interface DHCPHost {
 export interface NetworkConfig {
   network: NetworkDetail;
   hosts: DHCPHost[];
-  interfaces: { vm: string; mac: string }[];
+  interfaces: NetworkInterface[];
   xml: string;
+}
+
+export interface NetworkInterface {
+  vm: string;
+  mac: string;
+  active: boolean; // the VM is running
+}
+
+export interface LeaseRelease {
+  mac: string;
+  ip: string;
+  released: boolean;
 }
 
 export interface NetworkUpdate {
@@ -309,6 +321,36 @@ export interface HostInfo {
   total_volumes: number;
   total_networks: number;
   active_networks: number;
+}
+
+export type LibvirtState = 'running' | 'stopped' | 'starting' | 'stopping';
+
+export interface LibvirtUnit {
+  name: string;
+  active_state: string;
+  enabled?: string | null;
+}
+
+/** GET /hosts/libvirt: read from systemd, never starts libvirt */
+export interface LibvirtStatus {
+  state: LibvirtState;
+  connected: boolean; // the app holds a connection right now
+  manageable: boolean; // Start/Stop available (qemu:///system + systemd)
+  mode?: 'monolithic' | 'modular' | null;
+  daemon_active: boolean; // false when only the sockets listen (socket activation)
+  units: LibvirtUnit[];
+  idle_timeout_minutes: number;
+  helper_installed: boolean;
+  dhcp_release_available: boolean;
+  uri: string;
+}
+
+export type LibvirtStopMode = 'refuse' | 'shutdown' | 'force';
+
+export interface LibvirtAction {
+  status: LibvirtStatus;
+  task?: Task | null;
+  warning?: string | null;
 }
 
 // Lab groups (backend/app/schemas/group.py)

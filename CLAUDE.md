@@ -31,12 +31,12 @@ Old podman containers `vm-manager-backend/frontend` (stale code, ports 8000/3000
 
 ```
 backend/app/
-  main.py             FastAPI app: lifespan (DB init, libvirt reconnect watchdog), libvirtError -> HTTP 400, serves frontend/build
+  main.py             FastAPI app: lifespan (DB init, idle-close/state watcher), libvirtError -> 400/404, LibvirtUnavailable -> 503, serves frontend/build
   config.py           Settings (env or backend/.env): LIBVIRT_URI, DEFAULT_POOL_*, DEFAULT_NETWORK, VNC_LISTEN, paths
   database.py         SQLite (WAL, one connection per session), @serialized lock for libvirt->DB mirroring
   libvirt_client.py   ALL libvirt calls; event loop thread + lifecycle callbacks -> event_bus; domain XML template
   events.py           thread-safe EventBus -> asyncio queues (SSE)
-  services/           vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
+  services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el")
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
@@ -65,6 +65,15 @@ e2e/                  Playwright browser tests against the real app (see below)
 - New VMs: q35, host-passthrough, virtio, no `<emulator>` (libvirt picks it), disks in the `default`
   pool (`/var/lib/libvirt/images`, created if missing). Cloud-image VMs get a full copy of the image
   plus `<name>-cidata.iso` (NoCloud seed, built with pycdlib); delete with `delete_disks` removes both.
+- **libvirt on demand** (owner's gaming rig): no keepalive. `libvirt_client.connect()` opens the connection
+  when a request needs it (raises `LibvirtUnavailable` -> 503 `libvirt is stopped` if no socket); the
+  lifespan watcher closes it after `LIBVIRT_IDLE_TIMEOUT` min when no SSE client/task, and publishes
+  `{"kind":"connection","event":"state"}` from `systemctl show` (never connect to probe: that
+  socket-activates the daemon). Event callbacks are deregistered before close (they hold connection refs).
+  Start/stop = `systemctl start/stop` as the app user, allowed by `scripts/polkit/50-vm-manager.rules`.
+- Privileged operations go through `scripts/vm-manager-helper` (installed root-owned in /usr/libexec,
+  run with pkexec, polkit action `org.vmmanager.helper`). Fixed whitelist, validates everything itself.
+  Never give the app sudo.
 - Background jobs (downloads) use `task_service.start(...)`; task bodies must poll `is_cancelled()`.
 - **Devices** (`domain_xml.py` = pure XML helpers, calls in `libvirt_client`, endpoints `vm_devices.py`
   mounted before `vms` so `POST /vms/{id}/disks` isn't a power action): new VMs get an empty SATA CD-ROM
@@ -91,12 +100,14 @@ e2e/                  Playwright browser tests against the real app (see below)
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 
-- Backend must run on **Python 3.9** (RHEL 9): no `X | None`, no `match`.
+- Backend must run on **Python 3.9** (RHEL 9): no `X | None`, no `match`, no `platform.freedesktop_os_release`.
 - Use the distro libvirt bindings (venv with `--system-site-packages`); never require compiling libvirt-python.
 - SELinux: systemd can't access files in a home directory, so the unit runs `/bin/sh -c 'cd … && exec venv/bin/python -m uvicorn …'`.
 - `ufw`/`firewall-cmd` may be in `/usr/sbin` (not in a user's PATH): probe them through sudo.
 - `virsh` output is localized: parse `--name` lists / XML, never human-readable text.
 - Downloads: send `Accept-Encoding: identity` and read raw bytes; servers may omit Content-Length (spool fallback exists).
+- polkit JS rules work on EL9 (mozjs) and Debian 13 (duktape); `pkexec` is a separate package on Debian.
+  libvirt units differ: Arch/Debian monolithic `libvirtd`, EL modular `virtqemud`… (`daemon_service._mode`).
 - Test installs in fresh nested VMs created with the app itself (nested KVM is enabled on this host).
 
 ## Gotchas
@@ -119,6 +130,7 @@ cd e2e && npm install && node smoke.js                          # every page: co
 node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
+node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```
 

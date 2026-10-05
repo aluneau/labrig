@@ -126,6 +126,9 @@ class TaskService:
             db.commit()
             self._publish(task)
 
+    def has_running(self) -> bool:
+        return bool(self._running)
+
     def is_cancelled(self, task_id: int) -> bool:
         return task_id in self._cancelled
 

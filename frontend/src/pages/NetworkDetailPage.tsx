@@ -33,7 +33,7 @@ import {
   ToolbarItem,
 } from '@patternfly/react-core';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { DHCPHost, NetworkConfig, NetworkUpdate } from '../types';
+import { DHCPHost, DHCPLease, NetworkConfig, NetworkInterface, NetworkUpdate } from '../types';
 import { ApiError, networkApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatDate } from '../utils/format';
@@ -154,7 +154,7 @@ const HostModal: React.FC<{
   networkId: number;
   editing: DHCPHost | null;
   prefill: Partial<DHCPHost> | null;
-  interfaces: { vm: string; mac: string }[];
+  interfaces: NetworkInterface[];
   onClose: () => void;
   onDone: () => void;
 }> = ({ networkId, editing, prefill, interfaces, onClose, onDone }) => {
@@ -266,6 +266,8 @@ export const NetworkDetailPage: React.FC = () => {
   const [tab, setTab] = useState<string | number>('settings');
   const [hostModal, setHostModal] = useState<{ editing: DHCPHost | null; prefill: Partial<DHCPHost> | null } | null>(null);
   const [toDelete, setToDelete] = useState<DHCPHost | null>(null);
+  const [releaseToo, setReleaseToo] = useState(true);
+  const [toRelease, setToRelease] = useState<DHCPLease | null>(null);
   const [gone, setGone] = useState(false);
 
   const load = useCallback(async () => {
@@ -292,6 +294,8 @@ export const NetworkDetailPage: React.FC = () => {
   const net = config.network;
   const reservedMacs = new Set(config.hosts.map((h) => h.mac.toLowerCase()));
   const vmByMac = new Map(config.interfaces.map((i) => [i.mac.toLowerCase(), i.vm]));
+  const runningMacs = new Set(config.interfaces.filter((i) => i.active).map((i) => i.mac.toLowerCase()));
+  const leasedMacs = new Set(net.leases.map((l) => l.mac_address.toLowerCase()));
   const saved = (msg: string) => { setError(null); setNotice(msg); load(); };
 
   return (
@@ -365,6 +369,11 @@ export const NetworkDetailPage: React.FC = () => {
                           })}>
                           {reservedMacs.has(l.mac_address.toLowerCase()) ? 'Reserved' : 'Make static'}
                         </Button>
+                        {!runningMacs.has(l.mac_address.toLowerCase()) && (
+                          <Button variant="link" isInline isDanger style={{ marginLeft: 16 }} onClick={() => setToRelease(l)}>
+                            Release
+                          </Button>
+                        )}
                       </Td>
                     </Tr>
                   ))}
@@ -387,14 +396,34 @@ export const NetworkDetailPage: React.FC = () => {
       <ConfirmModal title={`Remove reservation for ${toDelete?.mac}?`} isOpen={!!toDelete} confirmLabel="Remove"
         onConfirm={async () => {
           try {
-            await networkApi.deleteHost(net.id, toDelete!.mac);
-            saved('Reservation removed');
+            const release = releaseToo && leasedMacs.has(toDelete!.mac.toLowerCase());
+            await networkApi.deleteHost(net.id, toDelete!.mac, release);
+            saved(release ? 'Reservation removed and lease released' : 'Reservation removed');
           } catch (err) {
             setError(errorText(err));
           }
         }}
         onClose={() => setToDelete(null)}>
-        The address goes back to the DHCP pool when the current lease expires.
+        {toDelete && leasedMacs.has(toDelete.mac.toLowerCase()) ? (
+          <Checkbox id="release-too" label="Release the current lease too" isChecked={releaseToo}
+            onChange={(_e, v) => setReleaseToo(v)}
+            description={runningMacs.has(toDelete.mac.toLowerCase())
+              ? 'The VM is running: it keeps its address until it renews, then may get another one from the range.'
+              : 'The address goes back to the DHCP pool now, instead of when the lease expires.'} />
+        ) : 'The address goes back to the DHCP pool when the current lease expires.'}
+      </ConfirmModal>
+      <ConfirmModal title={`Release lease ${toRelease?.ip_address}?`} isOpen={!!toRelease} confirmLabel="Release"
+        onConfirm={async () => {
+          try {
+            const r = await networkApi.releaseLease(net.id, toRelease!.mac_address);
+            saved(r.released ? `Lease ${r.ip} released` : `Release of ${r.ip} sent, but libvirt still lists the lease`);
+          } catch (err) {
+            setError(errorText(err));
+          }
+        }}
+        onClose={() => setToRelease(null)}>
+        dnsmasq forgets the lease of {toRelease?.mac_address}{vmByMac.get(toRelease?.mac_address.toLowerCase() || '') ? ` (${vmByMac.get(toRelease!.mac_address.toLowerCase())})` : ''}:
+        {' '}the address can be given to another machine.
       </ConfirmModal>
     </>
   );

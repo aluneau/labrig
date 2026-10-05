@@ -3,6 +3,7 @@ import {
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
+  LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
 } from '../types';
 
@@ -13,6 +14,9 @@ export function vncUrl(vmId: number): string {
   const base = API_BASE || window.location.origin;
   return `${base.replace(/^http/, 'ws')}/api/v1/vms/${vmId}/vnc`;
 }
+
+/** window event fired when an API call fails with 503 "libvirt is stopped" */
+export const LIBVIRT_STOPPED_EVENT = 'vmm-libvirt-stopped';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -39,6 +43,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
+    // The daemon is down: tell the libvirt state provider (header pill, "libvirt is stopped" pages)
+    if (response.status === 503 && body?.libvirt === 'stopped') window.dispatchEvent(new Event(LIBVIRT_STOPPED_EVENT));
     throw new ApiError(response.status, errorMessage(body, response.status));
   }
   return response.json();
@@ -110,7 +116,10 @@ export const networkApi = {
   addHost: (id: number, host: DHCPHost) => post(`/networks/${id}/hosts`, host),
   updateHost: (id: number, mac: string, host: DHCPHost) =>
     request(`/networks/${id}/hosts/${encodeURIComponent(mac)}`, { method: 'PUT', body: JSON.stringify(host) }),
-  deleteHost: (id: number, mac: string) => del(`/networks/${id}/hosts/${encodeURIComponent(mac)}`),
+  deleteHost: (id: number, mac: string, releaseLease = false) =>
+    del(`/networks/${id}/hosts/${encodeURIComponent(mac)}?release_lease=${releaseLease}`),
+  releaseLease: (id: number, mac: string, force = false) =>
+    del<LeaseRelease>(`/networks/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
 };
 
 export const groupApi = {
@@ -141,4 +150,10 @@ export const taskApi = {
 export const hostApi = {
   info: () => request<HostInfo>('/hosts/info'),
   resources: () => request<HostResources>('/hosts/resources'),
+};
+
+export const libvirtApi = {
+  status: () => request<LibvirtStatus>('/hosts/libvirt'),
+  start: () => post<LibvirtAction>('/hosts/libvirt/start'),
+  stop: (mode: LibvirtStopMode, timeout?: number) => post<LibvirtAction>('/hosts/libvirt/stop', { mode, timeout }),
 };

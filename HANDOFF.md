@@ -35,8 +35,8 @@ libvirt on this host, and in fresh nested VMs.
 ## Known limitations / open issues
 
 - **No authentication.** It listens on 127.0.0.1 by default. Needed before `--listen 0.0.0.0` on shared machines.
-- The libvirt reconnect watchdog (`main.py` `keep_connected`) keeps libvirtd alive while the app runs.
-  That conflicts with "start/stop libvirt on demand" (design in future-features §1.5).
+- libvirt start/stop + no keepalive (§1.5) and DHCP lease release (§1.1) are done. On a host installed
+  before that, re-run `scripts/setup.sh --no-boot` once to install the helper + polkit rule.
 - The project is **not a git repository** yet (a `.gitignore` is ready). The owner wants to ship it, so
   `git init` + a remote is the obvious first step (ask before doing it).
 - An existing VM's CPU/memory can't be edited. (Disks, CD-ROM media and boot order can: §1.2–1.4 done.)

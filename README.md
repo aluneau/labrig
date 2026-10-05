@@ -53,15 +53,18 @@ scripts/setup.sh                 # then open http://127.0.0.1:8000
 `scripts/setup.sh` is idempotent (re-run it after an update). Run it as the user who will use VM Manager;
 it uses sudo for the system parts:
 
-1. installs libvirt, QEMU/KVM, OVMF, dnsmasq and the distro's libvirt Python bindings
+1. installs libvirt, QEMU/KVM, OVMF, dnsmasq (+ `dhcp_release`), polkit/pkexec and the distro's libvirt Python bindings
 2. starts libvirt (modular daemons on Fedora/RHEL, `libvirtd` elsewhere)
 3. adds you to the `libvirt` group (the polkit rule that lets you manage VMs without a password)
-4. starts the `default` NAT network with autostart, and moves it to a free `192.168.X.0/24`
+4. installs the privileged helper `/usr/libexec/vm-manager/helper` (root-owned, fixed whitelist, run through
+   `pkexec`, used to release DHCP leases) and `/etc/polkit-1/rules.d/50-vm-manager.rules`: the `libvirt`
+   group may run that helper and start/stop the libvirt daemons and sockets (Start/Stop in the UI)
+5. starts the `default` NAT network with autostart, and moves it to a free `192.168.X.0/24`
    when `192.168.122.0/24` is already in use (LAN, VPN, nested lab…)
-5. firewall: with **ufw**, allows DHCP/DNS and forwarding on libvirt bridges (`virbr+`), otherwise VMs
+6. firewall: with **ufw**, allows DHCP/DNS and forwarding on libvirt bridges (`virbr+`), otherwise VMs
    boot without an IP; with **firewalld**, libvirt's own `libvirt` zone already covers it
-6. creates `backend/venv`, builds the UI if needed
-7. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
+7. creates `backend/venv`, builds the UI if needed
+8. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
 
 | Option | |
 |---|---|
@@ -70,6 +73,13 @@ it uses sudo for the system parts:
 | `--listen 0.0.0.0 --port 8000` | reachable from the network (no login yet: trusted networks only; open the port yourself) |
 
 Service: `journalctl -u vm-manager -f`, `sudo systemctl stop vm-manager`.
+
+**libvirt on demand**: the app connects to libvirt only when a request needs it and closes the connection
+after `LIBVIRT_IDLE_TIMEOUT` minutes once no browser tab is open, so socket-activated daemons can exit
+(`--timeout 120`; a monolithic `libvirtd` stays up while it has active networks). The header shows
+`libvirt: running/stopped`; **Start** / **Stop** (Host page) drive systemd without sudo. Stop refuses while
+VMs run unless you pick "shut down all VMs first" or "stop anyway" (QEMU keeps running, unmanaged).
+Remove the helper: `sudo rm -r /usr/libexec/vm-manager /usr/share/polkit-1/actions/org.vmmanager.helper.policy /etc/polkit-1/rules.d/50-vm-manager.rules`.
 
 Release tarball: `scripts/package.sh` → `dist/vm-manager-<version>.tar.gz`.
 
@@ -87,7 +97,10 @@ Environment variables or `backend/.env`:
 
 | Variable | Default | |
 |---|---|---|
-| `LIBVIRT_URI` | `qemu:///system` | |
+| `LIBVIRT_URI` | `qemu:///system` | Start/Stop only for `qemu:///system` |
+| `LIBVIRT_IDLE_TIMEOUT` | `5` | Minutes before an unused connection is closed when no browser is attached (`0` = never) |
+| `LIBVIRT_DAEMON_MODE` | `auto` | `monolithic` (libvirtd) or `modular` (virtqemud…); auto-detected from systemd |
+| `HELPER_PATH` | `/usr/libexec/vm-manager/helper` | Privileged helper (installed by setup.sh) |
 | `DEFAULT_POOL_NAME` / `DEFAULT_POOL_PATH` | `default` / `/var/lib/libvirt/images` | Pool for new disks, ISOs and cloud images; created if missing |
 | `DEFAULT_NETWORK` | `default` | Network for new VMs |
 | `VNC_LISTEN` | `127.0.0.1` | `0.0.0.0` exposes VM consoles (no password) to the LAN |
@@ -113,6 +126,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `devices.js`, `groups.js`).
+`libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 
 ## API overview
 
@@ -132,6 +146,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `WS /api/v1/vms/{id}/vnc` | VNC console (WebSocket) |
 | `GET /api/v1/networks/{id}/config`, `PUT /api/v1/networks/{id}`, `PUT …/xml`, `POST/PUT/DELETE …/hosts` | Network editing, DHCP reservations |
 | `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
+| `GET /api/v1/hosts/libvirt`, `POST …/libvirt/start`, `POST …/libvirt/stop {mode: refuse\|shutdown\|force}` | libvirt daemon state / start / stop; other endpoints answer `503 {"detail": "libvirt is stopped"}` while it is down |
+| `DELETE /api/v1/networks/{id}/leases/{mac}`, `DELETE …/hosts/{mac}?release_lease=true` | Release a DHCP lease (dnsmasq `dhcp_release` via the helper) |
 | `GET/POST /api/v1/groups`, `GET/PUT/DELETE /api/v1/groups/{id}` (spec; `?delete_disks=`) | Lab groups (create runs as a task) |
 | `POST …/groups/{id}/{start,stop}`, `POST/DELETE …/members`, `POST/DELETE …/dns-records` | Group power (router first on start, last on stop), live members / records |
 | `GET …/groups/{id}/router/config`, `POST …/router/apply`, `GET …/export` | Rendered router config, re-push, spec YAML |
@@ -140,8 +156,7 @@ Full interactive docs: `/docs`.
 
 ## Roadmap
 
-See [future-features.md](future-features.md): DHCP lease release, ISO/boot order/disks on existing VMs,
-start/stop libvirt from the UI, lab groups v2 (BGP, WireGuard, VLANs, snapshots, templates, VyOS router),
+See [future-features.md](future-features.md): lab groups v2 (BGP, WireGuard, VLANs, snapshots, templates, VyOS router),
 then **Kubernetes / OpenShift** clusters on top of groups.
 
 ## Containers

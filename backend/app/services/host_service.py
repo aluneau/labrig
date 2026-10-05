@@ -99,10 +99,15 @@ class HostService:
         }
 
     def _os_pretty_name(self) -> str:
+        # platform.freedesktop_os_release() needs Python 3.10 (RHEL 9 has 3.9)
         try:
-            return platform.freedesktop_os_release().get("PRETTY_NAME", "")
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=", 1)[1].strip().strip('"')
         except OSError:
-            return ""
+            pass
+        return ""
 
     def get_capabilities(self) -> Dict[str, Any]:
         return {
