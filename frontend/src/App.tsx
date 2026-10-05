@@ -14,6 +14,8 @@ import { ConsolePage } from './pages/ConsolePage';
 import { NetworkDetailPage } from './pages/NetworkDetailPage';
 import { GroupsPage } from './pages/GroupsPage';
 import { GroupDetailPage } from './pages/GroupDetailPage';
+import { ClustersPage } from './pages/ClustersPage';
+import { ClusterDetailPage } from './pages/ClusterDetailPage';
 
 /** Pages that need libvirt show "libvirt is stopped" + Start instead of errors */
 const gated = (page: React.ReactNode) => <LibvirtGate>{page}</LibvirtGate>;
@@ -29,6 +31,8 @@ export const App: React.FC = () => (
       <Route path="/storage" element={gated(<StoragePage />)} />
       <Route path="/networks" element={gated(<NetworksPage />)} />
       <Route path="/networks/:id" element={gated(<NetworkDetailPage />)} />
+      <Route path="/clusters" element={gated(<ClustersPage />)} />
+      <Route path="/clusters/:id" element={gated(<ClusterDetailPage />)} />
       <Route path="/hosts" element={<HostsPage />} />
       <Route path="/tasks" element={<TasksPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />

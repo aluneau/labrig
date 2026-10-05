@@ -1,7 +1,7 @@
 """API Router"""
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import vms, vm_devices, storage, networks, hosts, tasks, events, groups
+from app.api.v1.endpoints import vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters
 
 api_router = APIRouter()
 
@@ -14,3 +14,4 @@ api_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(events.router, prefix="/events", tags=["events"])
 api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
+api_router.include_router(clusters.router, prefix="/clusters", tags=["clusters"])

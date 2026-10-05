@@ -90,6 +90,25 @@ Computed: `id`, `network_name`, `router_ip`, `router_vm_id`, `member_ips`, `memb
 (maps keyed by member name). Creation waits for the router's first boot (~1 min). Destroy deletes the
 group's VMs, disks and network.
 
+### `vmmanager_cluster`
+| Argument | | |
+|---|---|---|
+| `name` | required, replace | DNS label; nodes are `<name>-ctlplane-N` / `<name>-worker-N` |
+| `type` | `k3s`, replace | `kubeadm` / `openshift` are rejected as not supported yet |
+| `version` | stable channel, replace | k3s release (`v1.33.5+k3s1`); the installed one is read back |
+| `ctlplanes` | 1, replace | 3 or 5 = embedded etcd |
+| `workers` | 2, **in place** | workers are added, or drained and removed (highest index first) |
+| `ctlplane_memory/_vcpu/_disk_size`, `worker_…` | 2048, 2, 20, replace | |
+| `cloud_image_id` | Debian 13, else AlmaLinux 9, replace | |
+| `domain` | `lab`, replace | API name `api.<name>.<domain>` |
+| `network`, `cidr` | new NAT network `vmm-k-<name>` on a free /24, replace | or an existing network (DHCP reservations + DNS records are added to it) |
+| `extra_args`, `username`, `password`, `ssh_keys` | optional, replace | extra k3s server flags; node login |
+| `running` | `true`, in place | stop (ACPI, workers first) / start (waits for all nodes Ready) |
+
+Computed: `id`, `status`, `api_hostname`, `api_endpoint` (`https://<ip>:6443`, reachable from the host),
+`node_ips` (map), `kubeconfig` (sensitive). Create waits until every node is Ready (up to 30 min).
+Destroy deletes the nodes, their disks and the cluster's own network. Example: `examples/opentofu/k3s`.
+
 All resources support `tofu import <address> <id>` (ids are the API ids).
 
 ## Development

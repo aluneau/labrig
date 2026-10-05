@@ -4,6 +4,7 @@ import {
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
+  Cluster, ClusterCreate, ClusterCommandOutput,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
 } from '../types';
 
@@ -145,6 +146,20 @@ export const taskApi = {
   list: () => request<Task[]>('/tasks'),
   cancel: (id: number) => post(`/tasks/${id}/cancel`),
   delete: (id: number) => del(`/tasks/${id}`),
+};
+
+export const clusterApi = {
+  list: () => request<Cluster[]>('/clusters'),
+  get: (id: number) => request<Cluster>(`/clusters/${id}`),
+  create: (data: ClusterCreate) => post<Cluster>('/clusters', data),
+  delete: (id: number) => del(`/clusters/${id}`),
+  start: (id: number) => post<Task>(`/clusters/${id}/start`),
+  stop: (id: number) => post<Task>(`/clusters/${id}/stop`),
+  addWorkers: (id: number, count = 1) => post<Task>(`/clusters/${id}/workers`, { count }),
+  removeNode: (id: number, node: string) => del<Task>(`/clusters/${id}/nodes/${encodeURIComponent(node)}`),
+  kubectl: (id: number, view: 'nodes' | 'pods') => request<ClusterCommandOutput>(`/clusters/${id}/kubectl/${view}`),
+  /** Plain link: the backend sends it as an attachment named <cluster>-kubeconfig.yaml */
+  kubeconfigUrl: (id: number) => `${API_BASE}/api/v1/clusters/${id}/kubeconfig`,
 };
 
 export const hostApi = {

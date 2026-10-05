@@ -16,6 +16,7 @@ libvirt on this host, and in fresh nested VMs.
 | Storage | pools, volumes, ISO upload / download from URL (progress, cancel), cloud images (Ubuntu 22/24/26, Debian 12/13, Alma 9/10, Rocky 9, CentOS Stream 9/10, custom URL) |
 | Networks | create/start/stop/autostart/delete; edit subnet, DHCP range, domain, forward mode (restart); static DHCP reservations applied live, "make static" from a lease; raw XML editor |
 | OpenTofu | Go provider `opentofu_provider/` (`vmmanager_cloud_image`, `vmmanager_network` with `dhcp_hosts`, `vmmanager_vm` with `cloud_init`, `running`, `wait_for_ip`, `mac_address`); apply / idempotent plan / in-place update / drift detection / destroy verified; examples `examples/opentofu/basic` (my-vm) and `lab` |
+| Clusters (k3s) | 1 or 3 control planes + workers (Debian 13 / AlmaLinux 9, SELinux enforcing) on an own NAT network `vmm-k-<name>` with reservations + DNS (`api.<name>.<domain>`); ready in ~1–2 min; kubeconfig usable from the host; kubectl views, stop/start, add/remove workers, rebuild from `<vmmc:cluster>` metadata; `vmmanager_cluster` (workers/running in place), `e2e/clusters.js` |
 | Install / ship | `scripts/setup.sh` (idempotent, `--no-boot`, `--no-service`, `--listen/--port`), `scripts/package.sh` (tarball with prebuilt UI). Verified from the tarball on **AlmaLinux 9** (Py 3.9, SELinux enforcing, firewalld), **AlmaLinux 10**, **Debian 13** (ufw, 192.168.122 conflict handled), and on this CachyOS rig. Each test ran a nested VM that got DHCP, SSH and internet |
 
 ## This host (CachyOS gaming rig)

@@ -280,6 +280,81 @@ export interface Task {
   completed_at?: string | null;
 }
 
+// Kubernetes clusters (backend/app/schemas/cluster.py)
+
+export type ClusterType = 'k3s' | 'kubeadm' | 'openshift';
+export type ClusterStatus = 'provisioning' | 'ready' | 'starting' | 'stopping' | 'stopped' | 'error';
+
+export interface NodeResources {
+  memory: number; // MiB
+  vcpu: number;
+  disk_size: number; // GiB
+}
+
+export interface ClusterCreate {
+  name: string;
+  type?: ClusterType;
+  version?: string | null;
+  ctlplanes?: number;
+  workers?: number;
+  ctlplane?: NodeResources;
+  worker?: NodeResources;
+  cloud_image_id?: number | null;
+  domain?: string;
+  network?: string | null;
+  cidr?: string | null;
+  pod_cidr?: string;
+  service_cidr?: string;
+  extra_args?: string | null;
+  username?: string | null;
+  password?: string | null;
+  ssh_keys?: string[];
+  keyboard?: string | null;
+}
+
+export interface ClusterNode {
+  name: string;
+  role: 'ctlplane' | 'worker' | string;
+  ip?: string | null;
+  mac?: string | null;
+  vm_id?: number | null;
+  state: string; // libvirt state, or 'missing'
+  fqdn?: string | null;
+}
+
+export interface Cluster {
+  id: number;
+  name: string;
+  type: ClusterType | string;
+  version?: string | null;
+  network: string;
+  network_owned: boolean;
+  domain: string;
+  api_hostname: string;
+  api_ip?: string | null;
+  api_endpoint?: string | null;
+  status: ClusterStatus | string;
+  status_message?: string | null;
+  task_id?: number | null;
+  task_running: boolean;
+  task_progress?: number | null;
+  has_kubeconfig: boolean;
+  ctlplanes: number;
+  workers: number;
+  spec?: Record<string, any> | null;
+  nodes: ClusterNode[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClusterCommandOutput {
+  command: string;
+  node: string;
+  exitcode: number;
+  stdout: string;
+  stderr: string;
+}
+
 export interface HostResources {
   cpu_count: number;
   cpu_usage_percent: number;

@@ -139,6 +139,16 @@ class TaskService:
         self._cancelled.add(task_id)
         return True
 
+    def is_running(self, task_id: Optional[int]) -> bool:
+        return task_id is not None and task_id in self._running
+
+    def wait(self, task_id: int, timeout: float) -> bool:
+        """Wait for a running task's thread to finish; True if it is done"""
+        thread = self._running.get(task_id)
+        if thread is not None:
+            thread.join(timeout)
+        return task_id not in self._running
+
     def mark_interrupted(self, db: Session) -> None:
         """Tasks still 'running' from a previous process can never finish"""
         for task in db.query(Task).filter(Task.status.in_(["pending", "running"])).all():

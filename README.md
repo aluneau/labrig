@@ -16,6 +16,9 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Storage**: pools, volumes, ISO upload or download from URL.
 - **Networks**: create NAT / routed / isolated networks, start/stop, autostart; edit subnet, DHCP range,
   domain and forward mode; static DHCP reservations (applied live, "make static" from a lease); raw XML editor.
+- **Kubernetes clusters (k3s)**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image, on
+  their own NAT network with fixed addresses and DNS (`api.<cluster>.<domain>`); ready in ~2 minutes;
+  kubeconfig download (works from the host), `kubectl get nodes/pods` in the UI, start/stop, add/remove workers.
 - **Lab groups**: an isolated network + a router VM (EL cloud image with dnsmasq + nftables: DHCP,
   DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
   plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
@@ -105,6 +108,7 @@ Environment variables or `backend/.env`:
 | `DEFAULT_NETWORK` | `default` | Network for new VMs |
 | `VNC_LISTEN` | `127.0.0.1` | `0.0.0.0` exposes VM consoles (no password) to the LAN |
 | `DATABASE_URL` | `sqlite:///backend/data/vmanager.db` | |
+| `CLUSTER_SUBNET_POOL` | `10.43.0.0/16` | New cluster networks get the first free /24 of it |
 
 VNC servers listen on localhost; the web console reaches them through the backend's WebSocket bridge,
 so nothing else needs to be exposed.
@@ -115,6 +119,7 @@ so nothing else needs to be exposed.
 make -C opentofu_provider install
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
+cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
 cd examples/opentofu/devices                               # extra disk, ISO in the CD-ROM, boot order
 cd examples/opentofu/group                                 # lab group: router + 2 members + DNS records
 ```
@@ -125,6 +130,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
+`clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
 `devices.js`, `groups.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 
@@ -148,6 +154,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
 | `GET /api/v1/hosts/libvirt`, `POST …/libvirt/start`, `POST …/libvirt/stop {mode: refuse\|shutdown\|force}` | libvirt daemon state / start / stop; other endpoints answer `503 {"detail": "libvirt is stopped"}` while it is down |
 | `DELETE /api/v1/networks/{id}/leases/{mac}`, `DELETE …/hosts/{mac}?release_lease=true` | Release a DHCP lease (dnsmasq `dhcp_release` via the helper) |
+| `GET/POST /api/v1/clusters`, `GET/DELETE …/{id}`, `POST …/{id}/{start,stop}` | Kubernetes clusters (create/start/stop are tasks) |
+| `GET …/clusters/{id}/kubeconfig`, `GET …/{id}/kubectl/{nodes,pods}`, `POST …/{id}/workers`, `DELETE …/{id}/nodes/{name}` | Kubeconfig, kubectl views, scaling |
 | `GET/POST /api/v1/groups`, `GET/PUT/DELETE /api/v1/groups/{id}` (spec; `?delete_disks=`) | Lab groups (create runs as a task) |
 | `POST …/groups/{id}/{start,stop}`, `POST/DELETE …/members`, `POST/DELETE …/dns-records` | Group power (router first on start, last on stop), live members / records |
 | `GET …/groups/{id}/router/config`, `POST …/router/apply`, `GET …/export` | Rendered router config, re-push, spec YAML |

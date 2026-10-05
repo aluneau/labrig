@@ -4,6 +4,7 @@ from app.models.storage import StoragePool, Volume, ISOImage, CloudImage
 from app.models.network import Network
 from app.models.task import Task
 from app.models.group import Group, GroupMember
+from app.models.cluster import Cluster, ClusterNode
 
 __all__ = [
     "VM",
@@ -16,4 +17,6 @@ __all__ = [
     "Task",
     "Group",
     "GroupMember",
+    "Cluster",
+    "ClusterNode",
 ]

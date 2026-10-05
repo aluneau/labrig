@@ -1,7 +1,6 @@
 """libvirt connection wrapper"""
 import base64
 import json
-import time
 import libvirt
 import threading
 import time
@@ -420,6 +419,17 @@ class LibvirtClient:
 
         logger.info(f"Deleted VM {name}")
         return True
+
+    def list_vm_metadata(self, uri: str) -> Dict[str, str]:
+        """{vm name: metadata element XML} for every domain carrying metadata in namespace uri"""
+        result = {}
+        for dom in self.connect().listAllDomains(0):
+            try:
+                result[dom.name()] = dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, uri,
+                                                  libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            except libvirt.libvirtError:
+                pass  # no metadata in that namespace
+        return result
 
     def get_vm_console(self, name: str) -> Optional[Dict[str, Any]]:
         """Get VM graphical console information"""
@@ -996,6 +1006,18 @@ class LibvirtClient:
         if net.isActive():
             flags |= libvirt.VIR_NETWORK_UPDATE_AFFECT_LIVE
         net.update(commands[command], libvirt.VIR_NETWORK_SECTION_IP_DHCP_HOST, -1, xml, flags)
+
+    def update_dns_host(self, name: str, command: str, ip: str, hostnames: List[str]) -> None:
+        """Add / delete a <dns><host> record, live (no restart) and in the saved config"""
+        net = self.connect().networkLookupByName(name)
+        commands = {"add": libvirt.VIR_NETWORK_UPDATE_COMMAND_ADD_LAST,
+                    "delete": libvirt.VIR_NETWORK_UPDATE_COMMAND_DELETE}
+        names = "".join(f"<hostname>{escape(h)}</hostname>" for h in hostnames)
+        xml = f"<host ip={quoteattr(ip)}>{names}</host>"
+        flags = libvirt.VIR_NETWORK_UPDATE_AFFECT_CONFIG
+        if net.isActive():
+            flags |= libvirt.VIR_NETWORK_UPDATE_AFFECT_LIVE
+        net.update(commands[command], libvirt.VIR_NETWORK_SECTION_DNS_HOST, -1, xml, flags)
 
     def network_interfaces(self, name: str) -> List[Dict[str, Any]]:
         """VM interfaces attached to a network: [{vm, mac, active}]"""

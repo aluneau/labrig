@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # Network attached to new VMs when none is given
     DEFAULT_NETWORK: str = "default"
 
+    # Kubernetes clusters get their own NAT network: the first free /24 of this range
+    CLUSTER_SUBNET_POOL: str = "10.43.0.0/16"
+
     # Address VNC consoles listen on. 127.0.0.1 keeps them local to the host;
     # set to 0.0.0.0 to reach them from the LAN (they have no password).
     VNC_LISTEN: str = "127.0.0.1"
