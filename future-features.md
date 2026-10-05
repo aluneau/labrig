@@ -13,7 +13,12 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 
 ## 1. Smaller features
 
-### 1.1 Remove / release a DHCP lease (S)
+### 1.1 Remove / release a DHCP lease (S) — ✅ done
+
+Implemented as recommended: `DELETE /networks/{id}/leases/{mac}` (409 if a running VM owns the MAC,
+unless `force`) and `DELETE …/hosts/{mac}?release_lease=true`; the helper's `dhcp-release <net> <ip> <mac>`
+resolves the bridge and checks the lease itself (passes the client id too). setup.sh installs
+`dnsmasq-utils` (Debian, EL) / `dnsmasq` (Arch). Verified on AlmaLinux 9 (SELinux) and Debian 13.
 
 libvirt has no API to delete a lease: `virNetworkGetDHCPLeases` is read-only. libvirt runs one
 dnsmasq per network, and dnsmasq calls libvirt's `leaseshelper` on every lease change. The helper
@@ -79,7 +84,16 @@ API: `PUT /vms/{id}/boot {order: ["cdrom","hd"], once?: true}`. OpenTofu: `boot_
 - UI: Disks table in VM details with Add / Resize / Detach. OpenTofu: a separate `vmmanager_disk`
   resource (`vm_id`, `size`) so disks can be added without recreating the VM.
 
-### 1.5 Start / stop libvirt from the app (gaming rig) (M)
+### 1.5 Start / stop libvirt from the app (gaming rig) (M) — ✅ done
+
+Implemented with the "simpler alternative" for start/stop (polkit rule on
+`org.freedesktop.systemd1.manage-units` for libvirt units only, `systemctl` as the app user) and the
+pkexec helper for DHCP release. Connect on demand + idle close (`LIBVIRT_IDLE_TIMEOUT`), state from
+`systemctl show` (`GET /hosts/libvirt`), 503 `libvirt is stopped`, header pill, gated pages, Host card with
+stop modes `refuse | shutdown | force`. Verified in nested AlmaLinux 9 (modular, SELinux enforcing:
+virtqemud exits ~2 min after the app's idle close and is socket-activated again) and Debian 13
+(monolithic). Note: a monolithic `libvirtd` doesn't honour `--timeout` while networks are active, so on
+Arch/Debian it stays up until stopped. Original design notes:
 
 Requirements: libvirt is **not** enabled at boot (`setup.sh --no-boot`), and the app must not keep it
 alive.
