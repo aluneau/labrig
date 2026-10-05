@@ -1,5 +1,5 @@
 """Lab group endpoints (future-features §2.4)"""
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from app.schemas.group import (
     DNSRecord, Group, GroupCreateResult, GroupDetail, GroupExport, GroupSpec, MemberSpec, RouterConfig,
 )
 from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
+from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
 from app.services.group_service import LeaseInUse, group_service
 
 router = APIRouter()
@@ -246,3 +247,59 @@ def release_lease(group_id: int, mac: str, force: bool = Query(False), db: Sessi
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# WireGuard remote access (docs/wireguard.md)
+
+@router.get("/{group_id}/wireguard", response_model=WireGuardStatus)
+def wireguard_status(group_id: int, db: Session = Depends(get_db)):
+    """Settings, host relay state and devices with their last handshake (read on the router)"""
+    return group_service.wireguard_status(_group_or_404(db, group_id))
+
+
+@router.put("/{group_id}/wireguard", response_model=WireGuardStatus)
+def set_wireguard(group_id: int, body: WireGuardSettings, db: Session = Depends(get_db)):
+    """Enable / disable remote access (applied live on the router; disabling keeps keys and devices)"""
+    _group_or_404(db, group_id)
+    try:
+        group_service.set_wireguard(db, group_id, body.enabled, body.listen_port, body.host_port)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return group_service.wireguard_status(_group_or_404(db, group_id))
+
+
+@router.post("/{group_id}/wireguard/peers", response_model=WireGuardPeerCreated, status_code=201)
+def add_wireguard_peer(group_id: int, body: WireGuardPeerCreate, db: Session = Depends(get_db)):
+    """Add a device. Without public_key the key pair is generated: the returned config holds the
+    private key, which is not stored (download it now)."""
+    _group_or_404(db, group_id)
+    try:
+        return group_service.add_wg_peer(db, group_id, body.name, body.public_key, body.endpoint_host, body.allowed_ips)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{group_id}/wireguard/peers/{name}/config", response_model=WireGuardPeerCreated)
+def wireguard_peer_config(group_id: int, name: str, endpoint_host: Optional[str] = Query(None, max_length=253),
+                          db: Session = Depends(get_db)):
+    """The device's config again (no private key: add yours)"""
+    try:
+        return group_service.wg_peer_config(_group_or_404(db, group_id), name, endpoint_host)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{group_id}/wireguard/peers/{name}", response_model=WireGuardStatus)
+def remove_wireguard_peer(group_id: int, name: str, db: Session = Depends(get_db)):
+    _group_or_404(db, group_id)
+    try:
+        group_service.remove_wg_peer(db, group_id, name)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return group_service.wireguard_status(_group_or_404(db, group_id))

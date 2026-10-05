@@ -6,6 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
+  WireGuardStatus, WireGuardPeerCreated,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
 } from '../types';
 
@@ -157,6 +158,15 @@ export const groupApi = {
   deleteDhcpHost: (id: number, mac: string, releaseLease = false) =>
     del<GroupDetail>(`/groups/${id}/dhcp-hosts/${encodeURIComponent(mac)}?release_lease=${releaseLease}`),
   leases: (id: number) => request<GroupLease[]>(`/groups/${id}/leases`),
+  wireguard: (id: number) => request<WireGuardStatus>(`/groups/${id}/wireguard`),
+  setWireguard: (id: number, body: { enabled: boolean; listen_port?: number | null; host_port?: number | null }) =>
+    request<WireGuardStatus>(`/groups/${id}/wireguard`, { method: 'PUT', body: JSON.stringify(body) }),
+  addWgPeer: (id: number, body: { name: string; public_key?: string | null; endpoint_host?: string | null }) =>
+    post<WireGuardPeerCreated>(`/groups/${id}/wireguard/peers`, body),
+  wgPeerConfig: (id: number, name: string, endpointHost?: string) =>
+    request<WireGuardPeerCreated>(`/groups/${id}/wireguard/peers/${encodeURIComponent(name)}/config`
+      + (endpointHost ? `?endpoint_host=${encodeURIComponent(endpointHost)}` : '')),
+  removeWgPeer: (id: number, name: string) => del<WireGuardStatus>(`/groups/${id}/wireguard/peers/${encodeURIComponent(name)}`),
   releaseLease: (id: number, mac: string, force = false) =>
     del<LeaseRelease>(`/groups/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
 };

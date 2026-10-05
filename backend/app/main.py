@@ -18,6 +18,8 @@ from app.libvirt_client import libvirt_client, LibvirtUnavailable
 from app.services.daemon_service import daemon_service, DaemonError
 from app.services.helper_service import HelperError
 from app.services.task_service import task_service
+from app.services import wireguard_service
+from app.services.wireguard_relay import relay
 from fastapi.concurrency import run_in_threadpool
 
 logging.basicConfig(
@@ -35,6 +37,11 @@ async def lifespan(app: FastAPI):
         # Cloud images whose download died with the previous process
         db.query(CloudImage).filter(CloudImage.status == "downloading").update({CloudImage.status: "error"})
         db.commit()
+        # WireGuard relays of the groups with remote access (DB only: never connects to libvirt)
+        try:
+            wireguard_service.reconcile(db)
+        except Exception:
+            logging.getLogger(__name__).exception("WireGuard relay")
 
     async def watch_libvirt():
         """No keepalive: libvirt is connected on demand by requests. This loop only
@@ -56,6 +63,7 @@ async def lifespan(app: FastAPI):
     watcher = asyncio.create_task(watch_libvirt())
     yield
     watcher.cancel()
+    relay.stop()
     libvirt_client.disconnect()
 
 
