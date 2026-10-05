@@ -18,10 +18,15 @@ import (
 )
 
 var (
-	_ resource.ResourceWithConfigure   = &networkResource{}
-	_ resource.ResourceWithImportState = &networkResource{}
-	_ resource.ResourceWithModifyPlan  = &networkResource{}
+	_ resource.ResourceWithConfigure      = &networkResource{}
+	_ resource.ResourceWithImportState    = &networkResource{}
+	_ resource.ResourceWithModifyPlan     = &networkResource{}
+	_ resource.ResourceWithValidateConfig = &networkResource{}
 )
+
+// hostdev = SR-IOV VF pool: libvirt hands out VFs of the physical function forward_dev as PCI
+// passthrough NICs. No bridge, address, DHCP or domain, and the API can't edit it in place.
+const modeHostdev = "hostdev"
 
 type networkResource struct{ client *Client }
 
@@ -61,8 +66,8 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		Attributes: map[string]schema.Attribute{
 			"id":           schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"name":         schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
-			"mode":         schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("nat"), Description: "nat, route, open or isolated."},
-			"forward_dev":  schema.StringAttribute{Optional: true, Description: "Host interface to forward through (any if unset)."},
+			"mode":         schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("nat"), Description: "nat, route, open, isolated, or hostdev (SR-IOV VF pool: forward_dev = the physical function, no address/DHCP; see GET /hosts/sriov)."},
+			"forward_dev":  schema.StringAttribute{Optional: true, Description: "Host interface to forward through (any if unset); for mode = hostdev, the SR-IOV physical function (required)."},
 			"ip_address":   schema.StringAttribute{Optional: true, Description: "Host address on the network, e.g. 192.168.150.1."},
 			"prefix":       schema.Int64Attribute{Optional: true, Description: "Subnet prefix length, e.g. 24."},
 			"dhcp_enabled": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true)},
@@ -88,14 +93,36 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 // ModifyPlan: when the subnet changes and the DHCP range isn't configured, the
 // server picks a new range, so it must show as "known after apply".
 func (r *networkResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
-		return // create or destroy
+	if req.Plan.Raw.IsNull() {
+		return // destroy
 	}
-	var config, plan, state networkModel
+	var config, plan networkModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if plan.Mode.ValueString() == modeHostdev {
+		// A VF pool has no DHCP: don't let dhcp_enabled's default (true) or the computed range show as drift
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("dhcp_enabled"), types.BoolValue(false))...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("dhcp_start"), types.StringNull())...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("dhcp_end"), types.StringNull())...)
+	}
+	if req.State.Raw.IsNull() {
+		return // create
+	}
+	var state networkModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The API can't turn a network into a VF pool (or back) or move a pool to another PF in place
+	if (plan.Mode.ValueString() == modeHostdev || state.Mode.ValueString() == modeHostdev) &&
+		(!plan.Mode.Equal(state.Mode) || !plan.ForwardDev.Equal(state.ForwardDev)) {
+		resp.RequiresReplace = append(resp.RequiresReplace, path.Root("mode"), path.Root("forward_dev"))
+		return
+	}
+	if plan.Mode.ValueString() == modeHostdev {
 		return
 	}
 	subnetChanged := !plan.IPAddress.Equal(state.IPAddress) || !plan.Prefix.Equal(state.Prefix) ||
@@ -108,6 +135,30 @@ func (r *networkResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 	}
 	if config.DHCPEnd.IsNull() {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("dhcp_end"), types.StringUnknown())...)
+	}
+}
+
+func (r *networkResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var c networkModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &c)...)
+	if resp.Diagnostics.HasError() || c.Mode.IsUnknown() || c.Mode.ValueString() != modeHostdev {
+		return
+	}
+	if c.ForwardDev.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("forward_dev"), "Missing physical function",
+			"mode = \"hostdev\" (SR-IOV VF pool) needs forward_dev = an SR-IOV capable host interface (see GET /api/v1/hosts/sriov).")
+	}
+	unset := map[string]bool{
+		"ip_address": !c.IPAddress.IsNull(), "prefix": !c.Prefix.IsNull(), "dhcp_start": !c.DHCPStart.IsNull(),
+		"dhcp_end": !c.DHCPEnd.IsNull(), "domain": !c.Domain.IsNull(), "dhcp_hosts": c.DHCPHosts != nil,
+		"dhcp_enabled": !c.DHCPEnabled.IsNull() && !c.DHCPEnabled.IsUnknown() && c.DHCPEnabled.ValueBool(),
+	}
+	for attr, set := range unset {
+		if set {
+			resp.Diagnostics.AddAttributeError(path.Root(attr), "Not available on an SR-IOV VF pool",
+				attr+" can't be set with mode = \"hostdev\": the VFs are passed through to the VMs, which get their "+
+					"addresses from the network the physical function is plugged into.")
+		}
 	}
 }
 
