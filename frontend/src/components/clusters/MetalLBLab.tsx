@@ -98,11 +98,11 @@ const Wire: React.FC<{ d: string; label?: string; lx?: number; ly?: number; anch
   </g>
 );
 
-const Pod: React.FC<{ x: number; y: number; w: number; name: string; ip: string }> = ({ x, y, w, name, ip }) => (
+const Pod: React.FC<{ x: number; y: number; w: number; name: string; ip: string; ready?: boolean | null }> = ({ x, y, w, name, ip, ready }) => (
   <g transform={`translate(${x},${y})`}>
-    <rect width={w} height={34} rx={5} fill={C.pod} stroke={C.border} />
+    <rect width={w} height={34} rx={5} fill={C.pod} stroke={ready === false ? C.warn : C.border} strokeDasharray={ready === false ? '4 3' : undefined} />
     <text x={8} y={14} fontSize={11} fill={C.text}>{trunc(name, w - 14, 6.5)}</text>
-    <text x={8} y={28} fontSize={11} fill={C.sub}>{ip}</text>
+    <text x={8} y={28} fontSize={11} fill={ready === false ? C.warn : C.sub}>{ip}{ready === false ? ' · not ready' : ''}</text>
   </g>
 );
 
@@ -215,7 +215,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
               <Box x={x} y={y} w={nw} h={nh} title={n.name} lines={nodeLines(n)} accent={on} dim={n.state !== 'running'} dot={dot(n)}
                 id={on ? 'mlb-announcing' : undefined} />
               {pods.map((p, j) => (
-                <Pod key={p.pod} x={x + 10} y={y + 40 + nodeLines(n).length * 17 + j * 40} w={nw - 20} name={p.pod} ip={p.ip} />
+                <Pod key={p.pod} x={x + 10} y={y + 40 + nodeLines(n).length * 17 + j * 40} w={nw - 20} name={p.pod} ip={p.ip} ready={p.ready} />
               ))}
               {!pods.length && <text x={x + 12} y={y + 62 + nodeLines(n).length * 17} fontSize={11} fill={C.sub}>no hello pod</text>}
             </g>
@@ -241,12 +241,12 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
     step(laptop, tunnel, true, wg, !wg);
     step(host, 'UDP relay', false, wg);
     step(router, null, true);
-    const busY = y + 40;
+    const busY = y + 24;
     parts.push(<Wire key="rb" d={`M${W / 2},${y} L${W / 2},${busY}`} arrow={false} active />);
-    parts.push(<text key="bl" x={W / 2 + 10} y={y + 12} fontSize={12} fill={C.sub}>{trunc(busLabel, w / 2 - 10)}</text>);
-    parts.push(<text key="pl" x={x} y={y + 30} fontSize={12} fill={C.sub}>{trunc(poolLabel, w)}</text>);
     parts.push(<line key="bus" x1={x} y1={busY} x2={W - x} y2={busY} stroke={C.accent} strokeWidth={5} strokeLinecap="round" opacity={0.85} />);
-    y = busY + 18;
+    parts.push(<text key="bl" x={36} y={busY + 20} fontSize={12} fill={C.sub}>{trunc(busLabel, W - 48)}</text>);
+    parts.push(<text key="pl" x={36} y={busY + 37} fontSize={12} fill={C.sub}>{trunc(poolLabel, W - 48)}</text>);
+    y = busY + 50;
     const spine = 24;
     const first = y;
     let last = y;
@@ -262,7 +262,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
           <Box x={spine + 24} y={y} w={W - spine - 24 - x} h={h} title={n.name} lines={lines} accent={on}
             dim={n.state !== 'running'} dot={dot(n)} id={on ? 'mlb-announcing' : undefined} />
           {pods.map((p, j) => (
-            <Pod key={p.pod} x={spine + 34} y={y + 32 + lines.length * 17 + j * 40} w={W - spine - 44 - x} name={p.pod} ip={p.ip} />
+            <Pod key={p.pod} x={spine + 34} y={y + 32 + lines.length * 17 + j * 40} w={W - spine - 44 - x} name={p.pod} ip={p.ip} ready={p.ready} />
           ))}
           {!pods.length && <text x={spine + 36} y={y + 52 + lines.length * 17} fontSize={11} fill={C.sub}>no hello pod</text>}
         </g>,
@@ -325,7 +325,10 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
   };
   const usable = cluster.status === 'ready' && !cluster.task_running;
 
-  if (!s) return error ? <Alert variant="warning" isInline title={error} /> : <Spinner size="lg" />;
+  if (!s) {
+    return error ? <Alert variant="warning" isInline title={error} />
+      : <div style={muted}><Spinner size="md" /> Reading the MetalLB state from the cluster…</div>;
+  }
 
   if (!s.enabled) {
     return (
@@ -421,7 +424,7 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                   <DescriptionListGroup>
                     <DescriptionListTerm>Endpoints</DescriptionListTerm>
                     <DescriptionListDescription>
-                      {s.endpoints.length ? s.endpoints.map((e) => `${e.ip} (${e.node.split('.')[0]})`).join(', ') : '—'}
+                      {s.endpoints.length ? s.endpoints.map((e) => `${e.ip} (${e.node.split('.')[0]}${e.ready === false ? ', not ready' : ''})`).join(', ') : '—'}
                     </DescriptionListDescription>
                   </DescriptionListGroup>
                   <DescriptionListGroup>

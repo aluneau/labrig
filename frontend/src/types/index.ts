@@ -514,6 +514,7 @@ export interface MetalLBEndpoint {
   pod: string;
   node: string;
   ip: string;
+  ready?: boolean | null;
 }
 
 export interface MetalLBScenario {
