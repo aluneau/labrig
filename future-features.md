@@ -115,6 +115,14 @@ Design:
 
 ## 2. Lab groups
 
+> **Status: v1 done** (2026-10). Isolated network + EL router (dnsmasq + nftables, AlmaLinux 9/10) +
+> members with fixed MACs/static leases/DNS names + DNS records (A, CNAME, wildcard), live updates through
+> the guest agent, start/stop ordering, delete (keep or delete disks), DB rebuild from libvirt metadata,
+> Groups UI (topology, members, network & DNS, router config, export), `vmmanager_group`, `e2e/groups.js`.
+> Not yet: FRR/BGP, WireGuard, VLANs (accepted in the spec, rejected with "not supported yet"), VyOS
+> flavour, groups without uplink (the EL router installs its packages at first boot), snapshots, templates,
+> export with disks, per-group autostart, `group_id` on `vmmanager_vm`.
+
 ### 2.1 Concept and data model (L)
 
 A **group** = an isolated libvirt network + a **router VM** + member VMs + a DNS zone. It is the unit

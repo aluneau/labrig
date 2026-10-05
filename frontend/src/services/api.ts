@@ -3,6 +3,7 @@ import {
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
+  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -110,6 +111,25 @@ export const networkApi = {
   updateHost: (id: number, mac: string, host: DHCPHost) =>
     request(`/networks/${id}/hosts/${encodeURIComponent(mac)}`, { method: 'PUT', body: JSON.stringify(host) }),
   deleteHost: (id: number, mac: string) => del(`/networks/${id}/hosts/${encodeURIComponent(mac)}`),
+};
+
+export const groupApi = {
+  list: () => request<Group[]>('/groups'),
+  get: (id: number) => request<GroupDetail>(`/groups/${id}`),
+  create: (spec: GroupSpec) => post<{ group: Group; task_id: number }>('/groups', spec),
+  update: (id: number, spec: GroupSpec) =>
+    request<GroupDetail>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(spec) }),
+  delete: (id: number, deleteDisks = true) => del(`/groups/${id}?delete_disks=${deleteDisks}`),
+  start: (id: number) => post<Task>(`/groups/${id}/start`),
+  stop: (id: number, force = false) => post<Task>(`/groups/${id}/stop?force=${force}`),
+  addMember: (id: number, member: MemberSpec) => post<GroupDetail>(`/groups/${id}/members`, member),
+  removeMember: (id: number, name: string, deleteDisks = true) =>
+    del<GroupDetail>(`/groups/${id}/members/${encodeURIComponent(name)}?delete_disks=${deleteDisks}`),
+  setRecord: (id: number, record: DNSRecord) => post<GroupDetail>(`/groups/${id}/dns-records`, record),
+  removeRecord: (id: number, name: string) => del<GroupDetail>(`/groups/${id}/dns-records/${encodeURIComponent(name)}`),
+  routerConfig: (id: number) => request<RouterConfig>(`/groups/${id}/router/config`),
+  applyRouterConfig: (id: number) => post<GroupDetail>(`/groups/${id}/router/apply`),
+  exportSpec: (id: number) => request<{ yaml: string; spec: GroupSpec }>(`/groups/${id}/export`),
 };
 
 export const taskApi = {

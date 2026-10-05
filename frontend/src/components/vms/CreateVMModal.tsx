@@ -33,7 +33,7 @@ interface Props {
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
-const KEYBOARD_LAYOUTS: [string, string][] = [
+export const KEYBOARD_LAYOUTS: [string, string][] = [
   ['us', 'English (US)'], ['gb', 'English (UK)'], ['fr', 'French (AZERTY)'], ['be', 'Belgian'],
   ['ch', 'Swiss'], ['de', 'German'], ['es', 'Spanish'], ['it', 'Italian'], ['pt', 'Portuguese'],
   ['br', 'Portuguese (Brazil)'], ['ca', 'Canadian French'], ['nl', 'Dutch'], ['se', 'Swedish'],
@@ -41,7 +41,7 @@ const KEYBOARD_LAYOUTS: [string, string][] = [
 ];
 
 /** Best-guess XKB layout from the browser locale (fr-FR -> fr, en-GB -> gb, de-CH -> ch) */
-function defaultKeyboard(): string {
+export function defaultKeyboard(): string {
   const [lang, region] = (navigator.language || 'en-US').toLowerCase().split('-');
   const known = new Set(KEYBOARD_LAYOUTS.map(([code]) => code));
   if (region && ['gb', 'be', 'ch', 'ca', 'br'].includes(region)) return region;

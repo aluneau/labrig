@@ -16,6 +16,10 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Storage**: pools, volumes, ISO upload or download from URL.
 - **Networks**: create NAT / routed / isolated networks, start/stop, autostart; edit subnet, DHCP range,
   domain and forward mode; static DHCP reservations (applied live, "make static" from a lease); raw XML editor.
+- **Lab groups**: an isolated network + a router VM (EL cloud image with dnsmasq + nftables: DHCP,
+  DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
+  plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
+  is re-rendered and pushed through the QEMU guest agent); start/stop/delete the whole lab; export its spec.
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -99,6 +103,7 @@ make -C opentofu_provider install
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
 cd examples/opentofu/devices                               # extra disk, ISO in the CD-ROM, boot order
+cd examples/opentofu/group                                 # lab group: router + 2 members + DNS records
 ```
 
 See `opentofu_provider/README.md` for all resources and arguments.
@@ -106,7 +111,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 ## Tests
 
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
-`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`, `devices.js`).
+`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
+`devices.js`, `groups.js`).
 
 ## API overview
 
@@ -126,13 +132,16 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `WS /api/v1/vms/{id}/vnc` | VNC console (WebSocket) |
 | `GET /api/v1/networks/{id}/config`, `PUT /api/v1/networks/{id}`, `PUT …/xml`, `POST/PUT/DELETE …/hosts` | Network editing, DHCP reservations |
 | `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
+| `GET/POST /api/v1/groups`, `GET/PUT/DELETE /api/v1/groups/{id}` (spec; `?delete_disks=`) | Lab groups (create runs as a task) |
+| `POST …/groups/{id}/{start,stop}`, `POST/DELETE …/members`, `POST/DELETE …/dns-records` | Group power (router first on start, last on stop), live members / records |
+| `GET …/groups/{id}/router/config`, `POST …/router/apply`, `GET …/export` | Rendered router config, re-push, spec YAML |
 
 Full interactive docs: `/docs`.
 
 ## Roadmap
 
 See [future-features.md](future-features.md): DHCP lease release, ISO/boot order/disks on existing VMs,
-start/stop libvirt from the UI, **lab groups** (isolated network + router VM for DNS/DHCP/BGP/WireGuard),
+start/stop libvirt from the UI, lab groups v2 (BGP, WireGuard, VLANs, snapshots, templates, VyOS router),
 then **Kubernetes / OpenShift** clusters on top of groups.
 
 ## Containers

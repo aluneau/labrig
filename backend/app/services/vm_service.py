@@ -5,7 +5,7 @@ metadata (description, os_type, ...) keyed by the libvirt domain UUID.
 """
 import io
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from xml.sax.saxutils import quoteattr
 
 from sqlalchemy.orm import Session
@@ -77,7 +77,13 @@ class VMService:
             "console": libvirt_client.get_vm_console(vm.name),
         }
 
-    def create_vm(self, db: Session, vm_data: VMCreate) -> VM:
+    def create_vm(self, db: Session, vm_data: VMCreate, *, fqdn: Optional[str] = None,
+                  user_data: Optional[str] = None, network_config: Optional[str] = None,
+                  nics: Optional[List[Tuple[str, Optional[str]]]] = None, metadata_xml: str = "",
+                  hostname: Optional[str] = None) -> VM:
+        """Create a VM. The keyword-only options are for internal callers (lab groups):
+        guest hostname/fqdn, a prebuilt user-data / network-config, several NICs
+        [(network, mac)] instead of vm_data.network_name, and <metadata> content."""
         if libvirt_client.get_vm(vm_data.name) is not None:
             raise ValueError(f"VM with name '{vm_data.name}' already exists")
 
@@ -99,15 +105,17 @@ class VMService:
             if image:
                 disk_path = libvirt_client.clone_volume(pool_name, image.path, f"{vm_data.name}.qcow2", disk_size)
                 created.append(disk_path)
-                user_data = cloud_image_service.build_user_data(
-                    hostname=vm_data.name,
-                    username=vm_data.cloudinit_username,
-                    password=vm_data.cloudinit_password,
-                    ssh_keys=[k.strip() for k in vm_data.cloudinit_ssh_keys if k.strip()],
-                    custom=vm_data.cloudinit_userdata,
-                    keyboard=vm_data.cloudinit_keyboard,
-                )
-                seed = cloud_image_service.build_seed_iso(vm_data.name, user_data)
+                if user_data is None:
+                    user_data = cloud_image_service.build_user_data(
+                        hostname=hostname or vm_data.name,
+                        username=vm_data.cloudinit_username,
+                        password=vm_data.cloudinit_password,
+                        ssh_keys=[k.strip() for k in vm_data.cloudinit_ssh_keys if k.strip()],
+                        custom=vm_data.cloudinit_userdata,
+                        keyboard=vm_data.cloudinit_keyboard,
+                        fqdn=fqdn,
+                    )
+                seed = cloud_image_service.build_seed_iso(hostname or vm_data.name, user_data, network_config)
                 seed_path = libvirt_client.upload_volume(
                     pool_name, f"{vm_data.name}-cidata.iso", len(seed), io.BytesIO(seed))
                 created.append(seed_path)
@@ -120,10 +128,12 @@ class VMService:
                 memory=vm_data.memory,
                 vcpu=vm_data.vcpu,
                 disk_xml=self._build_disk_xml(disk_path, vm_data.iso_path, seed_path),
-                network_xml=self._build_network_xml(vm_data.network_name or settings.DEFAULT_NETWORK,
-                                                    vm_data.mac_address),
+                network_xml="\n".join(
+                    self._build_network_xml(network, mac) for network, mac in
+                    (nics or [(vm_data.network_name or settings.DEFAULT_NETWORK, vm_data.mac_address)])),
                 arch=vm_data.arch,
                 boot_devs=["hd", "cdrom"] if vm_data.iso_path else ["hd"],
+                metadata_xml=metadata_xml,
             )
         except Exception:
             for path in created:
