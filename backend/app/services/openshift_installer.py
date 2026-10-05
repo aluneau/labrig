@@ -40,6 +40,7 @@ from app.schemas.openshift import OpenShiftOptions
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
+from app.schemas.group import BGP_PEER_ASN
 from app.services.openshift_addons import STORAGE_SERIAL, AddonRunner, metallb_pool
 from app.services.openshift_service import POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
 from app.services.task_service import task_service
@@ -328,9 +329,8 @@ class OpenShiftInstaller:
         network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ingress])
         network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{ip}:443" for ip in ingress])
         if opts.metallb.enabled and not opts.metallb.pool:
-            pool = self._pick_pool(gspec, opts.metallb.addresses, [n.ip for n in nodes])
-            start, end = pool.split("-")
-            network.set_address_pool(f"{cluster.name}-metallb", start, end)
+            pool = self._assign_pool(network, gspec, opts.metallb.mode, opts.metallb.addresses, [n.ip for n in nodes],
+                                     cluster.name)
             self._update_spec(db, cluster, openshift={**spec["openshift"], "metallb": {
                 **spec["openshift"]["metallb"], "pool": pool}})
         network.commit()
@@ -339,6 +339,23 @@ class OpenShiftInstaller:
         cluster.api_ip = network.uplink_ip()
         db.commit()
         return nodes
+
+    def _assign_pool(self, network: GroupClusterNetwork, gspec, mode: str, size: int, node_ips: List[str],
+                     cluster_name: str) -> str:
+        """MetalLB pool, recorded in the group spec (queued on `network`, applied by its commit()):
+        l2 = a range of the group network kept free; bgp = a /27 outside it, a BGP announce range of the
+        router (BGP enabled on the router if needed). The other mode's entry is dropped."""
+        name = f"{cluster_name}-metallb"
+        if mode == "bgp":
+            pool = network.free_bgp_range()
+            network.remove_address_pool(name)
+            network.set_bgp_range(name, pool)
+            return pool
+        pool = self._pick_pool(gspec, size, node_ips)
+        start, end = pool.split("-")
+        network.remove_bgp_range(name)
+        network.set_address_pool(name, start, end)
+        return pool
 
     @staticmethod
     def _pick_pool(gspec, size: int, node_ips: List[str]) -> str:
@@ -692,14 +709,28 @@ class OpenShiftInstaller:
         elif kind == "sriov":
             runner.sriov(opts.sriov.model_dump(), single_or_compact=not nodes_by_role["worker"])
         elif kind == "metallb":
-            pool = (cluster.spec.get("openshift") or {}).get("metallb", {}).get("pool")
+            mlb = (cluster.spec.get("openshift") or {}).get("metallb", {})
+            pool, mode = mlb.get("pool"), mlb.get("mode") or "l2"
             if not pool:
                 raise ValueError("No MetalLB address pool assigned")
-            runner.metallb(pool)
+            bgp = None
+            if mode == "bgp":
+                gbgp = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned)).spec().router.bgp
+                if gbgp is None or not gbgp.enabled:
+                    raise ValueError("BGP is not enabled on the group router")
+                bgp = {"router_ip": GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).gateway(),
+                       "my_asn": gbgp.peer_asn or BGP_PEER_ASN, "peer_asn": gbgp.asn}
+            runner.metallb(pool, mode, bgp)
+            if mlb.get("service_ip"):  # day 2 (e.g. L2 -> BGP): the demo moves to the new pool
+                self.run_addon(db, cluster, runner, "metallb-demo", "hello", opts)
         elif kind == "metallb-demo":
-            ip = runner.metallb_demo()
+            mlb = (cluster.spec.get("openshift") or {}).get("metallb", {})
+            old_ip = mlb.get("service_ip")
+            ip = runner.metallb_demo(pool=mlb.get("pool"), mode=mlb.get("mode") or "l2")
             network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
             gspec = network.spec()
+            if old_ip and old_ip != ip:
+                network.unpublish(old_ip)
             network.publish(ip, [f"hello.{gspec.domain}"])
             network.commit()
             os_spec = cluster.spec.get("openshift") or {}
@@ -748,15 +779,17 @@ class OpenShiftInstaller:
                                 "enabled": True}
             name = "sriov-network-operator"
         elif kind == "metallb":
-            mlb = {**(os_spec.get("metallb") or {}), **(request.metallb.model_dump(exclude={"pool"}) if request.metallb else {}),
+            prev = os_spec.get("metallb") or {}
+            mlb = {**prev, **(request.metallb.model_dump(exclude={"pool"}) if request.metallb else {}),
                    "enabled": True}
+            mode = mlb.get("mode") or "l2"
+            if (prev.get("mode") or "l2") != mode and prev.get("pool"):
+                mlb["pool"] = None  # switching L2 <-> BGP: a pool of the other kind
             if not mlb.get("pool"):
                 network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
-                pool = self._pick_pool(network.spec(), int(mlb.get("addresses") or 16), [n.ip for n in cluster.nodes])
-                start, end = pool.split("-")
-                network.set_address_pool(f"{cluster.name}-metallb", start, end)
+                mlb["pool"] = self._assign_pool(network, network.spec(), mode, int(mlb.get("addresses") or 16),
+                                                [n.ip for n in cluster.nodes], cluster.name)
                 network.commit()
-                mlb["pool"] = pool
             os_spec["metallb"] = mlb
             name = "metallb-operator"
         elif kind == "metallb-demo":
@@ -919,8 +952,9 @@ class OpenShiftInstaller:
         gspec = (group.spec or {}) if group else {}
         router = gspec.get("router") or {}
         wg = router.get("wireguard") or {}
+        mode = mlb.get("mode") or "l2"
         result: Dict[str, Any] = {
-            "enabled": bool(mlb.get("enabled")), "pool": mlb.get("pool"), "service_ip": mlb.get("service_ip"),
+            "enabled": bool(mlb.get("enabled")), "mode": mode, "pool": mlb.get("pool"), "service_ip": mlb.get("service_ip"),
             "hostname": f"hello.{gspec.get('domain')}" if mlb.get("service_ip") and gspec.get("domain") else None,
             "announcing_node": None, "endpoints": [], "router_ip": router.get("ip"), "group_cidr": gspec.get("cidr"),
             "wireguard": bool(wg.get("enabled")), "wireguard_port": wg.get("host_port") if wg.get("enabled") else None,
@@ -941,9 +975,12 @@ class OpenShiftInstaller:
                        "detail": f"{ip} in {mlb.get('pool')}" if ip else "no external IP (is the demo deployed?)"})
         if not ip:
             return result
-        result["announcing_node"] = runner.announcing_node()
-        checks.append({"name": "A node announces it (L2 / ARP)", "ok": bool(result["announcing_node"]),
-                       "detail": result["announcing_node"] or "no speaker announces the IP yet"})
+        if mode == "bgp":
+            self._bgp_checks(cluster, group, ip, result)
+        else:
+            result["announcing_node"] = runner.announcing_node()
+            checks.append({"name": "A node announces it (L2 / ARP)", "ok": bool(result["announcing_node"]),
+                           "detail": result["announcing_node"] or "no speaker announces the IP yet"})
         result["endpoints"] = runner.demo_endpoints()
         ready = [e for e in result["endpoints"] if e.get("ready")]
         checks.append({"name": "Pods behind the Service", "ok": bool(ready),
@@ -960,6 +997,36 @@ class OpenShiftInstaller:
         checks.append({"name": f"DNS hello.{gspec.get('domain')} -> {ip}", "ok": has_record,
                        "detail": "served by the router's dnsmasq" if has_record else "record missing"})
         return result
+
+
+    @staticmethod
+    def _bgp_checks(cluster: Cluster, group: Optional[Group], ip: str, result: Dict[str, Any]) -> None:
+        """MetalLB BGP: every node has an Established session with the router, the router routes the
+        service IP to the nodes (one next hop per node, ECMP)"""
+        from app.services.group_service import group_service
+        checks = result["checks"]
+        if group is None:
+            checks.append({"name": "BGP sessions with the router", "ok": False, "detail": "no lab group"})
+            return
+        status = group_service.bgp_status(group)
+        if status.get("router_error"):
+            checks.append({"name": "BGP sessions with the router", "ok": False, "detail": status["router_error"]})
+            return
+        sessions = {s["peer"]: s for s in status.get("sessions") or []}
+        peers = [{"node": n.name, "ip": n.ip, "state": (sessions.get(n.ip) or {}).get("state", "no session")}
+                 for n in cluster.nodes]
+        result["bgp_peers"] = peers
+        up = [p for p in peers if p["state"] == "Established"]
+        checks.append({"name": "Every node has a BGP session with the router", "ok": len(up) == len(peers) and bool(peers),
+                       "detail": f"{len(up)}/{len(peers)} Established"
+                       + "".join(f"; {p['node']}: {p['state']}" for p in peers if p["state"] != "Established")})
+        route = next((r for r in status.get("routes") or [] if r["prefix"] == f"{ip}/32"), None)
+        names = {n.ip: n.name for n in cluster.nodes}
+        hops = [names.get(h["ip"], h["ip"]) for h in (route or {}).get("nexthops", [])]
+        result["bgp_nexthops"] = hops
+        checks.append({"name": f"The router has a BGP route to {ip}", "ok": bool(route and route.get("installed")),
+                       "detail": f"via {', '.join(hops)} ({len(hops)} next hop{'s' if len(hops) != 1 else ''}, ECMP)"
+                       if route else "no route learned yet"})
 
 
 openshift_installer = OpenShiftInstaller()

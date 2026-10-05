@@ -11,7 +11,9 @@ from app.schemas.group import (
 )
 from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
 from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
+from app.schemas.group import BGPSettings, BGPStatus, GroupTopology
 from app.services.group_service import LeaseInUse, group_service
+from app.services import topology_service
 
 router = APIRouter()
 
@@ -303,3 +305,29 @@ def remove_wireguard_peer(group_id: int, name: str, db: Session = Depends(get_db
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return group_service.wireguard_status(_group_or_404(db, group_id))
+
+
+# BGP (docs/bgp.md) and the topology view
+
+@router.get("/{group_id}/bgp", response_model=BGPStatus)
+def bgp_status(group_id: int, db: Session = Depends(get_db)):
+    """Settings + live sessions and BGP routes of the router (vtysh through the guest agent)"""
+    return group_service.bgp_status(_group_or_404(db, group_id))
+
+
+@router.put("/{group_id}/bgp", response_model=BGPStatus)
+def set_bgp(group_id: int, body: BGPSettings, db: Session = Depends(get_db)):
+    """Enable / configure / disable BGP on the router (applied live; an older router installs frr first)"""
+    _group_or_404(db, group_id)
+    try:
+        group_service.set_bgp(db, group_id, body.model_dump(exclude_unset=True))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return group_service.bgp_status(_group_or_404(db, group_id))
+
+
+@router.get("/{group_id}/topology", response_model=GroupTopology)
+def group_topology(group_id: int, db: Session = Depends(get_db)):
+    """Everything the topology diagram shows: router roles and addresses, machines with state and BGP
+    session, clusters (MetalLB pool / service IP), WireGuard devices, BGP routes"""
+    return topology_service.topology(db, _group_or_404(db, group_id))

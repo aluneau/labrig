@@ -267,26 +267,51 @@ class AddonRunner:
 
     # -------------------------------------------------------------- MetalLB
 
-    def metallb(self, pool: str) -> None:
+    def metallb(self, pool: str, mode: str = "l2", bgp: Optional[Dict[str, Any]] = None) -> None:
+        """MetalLB CR + IPAddressPool, then L2Advertisement (l2) or BGPPeer + BGPAdvertisement (bgp:
+        bgp = {router_ip, my_asn, peer_asn}). Switching modes removes the other mode's objects."""
         self.install_operator("metallb-operator", namespace="metallb-system")
-        self.log(f"Configuring MetalLB (L2, pool {pool})")
+        self.log(f"Configuring MetalLB ({mode.upper()}, pool {pool})")
         self.apply_retry([{"apiVersion": "metallb.io/v1beta1", "kind": "MetalLB",
                            "metadata": {"name": "metallb", "namespace": "metallb-system"}}], "MetalLB")
-        self.apply_retry([
+        manifests: List[Dict[str, Any]] = [
             {"apiVersion": "metallb.io/v1beta1", "kind": "IPAddressPool",
              "metadata": {"name": "lab-pool", "namespace": "metallb-system"},
-             "spec": {"addresses": [pool], "autoAssign": True}},
-            {"apiVersion": "metallb.io/v1beta1", "kind": "L2Advertisement",
-             "metadata": {"name": "lab-l2", "namespace": "metallb-system"},
-             "spec": {"ipAddressPools": ["lab-pool"]}},
-        ], "IPAddressPool / L2Advertisement")
+             "spec": {"addresses": [pool], "autoAssign": True, "avoidBuggyIPs": True}},
+        ]
+        if mode == "bgp":
+            if not bgp:
+                raise ValueError("MetalLB BGP mode needs the router's BGP settings")
+            manifests += [
+                {"apiVersion": "metallb.io/v1beta2", "kind": "BGPPeer",
+                 "metadata": {"name": "lab-router", "namespace": "metallb-system"},
+                 "spec": {"myASN": int(bgp["my_asn"]), "peerASN": int(bgp["peer_asn"]),
+                          "peerAddress": bgp["router_ip"], "holdTime": "30s", "keepaliveTime": "10s"}},
+                {"apiVersion": "metallb.io/v1beta1", "kind": "BGPAdvertisement",
+                 "metadata": {"name": "lab-bgp", "namespace": "metallb-system"},
+                 "spec": {"ipAddressPools": ["lab-pool"]}},
+            ]
+            stale = [["l2advertisement", "lab-l2"]]
+        else:
+            manifests.append({"apiVersion": "metallb.io/v1beta1", "kind": "L2Advertisement",
+                              "metadata": {"name": "lab-l2", "namespace": "metallb-system"},
+                              "spec": {"ipAddressPools": ["lab-pool"]}})
+            stale = [["bgpadvertisement", "lab-bgp"], ["bgppeers.metallb.io", "lab-router"]]
+        self.apply_retry(manifests, "IPAddressPool / advertisement")
+        for kind, name in stale:
+            self.oc(["delete", kind, name, "-n", "metallb-system", "--ignore-not-found"], 60)
 
-    def metallb_demo(self, timeout: float = 10 * 60) -> str:
+    def metallb_demo(self, timeout: float = 10 * 60, pool: Optional[str] = None, mode: str = "l2") -> str:
         """hello Deployment (2 replicas, answers with its pod and node) + LoadBalancer Service.
-        Returns the service's external IP."""
+        Returns the service's external IP. An existing Service whose IP is outside `pool` (the pool
+        changed with the mode) is re-created to get an address of the new pool."""
         self.log("Deploying the MetalLB demo (hello)")
-        script = ('echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB L2 lab)" > /var/www/html/index.html; '
-                  "exec run-httpd")
+        current = self.service_ip()
+        if current and pool and not in_pool(current, pool):
+            self.log(f"Re-creating the hello Service: {current} is not in the new pool {pool}")
+            self.oc(["delete", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "--ignore-not-found"], 60)
+        script = (f'echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB {mode.upper()} lab)" '
+                  "> /var/www/html/index.html; exec run-httpd")
         self.apply([
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": DEMO_NAMESPACE}},
             {"apiVersion": "apps/v1", "kind": "Deployment",
@@ -359,6 +384,18 @@ class AddonRunner:
             result.append({"pod": pod["metadata"]["name"], "node": (pod.get("spec") or {}).get("nodeName"),
                            "ip": (pod.get("status") or {}).get("podIP"), "ready": ready})
         return result
+
+
+def in_pool(ip: str, pool: str) -> bool:
+    """pool: "a-b" range or a CIDR"""
+    try:
+        addr = ipaddress.IPv4Address(ip)
+        if "/" in pool:
+            return addr in ipaddress.IPv4Network(pool, strict=False)
+        start, _, end = pool.partition("-")
+        return ipaddress.IPv4Address(start.strip()) <= addr <= ipaddress.IPv4Address((end or start).strip())
+    except ValueError:
+        return False
 
 
 def metallb_pool(cidr: str, dhcp_end: str, size: int, taken: List[str]) -> str:

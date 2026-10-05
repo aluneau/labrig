@@ -400,6 +400,49 @@ class GroupClusterNetwork(ClusterNetwork):
             spec.address_pools.append(AddressPoolSpec(name=name, start=start, end=end, owner=self.owner))
         self._ops.append(op)
 
+    def remove_address_pool(self, name: str) -> None:
+        def op(spec):
+            spec.address_pools = [p for p in spec.address_pools if not (p.owner == self.owner and p.name == name)]
+        self._ops.append(op)
+
+    def free_bgp_range(self) -> str:
+        """A /27 of BGP_ANNOUNCE_POOL used nowhere on the host (MetalLB BGP pool)"""
+        import ipaddress as ip
+        from app.libvirt_client import libvirt_client
+        from app.services import bgp_service
+        db = self._db()
+        try:
+            used = bgp_service.used_networks(db, None, None, [n["cidr"] for n in libvirt_client.network_subnets()])
+        finally:
+            db.close()
+        spec = self.spec()
+        wg = spec.router.wireguard
+        if wg is not None and wg.subnet:
+            used.append(ip.IPv4Network(wg.subnet))
+        return bgp_service.free_range(used)
+
+    def set_bgp_range(self, name: str, prefix: str) -> None:
+        """Enable BGP on the router (if needed) and accept routes for `prefix` from the group network"""
+        from app.schemas.group import BGPAnnounceRange, BGPSpec
+
+        def op(spec):
+            bgp = spec.router.bgp
+            if bgp is None:
+                bgp = spec.router.bgp = BGPSpec()
+            bgp.enabled = True
+            bgp.listen = True
+            bgp.announce_ranges = [r for r in bgp.announce_ranges if not (r.owner == self.owner and r.name == name)]
+            bgp.announce_ranges.append(BGPAnnounceRange(prefix=prefix, name=name, owner=self.owner))
+        self._ops.append(op)
+
+    def remove_bgp_range(self, name: Optional[str] = None) -> None:
+        def op(spec):
+            bgp = spec.router.bgp
+            if bgp is not None:
+                bgp.announce_ranges = [r for r in bgp.announce_ranges
+                                       if not (r.owner == self.owner and (name is None or r.name == name))]
+        self._ops.append(op)
+
     def free_lb_port(self, start: int = 6443) -> int:
         from app.schemas.group import RESERVED_ROUTER_PORTS
         used = {lb.port for lb in self.spec().load_balancers} | RESERVED_ROUTER_PORTS
@@ -430,6 +473,9 @@ class GroupClusterNetwork(ClusterNetwork):
             spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != self.owner]
             spec.load_balancers = [lb for lb in spec.load_balancers if lb.owner != self.owner]
             spec.address_pools = [p for p in spec.address_pools if p.owner != self.owner]
+            if spec.router.bgp is not None:
+                spec.router.bgp.announce_ranges = [r for r in spec.router.bgp.announce_ranges if r.owner != self.owner]
+                spec.router.bgp.neighbors = [n for n in spec.router.bgp.neighbors if n.owner != self.owner]
         self._ops.append(op)
         self.commit()
 
