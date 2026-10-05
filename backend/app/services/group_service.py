@@ -626,6 +626,13 @@ class GroupService:
                 owners = sorted({x.owner.split(":", 1)[-1] for x in owned_ranges + owned_neighbors})
                 raise ValueError(f"BGP is used by cluster {', '.join(owners)} (MetalLB in BGP mode): "
                                  "it can't be disabled or removed")
+        if new.router.bgp is not None and old_bgp is not None:
+            # a bgp block without these fields (e.g. OpenTofu's `bgp = true`) keeps the current ones
+            given = new.router.bgp.model_fields_set
+            if "announce_ranges" not in given:
+                new.router.bgp.announce_ranges = [r.model_copy() for r in old_bgp.announce_ranges if not r.owner]
+            if "neighbors" not in given:
+                new.router.bgp.neighbors = [n.model_copy() for n in old_bgp.neighbors if not n.owner]
         if new.router.bgp is not None:
             new.router.bgp.announce_ranges = ([r for r in new.router.bgp.announce_ranges if not r.owner]
                                               + [r.model_copy() for r in owned_ranges])

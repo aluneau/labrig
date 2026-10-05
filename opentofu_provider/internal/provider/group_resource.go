@@ -91,6 +91,18 @@ type groupModel struct {
 	WGHostPort    types.Int64          `tfsdk:"wireguard_host_port"`
 	WGSubnet      types.String         `tfsdk:"wireguard_subnet"`
 	WGPublicKey   types.String         `tfsdk:"wireguard_public_key"`
+	BGP           types.Bool           `tfsdk:"bgp"`
+	BGPRange      types.String         `tfsdk:"bgp_announce_range"`
+}
+
+// apiBGP is the spec's router.bgp block. Only `enabled` is sent: the server keeps the announce
+// ranges / neighbors (assigned, or set in the UI) when the block omits them.
+type apiBGP struct {
+	Enabled        bool `json:"enabled"`
+	AnnounceRanges []struct {
+		Prefix string  `json:"prefix"`
+		Owner  *string `json:"owner"`
+	} `json:"announce_ranges,omitempty"`
 }
 
 // apiWireGuard is the spec's router.wireguard block (devices: vmmanager_wireguard_peer)
@@ -145,6 +157,7 @@ type apiGroupSpec struct {
 			Records    []apiDNSRecord `json:"records"`
 		} `json:"dns"`
 		WireGuard *apiWireGuard `json:"wireguard,omitempty"`
+		BGP       *apiBGP       `json:"bgp,omitempty"`
 	} `json:"router"`
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
@@ -180,6 +193,7 @@ type apiGroup struct {
 				Records    []apiDNSRecord `json:"records"`
 			} `json:"dns"`
 			WireGuard *apiWireGuard `json:"wireguard"`
+			BGP       *apiBGP       `json:"bgp"`
 		} `json:"router"`
 		Members   []apiGroupMemberSpec `json:"members"`
 		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
@@ -244,6 +258,11 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description:   "UDP port on the host that devices connect to (default: first free port of the server's WG_HOST_PORTS)."},
 			"wireguard_subnet":     schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "Tunnel subnet (the router has its first address, also the DNS server)."},
 			"wireguard_public_key": schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "The router's WireGuard public key."},
+			"bgp": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "BGP on the router (FRR, AS 64512): machines of the group network (AS 64513) announce addresses of " +
+					"bgp_announce_range, the router routes them (ECMP). See docs/bgp.md. Applied live."},
+			"bgp_announce_range": schema.StringAttribute{Computed: true, PlanModifiers: keep,
+				Description: "Range the router accepts BGP routes for (a /27 of BGP_ANNOUNCE_POOL, assigned by the server)."},
 		},
 		Blocks: map[string]schema.Block{
 			"member": schema.ListNestedBlock{
@@ -340,6 +359,12 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 	case !m.WGSubnet.IsNull() && !m.WGSubnet.IsUnknown():
 		// was enabled: disable, keeping the router's key and the devices
 		s.Router.WireGuard = &apiWireGuard{Enabled: false, ListenPort: m.WGListenPort.ValueInt64()}
+	}
+	switch {
+	case m.BGP.ValueBool():
+		s.Router.BGP = &apiBGP{Enabled: true}
+	case !m.BGPRange.IsNull() && !m.BGPRange.IsUnknown():
+		s.Router.BGP = &apiBGP{Enabled: false} // was enabled: disable, keeping its settings
 	}
 	s.DHCPHosts = []apiGroupDHCPHost{}
 	for _, h := range m.DHCPHosts {
@@ -569,6 +594,16 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 			m.WGListenPort = types.Int64Value(51820)
 		}
 		m.WGHostPort, m.WGSubnet, m.WGPublicKey = types.Int64Null(), types.StringNull(), types.StringNull()
+	}
+	m.BGP, m.BGPRange = types.BoolValue(false), types.StringNull()
+	if b := g.Spec.Router.BGP; b != nil {
+		m.BGP = types.BoolValue(b.Enabled)
+		for _, r := range b.AnnounceRanges {
+			if r.Owner == nil || *r.Owner == "" {
+				m.BGPRange = types.StringValue(r.Prefix)
+				break
+			}
+		}
 	}
 	m.MemberIPs, _ = types.MapValueFrom(ctx, types.StringType, ips)
 	m.MemberMACs, _ = types.MapValueFrom(ctx, types.StringType, macs)

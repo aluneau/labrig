@@ -117,7 +117,8 @@ async function shoot(browser, groupId, name, { width, height, dark, mobile, flow
     // 2. enable BGP in the UI
     await page.goto(`${BASE}/groups/${groupId}`);
     await page.getByRole('tab', { name: 'BGP' }).click();
-    if (await page.locator('#bgp-enable').isVisible({ timeout: 10000 }).catch(() => false)) {
+    await page.locator('#bgp-enable, #bgp-sessions').first().waitFor({ timeout: 30000 });
+    if (await page.locator('#bgp-enable').isVisible()) {
       await page.screenshot({ path: 'bgp-tab-off.png' });
       await page.locator('#bgp-enable').click();
       await page.locator('#bgp-sessions').waitFor({ timeout: 10 * 60000 });
