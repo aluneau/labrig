@@ -169,15 +169,16 @@ class CloudImageService:
             "runcmd": [["systemctl", "enable", "--now", "qemu-guest-agent"]],
         }
         if keyboard:
-            # The VNC console types physical keys, so the text console needs this layout.
-            # Debian/Ubuntu: cloud-init's keyboard module writes it, console-setup applies it.
-            # EL's cloud.cfg doesn't run the keyboard module: set the console keymap with localectl
-            # (the UI's XKB names all exist as console keymaps; set-x11-keymap fails on EL9 without
-            # xkeyboard-config, so it's only the fallback), then vconsole-setup reloads it.
-            config["keyboard"] = {"layout": keyboard}
+            # The VNC console types physical keys, so the text console needs this layout. Not cloud-init's
+            # keyboard module: on Debian it restarts console-setup before packages are installed (cloud-init
+            # ends in "error"), and EL's cloud.cfg doesn't run it at all.
+            # Debian/Ubuntu: console-setup + XKBLAYOUT + setupcon. EL: the UI's XKB names all exist as
+            # console keymaps (set-x11-keymap fails on EL9 without xkeyboard-config, so it's the fallback).
             config["runcmd"].append(
                 "if command -v apt-get >/dev/null; then"
-                " DEBIAN_FRONTEND=noninteractive apt-get install -y console-setup && setupcon --force --save;"
+                " DEBIAN_FRONTEND=noninteractive apt-get install -y console-setup"
+                f" && sed -i 's/^XKBLAYOUT=.*/XKBLAYOUT=\"{keyboard}\"/' /etc/default/keyboard"
+                " && setupcon --force --save;"
                 f" else {{ localectl set-keymap {keyboard} || localectl set-x11-keymap {keyboard}; }}"
                 " && systemctl restart systemd-vconsole-setup; fi || true")
         if username:
