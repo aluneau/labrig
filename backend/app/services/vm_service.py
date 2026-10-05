@@ -10,6 +10,7 @@ from xml.sax.saxutils import quoteattr
 
 from sqlalchemy.orm import Session
 
+from app import domain_xml
 from app.config import settings
 from app.database import serialized
 from app.libvirt_client import libvirt_client
@@ -61,11 +62,14 @@ class VMService:
             return None
         vm.status = live["state"]
         db.commit()
+        devices = libvirt_client.get_vm_devices(vm.name) or {"disks": [], "cdrom": None, "boot_order": []}
         return {
             **{c.name: getattr(vm, c.name) for c in VM.__table__.columns},
             "autostart": live["autostart"],
             "xml_config": live["xml"],
-            "disks": libvirt_client.get_vm_disks(vm.name),
+            "disks": devices["disks"],
+            "cdrom": devices["cdrom"],
+            "boot": {"order": devices["boot_order"], "once": vm.next_boot.split(",") if vm.next_boot else None},
             "interfaces": libvirt_client.get_vm_interfaces(vm.name),
             "nics": libvirt_client.get_vm_nics(vm.name),
             "console": libvirt_client.get_vm_console(vm.name),
@@ -113,7 +117,7 @@ class VMService:
                 name=vm_data.name,
                 memory=vm_data.memory,
                 vcpu=vm_data.vcpu,
-                disk_xml=self._build_disk_xml(disk_path, vm_data.iso_path or seed_path),
+                disk_xml=self._build_disk_xml(disk_path, vm_data.iso_path, seed_path),
                 network_xml=self._build_network_xml(vm_data.network_name or settings.DEFAULT_NETWORK,
                                                     vm_data.mac_address),
                 arch=vm_data.arch,
@@ -182,7 +186,7 @@ class VMService:
             return None
 
         actions = {
-            "start": lambda: libvirt_client.start_vm(vm.name),
+            "start": lambda: self._start(db, vm),
             "stop": lambda: libvirt_client.stop_vm(vm.name),
             "force_stop": lambda: libvirt_client.stop_vm(vm.name, force=True),
             "reboot": lambda: libvirt_client.reboot_vm(vm.name),
@@ -199,31 +203,124 @@ class VMService:
             db.commit()
         return vm
 
+    def _start(self, db: Session, vm: VM) -> None:
+        """Start, applying a pending one-shot boot order (PUT /vms/{id}/boot once=true)"""
+        if not vm.next_boot:
+            libvirt_client.start_vm(vm.name)
+            return
+        libvirt_client.start_vm_with_boot_order(vm.name, vm.next_boot.split(","))
+        vm.next_boot = None
+        db.commit()
+
+    # Devices: CD-ROM, boot order, disks
+
+    def set_cdrom(self, db: Session, vm: VM, iso_path: Optional[str]) -> Dict[str, Any]:
+        if iso_path and not libvirt_client.volume_exists(iso_path):
+            raise ValueError(f"{iso_path} is not a volume of an active storage pool (see GET /storage/isos)")
+        result = libvirt_client.set_cdrom(vm.name, iso_path)
+        if result["target"] is None:
+            return {"message": "The VM has no CD-ROM drive", "pending": False}
+        message = f"Inserted {iso_path.rsplit('/', 1)[-1]}" if iso_path else "Ejected the CD-ROM"
+        if result["pending"]:
+            message += ("; the VM had no CD-ROM drive: one was added to its configuration and appears "
+                        "at the next start (SATA drives can't be hot-plugged)")
+        return {"message": message, "pending": result["pending"], "target": result["target"], "path": iso_path}
+
+    def set_boot(self, db: Session, vm: VM, order: Optional[List[str]], once: Optional[bool]) -> Dict[str, Any]:
+        if once:
+            order = order or ["cdrom", "hd"]
+            devices = libvirt_client.get_vm_devices(vm.name)
+            if "cdrom" in order and devices is not None and devices["cdrom"] is None:
+                raise ValueError("The VM has no CD-ROM drive: insert an ISO first (PUT /vms/{id}/cdrom)")
+            vm.next_boot = ",".join(order)
+            db.commit()
+            libvirt_client.publish_vm_event(vm.name, "devices")
+            return {"message": f"The next start through this app boots from {order[0]} (once)", "pending": True}
+        messages = []
+        if once is False and vm.next_boot:
+            vm.next_boot = None
+            db.commit()
+            libvirt_client.publish_vm_event(vm.name, "devices")
+            messages.append("One-shot boot cancelled")
+        if order:
+            libvirt_client.set_boot_order(vm.name, order)
+            running = vm.status in ("running", "paused", "blocked")
+            messages.append("Boot order saved" + ("; it applies at the next start" if running else ""))
+        return {"message": ". ".join(messages) or "Nothing to change", "pending": False}
+
+    def add_disk(self, db: Session, vm: VM, size_gb: int, pool: Optional[str], fmt: str, bus: str) -> Dict[str, Any]:
+        pool_name = pool or libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
+        name = libvirt_client.free_volume_name(pool_name, f"{vm.name}-disk", "qcow2" if fmt == "qcow2" else "img")
+        target = libvirt_client.next_disk_target(vm.name, "vd" if bus == "virtio" else "sd")
+        path = libvirt_client.create_volume(pool_name, name, size_gb * 1024 ** 3, fmt)
+        try:
+            result = libvirt_client.attach_disk(vm.name, domain_xml.data_disk_xml(path, target, bus, fmt))
+        except Exception:
+            libvirt_client.delete_volume_by_path(path)
+            raise
+        message = f"Added {size_gb} GiB disk {target} ({name})"
+        if result["pending"]:
+            message += "; it appears at the next start"
+            if result["error"]:
+                message += f" (hot-plug failed: {result['error']})"
+        return {"message": message, "pending": result["pending"], "target": target, "path": path}
+
+    def detach_disk(self, db: Session, vm: VM, target: str, delete_volume: bool) -> Dict[str, Any]:
+        disk = self._find_disk(vm, target)
+        if disk["boot"]:
+            raise ValueError(f"{target} is the boot disk; it can't be detached")
+        result = libvirt_client.detach_disk(vm.name, target)
+        path = result["path"]
+        if result["pending"]:
+            message = (f"{target} is removed from the configuration, but the guest has not released it yet: "
+                       "it goes away at the next shutdown")
+            if delete_volume:
+                message += f". The volume {path} is kept while in use; delete it from Storage later"
+            return {"message": message, "pending": True, "target": target, "path": path}
+        message = f"Detached {target}"
+        if delete_volume and path:
+            message += f" and deleted {path}" if libvirt_client.delete_volume_by_path(path) \
+                else f" (could not delete {path})"
+        return {"message": message, "pending": False, "target": target, "path": path}
+
+    def resize_disk(self, db: Session, vm: VM, target: str, size_gb: int) -> Dict[str, Any]:
+        disk = self._find_disk(vm, target)
+        new = size_gb * 1024 ** 3
+        current = disk["capacity"] or 0
+        if new == current:
+            return {"message": f"{target} is already {size_gb} GiB", "pending": False, "target": target,
+                    "path": disk["path"]}
+        if new < current:
+            raise ValueError(f"{target} is {current / 1024 ** 3:.1f} GiB: disks can only grow")
+        libvirt_client.resize_disk(vm.name, target, new)
+        message = f"Resized {target} to {size_gb} GiB"
+        if disk["pending"] is None and vm.status in ("running", "paused"):
+            message += " (the guest sees the new size now; grow its partition / filesystem inside the guest)"
+        return {"message": message, "pending": False, "target": target, "path": disk["path"]}
+
+    def _find_disk(self, vm: VM, target: str) -> Dict[str, Any]:
+        devices = libvirt_client.get_vm_devices(vm.name)
+        disk = next((d for d in (devices or {}).get("disks", []) if d["target"] == target), None)
+        if disk is None or disk["device"] != "disk":
+            raise LookupError(f"VM {vm.name} has no disk {target}")
+        return disk
+
     def get_console(self, db: Session, vm_id: int) -> Optional[Dict[str, Any]]:
         vm = self.get_vm(db, vm_id)
         if not vm:
             return None
         return libvirt_client.get_vm_console(vm.name)
 
-    def _build_disk_xml(self, disk_path: Optional[str], iso_path: Optional[str]) -> str:
+    def _build_disk_xml(self, disk_path: Optional[str], iso_path: Optional[str],
+                        seed_path: Optional[str] = None) -> str:
+        """Boot disk vda, a CD-ROM sda (empty unless iso_path, so media can be swapped live later)
+        and the cloud-init seed on its own CD-ROM sdb"""
         disks = []
         if disk_path:
-            disks.append(f"""
-            <disk type='file' device='disk'>
-                <driver name='qemu' type='qcow2' discard='unmap'/>
-                <source file={quoteattr(disk_path)}/>
-                <target dev='vda' bus='virtio'/>
-            </disk>
-            """)
-        if iso_path:
-            disks.append(f"""
-            <disk type='file' device='cdrom'>
-                <driver name='qemu' type='raw'/>
-                <source file={quoteattr(iso_path)}/>
-                <target dev='sda' bus='sata'/>
-                <readonly/>
-            </disk>
-            """)
+            disks.append(domain_xml.data_disk_xml(disk_path, "vda", "virtio", "qcow2"))
+        disks.append(domain_xml.cdrom_xml("sda", iso_path))
+        if seed_path:
+            disks.append(domain_xml.cdrom_xml("sdb", seed_path))
         return "\n".join(disks)
 
     def _build_network_xml(self, network_name: str, mac: Optional[str] = None) -> str:
