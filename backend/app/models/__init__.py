@@ -3,6 +3,7 @@ from app.models.vm import VM, VMTemplate
 from app.models.storage import StoragePool, Volume, ISOImage, CloudImage
 from app.models.network import Network
 from app.models.task import Task
+from app.models.cluster import Cluster, ClusterNode
 
 __all__ = [
     "VM",
@@ -13,4 +14,6 @@ __all__ = [
     "CloudImage",
     "Network",
     "Task",
+    "Cluster",
+    "ClusterNode",
 ]

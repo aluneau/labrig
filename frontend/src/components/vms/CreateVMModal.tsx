@@ -41,7 +41,7 @@ const KEYBOARD_LAYOUTS: [string, string][] = [
 ];
 
 /** Best-guess XKB layout from the browser locale (fr-FR -> fr, en-GB -> gb, de-CH -> ch) */
-function defaultKeyboard(): string {
+export function defaultKeyboard(): string {
   const [lang, region] = (navigator.language || 'en-US').toLowerCase().split('-');
   const known = new Set(KEYBOARD_LAYOUTS.map(([code]) => code));
   if (region && ['gb', 'be', 'ch', 'ca', 'br'].includes(region)) return region;

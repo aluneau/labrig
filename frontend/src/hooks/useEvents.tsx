@@ -3,7 +3,7 @@ import { API_BASE } from '../services/api';
 
 /** Event pushed by the backend on /api/v1/events (Server-Sent Events) */
 export interface LiveEvent {
-  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection';
+  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection' | 'cluster';
   event?: string | number;
   uuid?: string;
   name?: string;

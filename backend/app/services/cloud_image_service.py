@@ -149,7 +149,10 @@ class CloudImageService:
     # cloud-init
 
     def build_user_data(self, hostname: str, username: Optional[str], password: Optional[str],
-                        ssh_keys: List[str], custom: Optional[str], keyboard: Optional[str] = None) -> str:
+                        ssh_keys: List[str], custom: Optional[str], keyboard: Optional[str] = None,
+                        extra: Optional[Dict[str, Any]] = None) -> str:
+        """#cloud-config for a new VM. `extra` is merged in: lists are appended
+        (packages, runcmd, write_files...), other keys are set."""
         if custom and custom.strip():
             return custom
         config: Dict[str, Any] = {
@@ -180,6 +183,11 @@ class CloudImageService:
             config["ssh_pwauth"] = bool(password)
         elif ssh_keys:
             config["ssh_authorized_keys"] = ssh_keys
+        for key, value in (extra or {}).items():
+            if isinstance(value, list) and isinstance(config.get(key), list):
+                config[key] = config[key] + value
+            else:
+                config[key] = value
         return "#cloud-config\n" + yaml.safe_dump(config, sort_keys=False)
 
     def build_seed_iso(self, hostname: str, user_data: str) -> bytes:

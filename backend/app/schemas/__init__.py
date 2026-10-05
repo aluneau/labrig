@@ -14,6 +14,7 @@ from app.schemas.network import (
 )
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.host import HostInfo, HostResources
+from app.schemas.cluster import Cluster, ClusterCreate, ClusterScale, ClusterNodeOut, ClusterCommandOutput
 
 __all__ = [
     "VM", "VMCreate", "VMUpdate", "VMDetail", "VMConsole", "VMDisk", "VMInterface",
@@ -24,4 +25,5 @@ __all__ = [
     "NetworkInterface", "NetworkConfig",
     "Task", "TaskCreate", "TaskUpdate",
     "HostInfo", "HostResources",
+    "Cluster", "ClusterCreate", "ClusterScale", "ClusterNodeOut", "ClusterCommandOutput",
 ]

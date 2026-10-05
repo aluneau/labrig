@@ -1,5 +1,9 @@
 """libvirt connection wrapper"""
+import base64
+import json
+import time
 import libvirt
+import libvirt_qemu
 import threading
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
@@ -296,6 +300,57 @@ class LibvirtClient:
 
         logger.info(f"Deleted VM {name}")
         return True
+
+    def set_vm_metadata(self, name: str, uri: str, key: str, xml: Optional[str]) -> None:
+        """Store (or remove with xml=None) a custom <metadata> element in the persistent config"""
+        domain = self.connect().lookupByName(name)
+        domain.setMetadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, xml, key if xml else None, uri,
+                           libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
+    def list_vm_metadata(self, uri: str) -> Dict[str, str]:
+        """{vm name: metadata element XML} for every domain carrying metadata in namespace uri"""
+        result = {}
+        for dom in self.connect().listAllDomains(0):
+            try:
+                result[dom.name()] = dom.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, uri,
+                                                  libvirt.VIR_DOMAIN_AFFECT_CONFIG)
+            except libvirt.libvirtError:
+                pass  # no metadata in that namespace
+        return result
+
+    # QEMU guest agent (the domain template has the channel; the guest needs qemu-guest-agent)
+
+    def guest_agent(self, name: str, command: str, arguments: Optional[Dict[str, Any]] = None,
+                    timeout: int = 10) -> Any:
+        domain = self.connect().lookupByName(name)
+        payload: Dict[str, Any] = {"execute": command}
+        if arguments is not None:
+            payload["arguments"] = arguments
+        reply = libvirt_qemu.qemuAgentCommand(domain, json.dumps(payload), timeout, 0)
+        return json.loads(reply).get("return")
+
+    def guest_ping(self, name: str) -> bool:
+        try:
+            self.guest_agent(name, "guest-ping", timeout=5)
+            return True
+        except libvirt.libvirtError:
+            return False
+
+    def guest_exec(self, name: str, argv: List[str], timeout: float = 60) -> Dict[str, Any]:
+        """Run a command in the guest: {exitcode, stdout, stderr}. Raises libvirtError / TimeoutError."""
+        started = self.guest_agent(name, "guest-exec", {"path": argv[0], "arg": argv[1:], "capture-output": True})
+        pid = started["pid"]
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.guest_agent(name, "guest-exec-status", {"pid": pid})
+            if status.get("exited"):
+                def decode(key: str) -> str:
+                    return base64.b64decode(status.get(key) or "").decode(errors="replace")
+                return {"exitcode": status.get("exitcode", -1), "stdout": decode("out-data"),
+                        "stderr": decode("err-data")}
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"'{' '.join(argv)}' did not finish within {timeout:.0f}s in {name}")
+            time.sleep(0.5)
 
     def get_vm_console(self, name: str) -> Optional[Dict[str, Any]]:
         """Get VM graphical console information"""
@@ -645,6 +700,18 @@ class LibvirtClient:
         if net.isActive():
             flags |= libvirt.VIR_NETWORK_UPDATE_AFFECT_LIVE
         net.update(commands[command], libvirt.VIR_NETWORK_SECTION_IP_DHCP_HOST, -1, xml, flags)
+
+    def update_dns_host(self, name: str, command: str, ip: str, hostnames: List[str]) -> None:
+        """Add / delete a <dns><host> record, live (no restart) and in the saved config"""
+        net = self.connect().networkLookupByName(name)
+        commands = {"add": libvirt.VIR_NETWORK_UPDATE_COMMAND_ADD_LAST,
+                    "delete": libvirt.VIR_NETWORK_UPDATE_COMMAND_DELETE}
+        names = "".join(f"<hostname>{escape(h)}</hostname>" for h in hostnames)
+        xml = f"<host ip={quoteattr(ip)}>{names}</host>"
+        flags = libvirt.VIR_NETWORK_UPDATE_AFFECT_CONFIG
+        if net.isActive():
+            flags |= libvirt.VIR_NETWORK_UPDATE_AFFECT_LIVE
+        net.update(commands[command], libvirt.VIR_NETWORK_SECTION_DNS_HOST, -1, xml, flags)
 
     def network_interfaces(self, name: str) -> List[Dict[str, Any]]:
         """VM interfaces attached to a network: [{vm, mac}]"""
