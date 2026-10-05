@@ -13,9 +13,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -130,13 +130,29 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	intAttr := func(desc string) schema.Int64Attribute {
 		return schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt, Description: desc}
 	}
+	// openshift block: what the add-on API applies live changes in place (operators, MetalLB),
+	// the rest recreates the cluster
+	// Optional + computed: unset fields show the server's values (read back), and keep them
 	osStr := func(desc string) schema.StringAttribute {
-		return schema.StringAttribute{Optional: true, Description: desc}
+		return schema.StringAttribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplace()}}
 	}
 	osInt := func(desc string) schema.Int64Attribute {
-		return schema.Int64Attribute{Optional: true, Description: desc}
+		return schema.Int64Attribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown(), int64planmodifier.RequiresReplace()}}
 	}
-	osBool := func(desc string) schema.BoolAttribute { return schema.BoolAttribute{Optional: true, Description: desc} }
+	osBool := func(desc string) schema.BoolAttribute {
+		return schema.BoolAttribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown(), boolplanmodifier.RequiresReplace()}}
+	}
+	liveStr := func(desc string) schema.StringAttribute {
+		return schema.StringAttribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}}
+	}
+	liveBool := func(desc string) schema.BoolAttribute {
+		return schema.BoolAttribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}}
+	}
 	resp.Schema = schema.Schema{
 		Description: "A Kubernetes cluster made of VMs. k3s: on its own NAT network (no router) or an existing one. " +
 			"kubeadm: inside a lab group (an existing one, group_id, or one created for the cluster and deleted with it) " +
@@ -179,23 +195,26 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"console_url":        schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "openshift: web console (resolvable through the group router's DNS, e.g. over WireGuard)."},
 			"kubeadmin_password": schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "openshift: kubeadmin password."},
 			"openshift": schema.SingleNestedAttribute{
-				Optional:      true,
-				PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
-				Description:   "type = openshift (agent-based installer, needs the pull secret stored on the server). Unset fields take the server defaults.",
+				Optional: true,
+				Description: "type = openshift (agent-based installer, needs vmmanager_openshift_pull_secret). Unset fields take the " +
+					"server defaults. Changed in place on an installed cluster: adding `operators`, enabling `metallb` / " +
+					"`metallb_demo`, switching `metallb_mode`; anything else recreates the cluster.",
 				Attributes: map[string]schema.Attribute{
 					"channel":           osStr("e.g. stable-4.20 (default)."),
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
 					"storage":           osStr("none (default), lvms or odf (>= 3 nodes); adds a disk per storage node."),
 					"storage_disk_size": osInt("GiB (default 100)."),
-					"operators":         schema.ListAttribute{Optional: true, ElementType: types.StringType, Description: "OLM package names (default channel, redhat-operators)."},
+					"operators": schema.ListAttribute{Optional: true, Computed: true, ElementType: types.StringType,
+						PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+						Description:   "OLM package names (default channel, redhat-operators). Adding one installs it in place; removing is not supported (uninstall it in the cluster first)."},
 					"sriov":             osBool("Emulated SR-IOV: vIOMMU + igb NICs, SR-IOV Network Operator, sample policy."),
 					"sriov_nics":        osInt("igb NICs per node (default 1)."),
 					"sriov_vfs":         osInt("VFs per NIC (default 4, max 7)."),
 					"sriov_device_type": osStr("netdevice (default) or vfio-pci."),
-					"metallb":           osBool("MetalLB L2 with a pool kept free in the group network."),
+					"metallb":           liveBool("MetalLB with an address pool (enabled in place on an installed cluster; can't be disabled)."),
 					"metallb_addresses": osInt("Pool size (default 16)."),
-					"metallb_demo":      osBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
-					"metallb_mode":      osStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
+					"metallb_demo":      liveBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
+					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
 				},
 			},
@@ -332,7 +351,7 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 				opts["operators"] = ops
 			}
 			sriov := map[string]any{}
-			if !os.SRIOV.IsNull() {
+			if !os.SRIOV.IsNull() && !os.SRIOV.IsUnknown() {
 				sriov["enabled"] = os.SRIOV.ValueBool()
 			}
 			if v := intPtr(os.SRIOVNics); v != nil {
@@ -348,22 +367,22 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 				opts["sriov"] = sriov
 			}
 			mlb := map[string]any{}
-			if !os.MetalLB.IsNull() {
+			if !os.MetalLB.IsNull() && !os.MetalLB.IsUnknown() {
 				mlb["enabled"] = os.MetalLB.ValueBool()
 			}
 			if v := intPtr(os.MetalLBAddrs); v != nil {
 				mlb["addresses"] = *v
 			}
-			if !os.MetalLBDemo.IsNull() {
+			if !os.MetalLBDemo.IsNull() && !os.MetalLBDemo.IsUnknown() {
 				mlb["demo"] = os.MetalLBDemo.ValueBool()
 			}
-			if !os.MetalLBMode.IsNull() && os.MetalLBMode.ValueString() != "" {
+			if v := strPtr(os.MetalLBMode); v != nil {
 				mlb["mode"] = os.MetalLBMode.ValueString()
 			}
 			if len(mlb) > 0 {
 				opts["metallb"] = mlb
 			}
-			if !os.DisableUpdates.IsNull() {
+			if !os.DisableUpdates.IsNull() && !os.DisableUpdates.IsUnknown() {
 				opts["disable_updates"] = os.DisableUpdates.ValueBool()
 			}
 		}
@@ -472,6 +491,14 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 			}
 		}
 	}
+	if c.Type == "openshift" && m.OpenShift != nil {
+		fillOpenShift(ctx, m.OpenShift, c.Spec)
+	} else if c.Type != "openshift" {
+		m.OpenShift = nil
+	}
+	if u, ok := c.Spec["username"].(string); ok && u != "" {
+		m.Username = types.StringValue(u) // imported clusters: the server's value, not null
+	}
 	m.ConsoleURL = strOrNull(c.ConsoleURL)
 	if c.Type == "openshift" && (m.KubeadminPass.IsNull() || m.KubeadminPass.IsUnknown()) {
 		var creds struct {
@@ -578,6 +605,12 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 		}
 	}
 
+	if plan.Type.ValueString() == "openshift" {
+		if !r.openshiftAddons(ctx, id, state.OpenShift, plan.OpenShift, &resp.Diagnostics) {
+			return
+		}
+	}
+
 	if !plan.Running.ValueBool() && state.Running.ValueBool() {
 		if err := r.power(ctx, id, "stop"); err != nil {
 			resp.Diagnostics.AddError("Cannot stop cluster", err.Error())
@@ -611,4 +644,145 @@ func (r *clusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 
 func (r *clusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	// an empty openshift block: Read fills it from the server (dropped again for other types)
+	empty := openshiftModel{Operators: types.ListNull(types.StringType)}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("openshift"), &empty)...)
+}
+
+// fillOpenShift copies the server's openshift options (spec.openshift) into m
+func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) {
+	o, _ := spec["openshift"].(map[string]any)
+	if o == nil {
+		return
+	}
+	str := func(v any) types.String {
+		if s, ok := v.(string); ok && s != "" {
+			return types.StringValue(s)
+		}
+		return types.StringNull()
+	}
+	num := func(v any) types.Int64 {
+		if f, ok := v.(float64); ok {
+			return types.Int64Value(int64(f))
+		}
+		return types.Int64Null()
+	}
+	flag := func(v any) types.Bool {
+		if b, ok := v.(bool); ok {
+			return types.BoolValue(b)
+		}
+		return types.BoolNull()
+	}
+	sriov, _ := o["sriov"].(map[string]any)
+	mlb, _ := o["metallb"].(map[string]any)
+	m.Channel, m.Topology, m.Storage = str(o["channel"]), str(o["topology"]), str(o["storage"])
+	m.StorageDiskSize = num(o["storage_disk_size"])
+	m.SRIOV, m.SRIOVNics, m.SRIOVVFs, m.SRIOVDeviceType = flag(sriov["enabled"]), num(sriov["nics"]), num(sriov["vfs"]), str(sriov["device_type"])
+	m.MetalLB, m.MetalLBAddrs, m.MetalLBDemo = flag(mlb["enabled"]), num(mlb["addresses"]), flag(mlb["demo"])
+	m.MetalLBMode = str(mlb["mode"])
+	if m.MetalLB.ValueBool() && m.MetalLBMode.IsNull() {
+		m.MetalLBMode = types.StringValue("l2")
+	}
+	m.DisableUpdates = flag(o["disable_updates"])
+	names := []string{}
+	if ops, ok := o["operators"].([]any); ok {
+		for _, op := range ops {
+			if e, ok := op.(map[string]any); ok {
+				if n, ok := e["name"].(string); ok {
+					names = append(names, n)
+				}
+			}
+		}
+	}
+	m.Operators, _ = types.ListValueFrom(ctx, types.StringType, names)
+}
+
+// openshiftAddons applies the in-place part of an openshift block change through the add-on API
+// (one task at a time). Returns false on error.
+func (r *clusterResource) openshiftAddons(ctx context.Context, id string, old, cur *openshiftModel, d diags) bool {
+	if cur == nil {
+		return true
+	}
+	if old == nil {
+		old = &openshiftModel{}
+	}
+	listOf := func(l types.List) []string {
+		var names []string
+		if !l.IsNull() && !l.IsUnknown() {
+			if errs := l.ElementsAs(ctx, &names, false); errs.HasError() {
+				d.AddError("Invalid operators list", fmt.Sprint(errs))
+			}
+		}
+		return names
+	}
+	had := map[string]bool{}
+	for _, n := range listOf(old.Operators) {
+		had[n] = true
+	}
+	want := map[string]bool{}
+	added := []string{}
+	for _, n := range listOf(cur.Operators) {
+		want[n] = true
+		if !had[n] {
+			added = append(added, n)
+		}
+	}
+	for n := range had {
+		if !want[n] {
+			d.AddError("Removing an operator is not supported",
+				fmt.Sprintf("%s: uninstall it in the cluster (Subscription + CSV), then remove it from the configuration", n))
+			return false
+		}
+	}
+	on := func(b types.Bool, def bool) bool {
+		if b.IsNull() || b.IsUnknown() {
+			return def
+		}
+		return b.ValueBool()
+	}
+	mode := func(m *openshiftModel) string {
+		if m.MetalLBMode.IsNull() || m.MetalLBMode.ValueString() == "" {
+			return "l2"
+		}
+		return m.MetalLBMode.ValueString()
+	}
+	addon := func(body map[string]any, what string) bool {
+		if err := r.client.Do(ctx, "POST", "/clusters/"+id+"/openshift/addons", body, nil); err != nil {
+			d.AddError("Cannot add "+what, err.Error())
+			return false
+		}
+		if err := r.waitIdle(ctx, id); err != nil {
+			d.AddError("Adding "+what+" failed", err.Error())
+			return false
+		}
+		return true
+	}
+	for _, n := range added {
+		if !addon(map[string]any{"kind": "operator", "operator": map[string]any{"name": n}}, "operator "+n) {
+			return false
+		}
+	}
+	wasOn, isOn := on(old.MetalLB, false), on(cur.MetalLB, false)
+	if wasOn && !isOn {
+		d.AddError("Disabling MetalLB is not supported", "uninstall it in the cluster, or recreate the cluster")
+		return false
+	}
+	demo := on(cur.MetalLBDemo, true)
+	if isOn && (!wasOn || mode(old) != mode(cur)) {
+		mlb := map[string]any{"enabled": true, "mode": mode(cur), "demo": demo}
+		if v := intPtr(cur.MetalLBAddrs); v != nil {
+			mlb["addresses"] = *v
+		}
+		if !addon(map[string]any{"kind": "metallb", "metallb": mlb}, "MetalLB ("+mode(cur)+")") {
+			return false
+		}
+		if !wasOn && demo && !addon(map[string]any{"kind": "metallb-demo"}, "the MetalLB demo") {
+			return false
+		}
+	} else if isOn && demo && !on(old.MetalLBDemo, true) {
+		if !addon(map[string]any{"kind": "metallb-demo"}, "the MetalLB demo") {
+			return false
+		}
+	}
+	return true
 }

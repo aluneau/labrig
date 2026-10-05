@@ -106,7 +106,36 @@ cluster's *Topology* tab follows a packet from the laptop to a pod in either mod
 Not yet: OKD, disconnected installs, `platform: baremetal` with VIPs,
 adding workers after install, upgrades from the app.
 
-## Troubleshooting
+## OpenTofu
+
+`examples/opentofu/openshift/` (SNO + LVMS + MetalLB + NMState):
+
+```hcl
+resource "vmmanager_openshift_pull_secret" "this" { path = "~/pull-secret.json" } # or content = file(...)
+data "vmmanager_openshift_release" "this" { channel = "stable-4.20" }            # .version = latest
+
+resource "vmmanager_cluster" "ocp" {
+  name    = "tofu-ocp"
+  type    = "openshift"
+  version = data.vmmanager_openshift_release.this.version
+  openshift = {
+    topology  = "sno"        # compact | ha (+ workers)
+    storage   = "lvms"       # odf: >= 3 nodes
+    operators = ["kubernetes-nmstate-operator"]
+    metallb   = true
+    metallb_mode = "l2"      # bgp
+    sriov     = false
+  }
+}
+```
+
+Outputs: `kubeconfig`, `kubeadmin_password` (sensitive), `console_url`, `api_endpoint`. Unset `openshift` fields are
+read back from the server. **In place** on an installed cluster: adding to `operators`, enabling `metallb` /
+`metallb_demo`, switching `metallb_mode` (through the add-on API); removing an operator or disabling MetalLB is
+refused; anything else (topology, storage, SR-IOV, channel, sizes) recreates the cluster. An existing cluster can be
+adopted with `tofu import vmmanager_cluster.ocp <cluster id>`. Applies wait up to 4 h (install + add-ons).
+
+
 
 | Symptom | Where to look |
 |---|---|

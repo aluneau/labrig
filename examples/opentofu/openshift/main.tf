@@ -1,9 +1,8 @@
 # Single-node OpenShift (agent-based installer) in a lab group created for it: LVM Storage on an
 # extra disk, MetalLB in L2 mode with the "hello" demo, and the NMState operator.
 #
-#   The pull secret must be stored on the server first (Create cluster dialog, or
-#   curl -X PUT $ENDPOINT/api/v1/openshift/pull-secret -H 'Content-Type: application/json' \
-#        -d '{"path": "~/pull-secret.json"}')
+#   The pull secret is read by the server from pull_secret_path (a path on the vmmanager host);
+#   use `content = file("~/pull-secret.json")` instead when tofu runs on another machine.
 #   cd opentofu_provider && make install     # once
 #   tofu init && tofu apply                  # ~60-90 min (ISO build, install, operators)
 #   tofu output -raw kubeconfig > ocp.yaml && oc --kubeconfig ocp.yaml get clusterversion
@@ -32,28 +31,51 @@ variable "name" {
   default = "tofu-ocp"
 }
 
-variable "version_ocp" {
+variable "channel" {
   type    = string
-  default = null # latest of the channel
+  default = "stable-4.20"
+}
+
+variable "pull_secret_path" {
+  type    = string
+  default = "~/pull-secret.json"
+}
+
+variable "operators" {
+  type    = list(string)
+  default = ["kubernetes-nmstate-operator"] # add one and apply again: installed in place
 }
 
 provider "vmmanager" {
   endpoint = var.endpoint
 }
 
+resource "vmmanager_openshift_pull_secret" "this" {
+  path = var.pull_secret_path
+}
+
+# Latest release of the channel at plan time, pinned in the cluster (a newer release later doesn't
+# recreate it unless you apply with -refresh and accept the replacement)
+data "vmmanager_openshift_release" "this" {
+  channel = var.channel
+}
+
 resource "vmmanager_cluster" "ocp" {
   name    = var.name
   type    = "openshift"
-  version = var.version_ocp
+  version = data.vmmanager_openshift_release.this.version
 
   openshift = {
-    channel   = "stable-4.20"
-    topology  = "sno" # compact = 3 schedulable masters, ha = 3 masters + workers
-    storage   = "lvms" # odf needs 3 nodes
-    operators = ["kubernetes-nmstate-operator"]
-    metallb   = true
-    sriov     = false # true: igb NICs + vIOMMU + SR-IOV Network Operator (dev mode)
+    channel      = var.channel
+    topology     = "sno"  # compact = 3 schedulable masters, ha = 3 masters + workers
+    storage      = "lvms" # odf needs 3 nodes
+    operators    = var.operators
+    metallb      = true
+    metallb_mode = "l2" # bgp: a /27 announced to the group router (switch in place)
+    sriov        = false # true: igb NICs + vIOMMU + SR-IOV Network Operator (dev mode)
   }
+
+  depends_on = [vmmanager_openshift_pull_secret.this]
 }
 
 output "kubeconfig" {
