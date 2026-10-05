@@ -3,7 +3,7 @@
 Web UI + REST API to manage KVM VMs through libvirt, plus an OpenTofu provider. Runs **directly on the
 host** (not in a container) against `qemu:///system`.
 
-Goal: labs to reproduce customer cases, on an Arch gaming rig (no reboot,
+Goal: labs to reproduce customer cases, on a desktop Linux host used for other things too (no reboot,
 libvirt NOT enabled at boot) **and** on RHEL lab machines with the same software, shipped to other people.
 Roadmap and designs: `future-features.md` (lab groups with a router VM, then Kubernetes/OpenShift).
 
@@ -77,7 +77,7 @@ e2e/                  Playwright browser tests against the real app (see below)
 - New VMs: q35, host-passthrough, virtio, no `<emulator>` (libvirt picks it), disks in the `default`
   pool (`/var/lib/libvirt/images`, created if missing). Cloud-image VMs get a full copy of the image
   plus `<name>-cidata.iso` (NoCloud seed, built with pycdlib); delete with `delete_disks` removes both.
-- **libvirt on demand** (owner's gaming rig): no keepalive. `libvirt_client.connect()` opens the connection
+- **libvirt on demand** (desktop hosts): no keepalive. `libvirt_client.connect()` opens the connection
   when a request needs it (raises `LibvirtUnavailable` -> 503 `libvirt is stopped` if no socket); the
   lifespan watcher closes it after `LIBVIRT_IDLE_TIMEOUT` min when no SSE client/task, and publishes
   `{"kind":"connection","event":"state"}` from `systemctl show` (never connect to probe: that

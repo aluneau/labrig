@@ -1,8 +1,7 @@
 # Future features: design notes and roadmap
 
-> Goal: an easy way to build labs that **reproduce customer
-> cases**, running on an Arch Linux gaming rig without rebooting into anything else, and the **same
-> software on RHEL lab machines**. Next big step: **lab groups**, a set of VMs on their own network
+> Goal: an easy way to build labs that **reproduce customer cases**, running on a desktop Linux host
+> without rebooting into anything else, and the **same software on RHEL lab machines**. Next big step: **lab groups**, a set of VMs on their own network
 > behind a networking VM (DNS, DHCP, BGP, WireGuard…). After that, **Kubernetes / OpenShift clusters**
 > built on groups.
 
