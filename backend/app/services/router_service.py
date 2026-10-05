@@ -151,7 +151,6 @@ class ELRouterBackend(RouterBackend):
             hostname="router", username=ci.username, password=ci.password,
             ssh_keys=[k.strip() for k in ci.ssh_keys if k.strip()], keyboard=ci.keyboard,
             fqdn=f"router.{spec.domain}")
-        # console-setup is Debian-only (cloud-init's keyboard module uses localectl on EL)
         config["packages"] = ["qemu-guest-agent", "dnsmasq", "nftables", "policycoreutils-python-utils"]
 
         files = {DNSMASQ_CONF: self.dnsmasq_conf(spec), NFT_CONF: self.nft_conf(spec)}
@@ -166,8 +165,7 @@ class ELRouterBackend(RouterBackend):
         }
         config["write_files"] = [{"path": p, "content": c, "permissions": "0644"}
                                  for p, c in {**static_files, **files}.items()]
-        base_cmds = [c for c in config.get("runcmd", []) if "setupcon" not in str(c)]
-        config["runcmd"] = base_cmds + [
+        config["runcmd"] = config.get("runcmd", []) + [
             "systemctl daemon-reload",
             "systemctl restart qemu-guest-agent",
             # SELinux stays enforcing; only the guest agent's domain is permissive, so config pushes work
