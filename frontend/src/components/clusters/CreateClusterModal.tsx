@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
+  Checkbox,
   ExpandableSection,
   Form,
   FormGroup,
@@ -18,10 +19,14 @@ import {
   TextInput,
   Title,
 } from '@patternfly/react-core';
-import { CloudImage, ClusterCreate, Group, Network } from '../../types';
-import { clusterApi, groupApi, networkApi, storageApi } from '../../services/api';
+import { CatalogOperator, CloudImage, ClusterCreate, Group, Network } from '../../types';
+import { clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
+import {
+  MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
+  TopologySection, VersionSection, defaultOsDraft, osDraftErrors, osRequest,
+} from './OpenShiftFields';
 
 interface Props {
   isOpen: boolean;
@@ -40,7 +45,12 @@ export const CLUSTER_TYPE_HELP: Record<string, string> = {
   kubeadm: 'Runs inside a lab group with a router (DNS + haproxy load balancer): '
     + 'api.<name>.<domain> is the router\'s haproxy in front of every control plane, '
     + 'reachable from this host on the router\'s uplink address.',
+  openshift: 'OpenShift Container Platform (agent-based installer) inside a lab group: the router serves DNS '
+    + '(api, api-int, *.apps) and load-balances the API, machine config and ingress. One OpenShift cluster per group.',
 };
+
+/** A group that already hosts an OpenShift cluster (fixed haproxy ports: one per group) */
+const hasOpenShift = (g: Group) => g.clusters.some((c) => c.type === 'openshift');
 
 interface Role { memory: string; vcpu: string; disk: string }
 
@@ -96,6 +106,12 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const [sshKeys, setSshKeys] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // OpenShift
+  const [os, setOs] = useState<OsDraft>(defaultOsDraft);
+  const patchOs = useCallback((p: Partial<OsDraft>) => setOs((cur) => ({ ...cur, ...p })), []);
+  const [pullSecretOk, setPullSecretOk] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogOperator[]>([]);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -114,14 +130,35 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       .catch((err) => setError(errorText(err)));
   }, [isOpen]);
 
-  const inGroup = type === 'kubeadm';
+  const isOpenShift = type === 'openshift';
+  useEffect(() => {
+    if (!isOpen || !isOpenShift || catalog.length) return;
+    openshiftApi.catalog().then((c) => { setCatalog(c); setCatalogError(null); })
+      .catch((err) => setCatalogError(errorText(err)));
+  }, [isOpen, isOpenShift, catalog.length]);
+
+  const inGroup = type === 'kubeadm' || isOpenShift;
   const autoGroup = inGroup && groupId === AUTO_GROUP;
   const nameValid = NAME_RE.test(name) && name.length <= (autoGroup ? 32 : 40);
   const pickedGroup = groups.find((g) => String(g.id) === groupId);
-  const canSubmit = nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
+  const osErrors = isOpenShift ? osDraftErrors(os) : [];
+  const groupTaken = isOpenShift && !!pickedGroup && hasOpenShift(pickedGroup);
+  const canSubmit = isOpenShift
+    ? nameValid && pullSecretOk && !osErrors.length && !groupTaken
+    : nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
+
+  const openshiftData = (): ClusterCreate => ({
+    name,
+    type: 'openshift',
+    domain: pickedGroup ? pickedGroup.domain : domain,
+    group_id: groupId ? Number(groupId) : null,
+    cidr: autoGroup ? cidr.trim() || null : null,
+    ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
+    ...osRequest(os, catalog),
+  });
 
   const submit = async () => {
-    const data: ClusterCreate = {
+    const data: ClusterCreate = isOpenShift ? openshiftData() : {
       name,
       type: type as ClusterCreate['type'],
       version: version.trim() || null,
@@ -146,6 +183,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       const cluster = await clusterApi.create(data);
       setName('');
       setPassword('');
+      setOs(defaultOsDraft());
       onCreated(cluster.id);
       onClose();
     } catch (err) {
@@ -156,13 +194,15 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   };
 
   return (
-    <Modal variant={ModalVariant.medium} title="Create Kubernetes cluster" isOpen={isOpen} onClose={onClose}
+    <Modal variant={isOpenShift ? ModalVariant.large : ModalVariant.medium}
+      title={isOpenShift ? 'Create OpenShift cluster' : 'Create Kubernetes cluster'} isOpen={isOpen} onClose={onClose}
       actions={[
         <Button key="create" onClick={submit} isDisabled={!canSubmit || busy} isLoading={busy}>Create</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}>
         {error && <Alert variant="danger" isInline title="Could not create the cluster">{error}</Alert>}
+        {isOpenShift && <PullSecretSection onStatus={setPullSecretOk} />}
         <Grid hasGutter md={6}>
           <GridItem>
             <FormGroup label="Name" isRequired fieldId="cl-name">
@@ -178,13 +218,14 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               <FormSelect id="cl-type" value={type} onChange={(_e, v) => setType(v)}>
                 <FormSelectOption value="k3s" label="k3s (standalone network)" />
                 <FormSelectOption value="kubeadm" label="kubeadm (in a lab group)" />
-                <FormSelectOption value="openshift" label="OpenShift (not supported yet)" isDisabled />
+                <FormSelectOption value="openshift" label="OpenShift (agent-based installer, in a lab group)" />
               </FormSelect>
               <FormHelperText><HelperText><HelperTextItem id="cl-type-help">
                 {CLUSTER_TYPE_HELP[type]}
               </HelperTextItem></HelperText></FormHelperText>
             </FormGroup>
           </GridItem>
+          {!isOpenShift && <>
           <GridItem>
             <FormGroup label="Control planes" fieldId="cl-ctlplanes">
               <FormSelect id="cl-ctlplanes" value={ctlplanes} onChange={(_e, v) => setCtlplanes(v)}>
@@ -213,10 +254,13 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 onChange={(_e, v) => setVersion(v)} />
             </FormGroup>
           </GridItem>
+          </>}
         </Grid>
 
-        <RoleFields id="cl-ctl" title="Control plane nodes" value={ctl} onChange={setCtl} />
-        <RoleFields id="cl-wrk" title="Worker nodes" value={wrk} onChange={setWrk} />
+        {!isOpenShift && <>
+          <RoleFields id="cl-ctl" title="Control plane nodes" value={ctl} onChange={setCtl} />
+          <RoleFields id="cl-wrk" title="Worker nodes" value={wrk} onChange={setWrk} />
+        </>}
 
         <Grid hasGutter md={6}>
           <GridItem>
@@ -225,11 +269,15 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 <FormSelect id="cl-group" value={groupId} onChange={(_e, v) => setGroupId(v)}>
                   <FormSelectOption value={AUTO_GROUP} label={`New lab group ${name || '<name>'} (deleted with the cluster)`} />
                   {groups.map((g) => (
-                    <FormSelectOption key={g.id} value={String(g.id)} label={`${g.name} (${g.cidr}, ${g.domain})`} />
+                    <FormSelectOption key={g.id} value={String(g.id)} isDisabled={isOpenShift && hasOpenShift(g)}
+                      label={`${g.name} (${g.cidr}, ${g.domain})${isOpenShift && hasOpenShift(g) ? ': has an OpenShift cluster' : ''}`} />
                   ))}
                 </FormSelect>
-                <FormHelperText><HelperText><HelperTextItem>
-                  {autoGroup
+                <FormHelperText><HelperText><HelperTextItem variant={groupTaken ? 'error' : 'default'}>
+                  {groupTaken ? 'This group already hosts an OpenShift cluster (one per group: fixed router ports).'
+                    : isOpenShift && !autoGroup ? 'The nodes, DNS records (api, api-int, *.apps) and load balancers are added '
+                      + 'to this group. One OpenShift cluster per group.'
+                    : autoGroup
                     ? 'An AlmaLinux router VM (512 MiB) is created first (its first boot installs packages: about a minute).'
                     : 'The nodes, their DNS records and the API load balancer are added to this group; '
                       + 'deleting the cluster removes only them.'}
@@ -256,6 +304,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               </HelperTextItem></HelperText></FormHelperText>
             </FormGroup>
           </GridItem>
+          {!isOpenShift && <>
           <GridItem>
             <FormGroup label="User" fieldId="cl-user">
               <TextInput id="cl-user" value={username} onChange={(_e, v) => setUsername(v)} />
@@ -266,7 +315,22 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               <TextInput id="cl-password" type="password" value={password} onChange={(_e, v) => setPassword(v)} />
             </FormGroup>
           </GridItem>
+          </>}
         </Grid>
+
+        {isOpenShift && (
+          <>
+            <VersionSection draft={os} patch={patchOs} />
+            <TopologySection draft={os} patch={patchOs} />
+            <StorageSection draft={os} patch={patchOs} />
+            <SriovSection draft={os} patch={patchOs} />
+            <MetalLBSection draft={os} patch={patchOs} />
+            <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
+            <ResourceSummary draft={os} autoGroup={autoGroup} />
+            {osErrors.map((e) => <Alert key={e} variant="danger" isInline isPlain title={e} />)}
+            {!pullSecretOk && <Alert variant="warning" isInline isPlain title="Save a pull secret first (top of this form)." />}
+          </>
+        )}
 
         <ExpandableSection toggleText="Advanced">
           <Grid hasGutter md={6}>
@@ -278,6 +342,12 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 </FormGroup>
               </GridItem>
             )}
+            {isOpenShift && (
+              <GridItem span={12}>
+                <Checkbox id="os-disable-updates" isChecked={os.disableUpdates} onChange={(_e, v) => patchOs({ disableUpdates: v })}
+                  label="Don't offer updates" description="Clears the ClusterVersion channel: a lab stays on the version it was installed with." />
+              </GridItem>
+            )}
             {!inGroup && (
               <GridItem span={12}>
                 <FormGroup label="Extra k3s server flags" fieldId="cl-extra">
@@ -287,7 +357,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               </GridItem>
             )}
             <GridItem span={12}>
-              <FormGroup label="SSH public keys (one per line)" fieldId="cl-keys">
+              <FormGroup label={isOpenShift ? 'Extra SSH public keys for the core user (one per line)' : 'SSH public keys (one per line)'} fieldId="cl-keys">
                 <TextArea id="cl-keys" rows={2} value={sshKeys} onChange={(_e, v) => setSshKeys(v)} resizeOrientation="vertical" />
               </FormGroup>
             </GridItem>
