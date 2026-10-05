@@ -33,7 +33,7 @@ interface Props {
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
-const KEYBOARD_LAYOUTS: [string, string][] = [
+export const KEYBOARD_LAYOUTS: [string, string][] = [
   ['us', 'English (US)'], ['gb', 'English (UK)'], ['fr', 'French (AZERTY)'], ['be', 'Belgian'],
   ['ch', 'Swiss'], ['de', 'German'], ['es', 'Spanish'], ['it', 'Italian'], ['pt', 'Portuguese'],
   ['br', 'Portuguese (Brazil)'], ['ca', 'Canadian French'], ['nl', 'Dutch'], ['se', 'Swedish'],

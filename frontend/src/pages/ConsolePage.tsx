@@ -14,7 +14,8 @@ import {
   ToolbarGroup,
 } from '@patternfly/react-core';
 import { ExpandIcon, KeyboardIcon, PowerOffIcon, PlayIcon, RedoIcon, SyncAltIcon } from '@patternfly/react-icons';
-import { VM } from '../types';
+import { DeviceChange, VMDetail } from '../types';
+import { CdromControl } from '../components/vms/VmDevices';
 import { vmApi, vncUrl } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { PENDING_LABELS, useVmPower } from '../hooks/useVmPower';
@@ -24,7 +25,8 @@ import { VncConsole, VncConsoleHandle, VncStatus } from '../components/console/V
 
 export const ConsolePage: React.FC = () => {
   const vmId = Number(useParams().id);
-  const [vm, setVm] = useState<VM | null>(null);
+  const [vm, setVm] = useState<VMDetail | null>(null);
+  const [notice, setNotice] = useState<DeviceChange | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [vncStatus, setVncStatus] = useState<VncStatus>('disconnected');
   const consoleRef = useRef<VncConsoleHandle>(null);
@@ -37,6 +39,7 @@ export const ConsolePage: React.FC = () => {
   useLiveEvents(['vm'], (event) => {
     if (!vm || event.uuid !== vm.uuid) return;
     onVmEvent(vm.id, event);
+    if (event.event === 'devices' || event.event === 'defined') vmApi.get(vmId).then(setVm).catch(() => {});
     if (event.state && event.state !== 'undefined') setVm((cur) => (cur ? { ...cur, status: event.state! } : cur));
   });
 
@@ -64,6 +67,14 @@ export const ConsolePage: React.FC = () => {
               : <StatusLabel status={vm.status} />}
           </FlexItem>
           <FlexItem align={{ default: 'alignRight' }}>
+            <CdromControl
+              vm={vm}
+              compact
+              onResult={(change) => { setNotice(change); vmApi.get(vmId).then(setVm).catch(() => {}); }}
+              onError={setError}
+            />
+          </FlexItem>
+          <FlexItem>
             <ToolbarGroup>
               {!running ? (
                 <Button variant="primary" icon={<PlayIcon />} onClick={() => run(vm, 'start')} isDisabled={busy}>Start</Button>
@@ -96,6 +107,10 @@ export const ConsolePage: React.FC = () => {
       <PageSection padding={{ default: 'noPadding' }}>
         {error && (
           <Alert variant="danger" isInline title={error} actionClose={<AlertActionCloseButton onClose={() => setError(null)} />} />
+        )}
+        {notice && (
+          <Alert variant={notice.pending ? 'warning' : 'info'} isInline title={notice.message}
+            actionClose={<AlertActionCloseButton onClose={() => setNotice(null)} />} />
         )}
         <VncConsole
           ref={consoleRef}

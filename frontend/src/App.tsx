@@ -11,6 +11,8 @@ import { HostsPage } from './pages/HostsPage';
 import { TasksPage } from './pages/TasksPage';
 import { ConsolePage } from './pages/ConsolePage';
 import { NetworkDetailPage } from './pages/NetworkDetailPage';
+import { GroupsPage } from './pages/GroupsPage';
+import { GroupDetailPage } from './pages/GroupDetailPage';
 import { ClustersPage } from './pages/ClustersPage';
 import { ClusterDetailPage } from './pages/ClusterDetailPage';
 
@@ -20,6 +22,8 @@ export const App: React.FC = () => (
       <Route path="/" element={<DashboardPage />} />
       <Route path="/vms" element={<VMsPage />} />
       <Route path="/vms/:id/console" element={<ConsolePage />} />
+      <Route path="/groups" element={<GroupsPage />} />
+      <Route path="/groups/:id" element={<GroupDetailPage />} />
       <Route path="/storage" element={<StoragePage />} />
       <Route path="/networks" element={<NetworksPage />} />
       <Route path="/networks/:id" element={<NetworkDetailPage />} />

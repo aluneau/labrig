@@ -3,7 +3,9 @@
 A web UI and REST API to manage KVM virtual machines through libvirt.
 
 - **VMs**: create from a cloud image (configured with cloud-init), an install ISO, or an empty disk;
-  start / shut down / reboot / pause / force off / delete; see IPs and disks.
+  start / shut down / reboot / pause / force off / delete; see IPs and disks. Insert / eject ISOs
+  live (also from the console page), boot order and "boot from CD next start", add / grow / detach
+  disks (hot-plugged while running).
 - **In-browser console** (noVNC) with Ctrl+Alt+Del, fullscreen, power buttons; the guest keyboard
   layout is set by cloud-init (defaults to your browser language, e.g. AZERTY for `fr`).
 - **Live status**: libvirt events are pushed to the browser (Server-Sent Events), so a VM shutting
@@ -17,6 +19,10 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Kubernetes clusters (k3s)**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image, on
   their own NAT network with fixed addresses and DNS (`api.<cluster>.<domain>`); ready in ~2 minutes;
   kubeconfig download (works from the host), `kubectl get nodes/pods` in the UI, start/stop, add/remove workers.
+- **Lab groups**: an isolated network + a router VM (EL cloud image with dnsmasq + nftables: DHCP,
+  DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
+  plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
+  is re-rendered and pushed through the QEMU guest agent); start/stop/delete the whole lab; export its spec.
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -101,6 +107,8 @@ make -C opentofu_provider install
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
 cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
+cd examples/opentofu/devices                               # extra disk, ISO in the CD-ROM, boot order
+cd examples/opentofu/group                                 # lab group: router + 2 members + DNS records
 ```
 
 See `opentofu_provider/README.md` for all resources and arguments.
@@ -110,6 +118,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
+`devices.js`, `groups.js`).
 
 ## API overview
 
@@ -117,6 +126,9 @@ See `opentofu_provider/README.md` for all resources and arguments.
 |---|---|
 | `GET/POST /api/v1/vms`, `GET/PATCH/DELETE /api/v1/vms/{id}` | VMs (`?delete_disks=true` on delete) |
 | `POST /api/v1/vms/{id}/{start,stop,force_stop,reboot,suspend,resume}` | Power actions |
+| `PUT /api/v1/vms/{id}/cdrom` `{iso_path\|null}` | Insert / eject an ISO (live) |
+| `PUT /api/v1/vms/{id}/boot` `{order?, once?}` | Boot order; `once: true` = boot the CD on the next start only |
+| `POST /api/v1/vms/{id}/disks`, `PUT/DELETE …/disks/{target}` | Add (hot-plug), grow, detach disks (`?delete_volume=true`) |
 | `GET /api/v1/storage/cloud-images`, `POST` (download), `GET …/distributions` | Cloud images |
 | `GET /api/v1/storage/isos`, `POST …/isos/upload`, `POST …/isos/download` | ISOs |
 | `/api/v1/storage/pools`, `/api/v1/storage/volumes` | Pools and volumes |
@@ -128,13 +140,16 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
 | `GET/POST /api/v1/clusters`, `GET/DELETE …/{id}`, `POST …/{id}/{start,stop}` | Kubernetes clusters (create/start/stop are tasks) |
 | `GET …/clusters/{id}/kubeconfig`, `GET …/{id}/kubectl/{nodes,pods}`, `POST …/{id}/workers`, `DELETE …/{id}/nodes/{name}` | Kubeconfig, kubectl views, scaling |
+| `GET/POST /api/v1/groups`, `GET/PUT/DELETE /api/v1/groups/{id}` (spec; `?delete_disks=`) | Lab groups (create runs as a task) |
+| `POST …/groups/{id}/{start,stop}`, `POST/DELETE …/members`, `POST/DELETE …/dns-records` | Group power (router first on start, last on stop), live members / records |
+| `GET …/groups/{id}/router/config`, `POST …/router/apply`, `GET …/export` | Rendered router config, re-push, spec YAML |
 
 Full interactive docs: `/docs`.
 
 ## Roadmap
 
 See [future-features.md](future-features.md): DHCP lease release, ISO/boot order/disks on existing VMs,
-start/stop libvirt from the UI, **lab groups** (isolated network + router VM for DNS/DHCP/BGP/WireGuard),
+start/stop libvirt from the UI, lab groups v2 (BGP, WireGuard, VLANs, snapshots, templates, VyOS router),
 then **Kubernetes / OpenShift** clusters on top of groups.
 
 ## Containers

@@ -32,6 +32,9 @@ class VM(Base):
     
     # Cloud-init
     cloudinit_config = Column(JSON, nullable=True)
+
+    # One-shot boot order for the next start through the app, e.g. "cdrom,hd" (None = persistent order)
+    next_boot = Column(String(64), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -21,3 +21,6 @@ terraform.tfvars
 
 # Tests
 e2e/screenshots/
+
+# Claude Code agent worktrees
+.claude/worktrees/

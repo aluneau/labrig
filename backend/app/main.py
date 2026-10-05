@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.database import engine, Base, SessionLocal
+from app.database import SessionLocal, init_db
 from app.api.v1 import api_router
 from app.models import CloudImage
 
@@ -23,7 +23,7 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
-    Base.metadata.create_all(bind=engine)
+    init_db()
     from app.services.task_service import task_service
     with SessionLocal() as db:
         task_service.mark_interrupted(db)
@@ -63,10 +63,20 @@ app.add_middleware(
 )
 
 
+# The object vanished from libvirt (e.g. deleted while its page refetches) before the DB mirror caught up
+_NOT_FOUND_CODES = {
+    libvirt.VIR_ERR_NO_DOMAIN,
+    libvirt.VIR_ERR_NO_NETWORK,
+    libvirt.VIR_ERR_NO_STORAGE_POOL,
+    libvirt.VIR_ERR_NO_STORAGE_VOL,
+}
+
+
 @app.exception_handler(libvirt.libvirtError)
 async def libvirt_error_handler(request: Request, exc: libvirt.libvirtError):
     """Surface libvirt's own error message to the client"""
-    return JSONResponse(status_code=400, content={"detail": exc.get_error_message() or str(exc)})
+    status = 404 if exc.get_error_code() in _NOT_FOUND_CODES else 400
+    return JSONResponse(status_code=status, content={"detail": exc.get_error_message() or str(exc)})
 
 
 app.include_router(api_router, prefix="/api/v1")

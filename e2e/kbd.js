@@ -39,5 +39,8 @@ process.chdir(require('path').join(__dirname, 'screenshots'));
   await page.waitForTimeout(1500);
   await page.screenshot({ path: 'console-azerty.png' });
   console.log('problems:', problems.length ? problems : 'none');
+  await page.goto('about:blank');
+  const vms = await (await page.request.get(`${BASE}/api/v1/vms`)).json();
+  for (const v of vms.filter((v) => v.name === 'e2e-kbd')) await page.request.delete(`${BASE}/api/v1/vms/${v.id}?delete_disks=true`);
   await browser.close();
 })();

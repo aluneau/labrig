@@ -39,7 +39,7 @@ from app.services.vm_service import vm_service
 logger = logging.getLogger(__name__)
 
 METADATA_URI = "urn:vm-manager:cluster"
-METADATA_KEY = "vmm"
+METADATA_KEY = "vmmc"
 
 # Preferred node images, in order (distribution, version)
 IMAGE_PREFERENCE = [("debian", "13"), ("almalinux", "9"), ("debian", "12"), ("ubuntu", "24.04"),
@@ -394,31 +394,37 @@ class ClusterService:
                         node: ClusterNode, first: bool) -> None:
         spec = cluster.spec
         res = spec["ctlplane"] if node.role == "ctlplane" else spec["worker"]
-        user_data = cloud_image_service.build_user_data(
+        fqdn = f"{node.name}.{cluster.name}.{cluster.domain}"
+        config = cloud_image_service.build_cloud_config(
             hostname=node.name,
             username=spec.get("username"),
             password=spec.get("password"),
             ssh_keys=[k.strip() for k in spec.get("ssh_keys") or [] if k.strip()],
-            custom=None,
             # console-setup (used for the layout) only exists on Debian/Ubuntu
             keyboard=None if spec.get("el") else spec.get("keyboard"),
-            extra=driver.node_cloud_config(ctx, {"name": node.name, "role": node.role, "ip": node.ip,
-                                                 "first": first}),
+            fqdn=fqdn,
         )
-        vm_service.create_vm(db, VMCreate(
-            name=node.name, description=f"{cluster.type} cluster {cluster.name}: {node.role}",
-            memory=res["memory"], vcpu=res["vcpu"], disk_size=res["disk_size"],
-            cloud_image_id=spec["cloud_image_id"], cloudinit_userdata=user_data,
-            network_name=cluster.network, mac_address=node.mac, os_type=spec.get("image"), start=False,
-        ))
+        # The driver's additions: lists (packages, runcmd, write_files) are appended
+        extra = driver.node_cloud_config(ctx, {"name": node.name, "role": node.role, "ip": node.ip, "first": first})
+        for key, value in extra.items():
+            config[key] = config[key] + value if isinstance(value, list) and isinstance(config.get(key), list) else value
         attrs = {"name": cluster.name, "type": cluster.type, "role": node.role, "ip": node.ip,
                  "domain": cluster.domain, "network": cluster.network,
                  "owned": "yes" if cluster.network_owned else "no", "cidr": spec.get("cidr") or "",
                  "image": spec.get("cloud_image_id") or "", "el": "yes" if spec.get("el") else "no",
                  "pod_cidr": spec.get("pod_cidr") or "", "service_cidr": spec.get("service_cidr") or "",
                  "version": cluster.version or ""}
-        xml = "<cluster " + " ".join(f"{k}={quoteattr(str(v))}" for k, v in attrs.items()) + "/>"
-        libvirt_client.set_vm_metadata(node.name, METADATA_URI, METADATA_KEY, xml)
+        metadata = (f"<{METADATA_KEY}:cluster xmlns:{METADATA_KEY}={quoteattr(METADATA_URI)} "
+                    + " ".join(f"{k}={quoteattr(str(v))}" for k, v in attrs.items()) + "/>")
+        vm_service.create_vm(
+            db, VMCreate(
+                name=node.name, description=f"{cluster.type} cluster {cluster.name}: {node.role}",
+                memory=res["memory"], vcpu=res["vcpu"], disk_size=res["disk_size"],
+                cloud_image_id=spec["cloud_image_id"], network_name=cluster.network, mac_address=node.mac,
+                os_type=spec.get("image"), start=False,
+            ),
+            fqdn=fqdn, user_data="#cloud-config\n" + yaml.safe_dump(config, sort_keys=False), metadata_xml=metadata,
+        )
 
     def _sleep(self, task: Task, seconds: float) -> None:
         end = time.monotonic() + seconds
@@ -432,14 +438,14 @@ class ClusterService:
 
     def _wait_agent(self, task: Task, vm_name: str, timeout: float = AGENT_TIMEOUT) -> None:
         deadline = time.monotonic() + timeout
-        while not libvirt_client.guest_ping(vm_name):
+        while not libvirt_client.agent_ping(vm_name):
             if time.monotonic() > deadline:
                 raise TimeoutError(f"The QEMU guest agent of {vm_name} did not answer within "
                                    f"{timeout // 60:.0f} min (is qemu-guest-agent installed? check the console)")
             self._sleep(task, 5)
 
     def _exec(self, vm_name: str, argv: List[str], timeout: float = 60) -> Dict[str, Any]:
-        return libvirt_client.guest_exec(vm_name, argv, timeout)
+        return libvirt_client.agent_exec(vm_name, argv[0], argv[1:], timeout=timeout)
 
     def _wait_ready(self, db: Session, task: Task, cluster: Cluster, progress_from: int, progress_to: int,
                     timeout: float = READY_TIMEOUT, fresh: bool = False) -> Dict[str, Any]:

@@ -150,14 +150,19 @@ class CloudImageService:
 
     def build_user_data(self, hostname: str, username: Optional[str], password: Optional[str],
                         ssh_keys: List[str], custom: Optional[str], keyboard: Optional[str] = None,
-                        extra: Optional[Dict[str, Any]] = None) -> str:
-        """#cloud-config for a new VM. `extra` is merged in: lists are appended
-        (packages, runcmd, write_files...), other keys are set."""
+                        fqdn: Optional[str] = None) -> str:
         if custom and custom.strip():
             return custom
+        config = self.build_cloud_config(hostname, username, password, ssh_keys, keyboard, fqdn)
+        return "#cloud-config\n" + yaml.safe_dump(config, sort_keys=False)
+
+    def build_cloud_config(self, hostname: str, username: Optional[str], password: Optional[str],
+                           ssh_keys: List[str], keyboard: Optional[str] = None,
+                           fqdn: Optional[str] = None) -> Dict[str, Any]:
+        """#cloud-config as a dict (users, keyboard, guest agent), for callers that extend it"""
         config: Dict[str, Any] = {
             "hostname": hostname,
-            "fqdn": hostname,
+            "fqdn": fqdn or hostname,
             "manage_etc_hosts": True,
             "package_update": True,
             "packages": ["qemu-guest-agent"],
@@ -183,20 +188,18 @@ class CloudImageService:
             config["ssh_pwauth"] = bool(password)
         elif ssh_keys:
             config["ssh_authorized_keys"] = ssh_keys
-        for key, value in (extra or {}).items():
-            if isinstance(value, list) and isinstance(config.get(key), list):
-                config[key] = config[key] + value
-            else:
-                config[key] = value
-        return "#cloud-config\n" + yaml.safe_dump(config, sort_keys=False)
+        return config
 
-    def build_seed_iso(self, hostname: str, user_data: str) -> bytes:
-        """NoCloud seed: ISO9660 volume labelled 'cidata' with user-data and meta-data"""
+    def build_seed_iso(self, hostname: str, user_data: str, network_config: Optional[str] = None) -> bytes:
+        """NoCloud seed: ISO9660 volume labelled 'cidata' with user-data, meta-data
+        and optionally network-config (cloud-init network config v2)"""
         meta_data = f"instance-id: {hostname}-{uuid.uuid4().hex[:8]}\nlocal-hostname: {hostname}\n"
         iso = pycdlib.PyCdlib()
         iso.new(interchange_level=3, joliet=3, rock_ridge="1.09", vol_ident="cidata")
-        for iso_name, name, content in (("USERDATA.;1", "user-data", user_data),
-                                        ("METADATA.;1", "meta-data", meta_data)):
+        files = [("USERDATA.;1", "user-data", user_data), ("METADATA.;1", "meta-data", meta_data)]
+        if network_config:
+            files.append(("NETWORK.;1", "network-config", network_config))
+        for iso_name, name, content in files:
             data = content.encode()
             iso.add_fp(io.BytesIO(data), len(data), f"/{iso_name}", rr_name=name, joliet_path=f"/{name}")
         out = io.BytesIO()

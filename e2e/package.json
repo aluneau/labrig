@@ -8,7 +8,8 @@
     "full": "node full.js",
     "network": "node netedit.js",
     "iso": "node iso.js",
-    "keyboard": "node kbd.js"
+    "keyboard": "node kbd.js",
+    "groups": "node groups.js"
   },
   "dependencies": {
     "playwright-core": "^1"

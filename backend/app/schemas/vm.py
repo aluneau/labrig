@@ -1,6 +1,6 @@
 """VM schemas"""
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 
@@ -65,9 +65,60 @@ class VM(VMBase):
 
 
 class VMDisk(BaseModel):
-    device: Optional[str] = None
+    device: Optional[str] = None  # disk | cdrom
     path: Optional[str] = None
+    target: Optional[str] = None  # vda, sda, ...
+    bus: Optional[str] = None
+    format: Optional[str] = None
+    capacity: Optional[int] = None  # bytes (disks only)
+    boot: bool = False  # the boot disk (can't be detached)
+    # Running VM only: "attach" = in the saved config, appears at next start;
+    # "detach" = removed from the saved config, still plugged until the guest releases it / next shutdown
+    pending: Optional[str] = None
+
+
+class VMCdrom(BaseModel):
     target: Optional[str] = None
+    path: Optional[str] = None  # inserted ISO, None = empty
+    pending: bool = False  # the CD-ROM was added while running: exists from the next start
+
+
+BootDevice = Literal["hd", "cdrom", "network"]
+
+
+class VMBoot(BaseModel):
+    order: List[str]  # persistent order (next cold start)
+    once: Optional[List[str]] = None  # one-shot order for the next start through this app
+
+
+class VMBootUpdate(BaseModel):
+    """order alone: persistent order. once=true: use order (default cdrom, hd) for the next start
+    only. once=false: cancel a pending one-shot boot (and set order if given)."""
+    order: Optional[List[BootDevice]] = Field(None, min_length=1)
+    once: Optional[bool] = None
+
+
+class VMCdromUpdate(BaseModel):
+    iso_path: Optional[str] = None  # None = eject
+
+
+class VMDiskCreate(BaseModel):
+    size_gb: int = Field(..., ge=1, le=65536)
+    pool: Optional[str] = None  # default: settings.DEFAULT_POOL_NAME
+    format: Literal["qcow2", "raw"] = "qcow2"
+    bus: Literal["virtio", "sata"] = "virtio"
+
+
+class VMDiskResize(BaseModel):
+    size_gb: int = Field(..., ge=1, le=65536)
+
+
+class DeviceChange(BaseModel):
+    """Result of a CD-ROM / boot / disk change"""
+    message: str
+    pending: bool = False  # True = applies at the next start / shutdown, not now
+    target: Optional[str] = None
+    path: Optional[str] = None
 
 
 class VMInterface(BaseModel):
@@ -95,6 +146,8 @@ class VMDetail(VM):
     interfaces: List[VMInterface] = []
     nics: List[VMNic] = []
     console: Optional[VMConsole] = None
+    cdrom: Optional[VMCdrom] = None
+    boot: Optional[VMBoot] = None
     xml_config: Optional[str] = None
 
 
