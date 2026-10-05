@@ -78,7 +78,7 @@ const Kubectl: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
         {!usable && !output && <>The cluster is {cluster.status}.</>}
         {output && (
           <CodeBlock>
-            <CodeBlockCode id="kubectl-output">{output.exitcode === 0 ? output.stdout : (output.stderr || output.stdout)}</CodeBlockCode>
+            <CodeBlockCode id="kubectl-output" style={{ whiteSpace: 'pre', overflowX: 'auto', display: 'block' }}>{output.exitcode === 0 ? output.stdout : (output.stderr || output.stdout)}</CodeBlockCode>
           </CodeBlock>
         )}
       </CardBody>

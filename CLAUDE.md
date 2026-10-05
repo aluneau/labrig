@@ -36,15 +36,16 @@ backend/app/
   database.py         SQLite (WAL, one connection per session), @serialized lock for libvirt->DB mirroring
   libvirt_client.py   ALL libvirt calls; event loop thread + lifecycle callbacks -> event_bus; domain XML template
   events.py           thread-safe EventBus -> asyncio queues (SSE)
-  services/           vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host
+  services/           vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
+                      cluster (k3s; + cluster_drivers per type, cluster_network = pluggable node network)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE)
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Host, Tasks
+  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal, console/VncConsole
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _cluster
 examples/opentofu/lab tofu example (network with DHCP reservations + 2 Debian VMs)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
@@ -79,6 +80,13 @@ e2e/                  Playwright browser tests against the real app (see below)
 - Test installs in fresh nested VMs created with the app itself (nested KVM is enabled on this host).
 
 ## Gotchas
+
+- Clusters talk to nodes only through the QEMU guest agent (guest-exec): no SSH key, no route needed.
+  EL's qemu-ga forbids guest-exec and is SELinux-confined: cluster nodes get `/etc/sysconfig/qemu-ga`
+  with empty filters + a CIL module making `virt_qemu_ga_t` permissive. Right after a restart the
+  Kubernetes API still shows the pre-shutdown `Ready`: compare `lastHeartbeatTime` with the boot time.
+- SQLAlchemy flushes INSERTs before DELETEs: `flush()` after deleting mirrored rows, or a name reused by
+  a re-created VM hits `UNIQUE(name)`.
 
 - noVNC must stay at **1.4.x** (`@novnc/novnc/lib/rfb`): 1.5+ uses top-level await, which CRA can't build.
 - `npm` needs `--legacy-peer-deps`. Build with `CI=true npx react-scripts build` to catch lint warnings.

@@ -14,6 +14,9 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Storage**: pools, volumes, ISO upload or download from URL.
 - **Networks**: create NAT / routed / isolated networks, start/stop, autostart; edit subnet, DHCP range,
   domain and forward mode; static DHCP reservations (applied live, "make static" from a lease); raw XML editor.
+- **Kubernetes clusters (k3s)**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image, on
+  their own NAT network with fixed addresses and DNS (`api.<cluster>.<domain>`); ready in ~2 minutes;
+  kubeconfig download (works from the host), `kubectl get nodes/pods` in the UI, start/stop, add/remove workers.
 - **OpenTofu provider** (`opentofu_provider/`) with examples in `examples/opentofu/`.
 - **Tasks**: progress of background downloads, with cancel.
 
@@ -86,6 +89,7 @@ Environment variables or `backend/.env`:
 | `DEFAULT_NETWORK` | `default` | Network for new VMs |
 | `VNC_LISTEN` | `127.0.0.1` | `0.0.0.0` exposes VM consoles (no password) to the LAN |
 | `DATABASE_URL` | `sqlite:///backend/data/vmanager.db` | |
+| `CLUSTER_SUBNET_POOL` | `10.43.0.0/16` | New cluster networks get the first free /24 of it |
 
 VNC servers listen on localhost; the web console reaches them through the backend's WebSocket bridge,
 so nothing else needs to be exposed.
@@ -96,6 +100,7 @@ so nothing else needs to be exposed.
 make -C opentofu_provider install
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
+cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
 ```
 
 See `opentofu_provider/README.md` for all resources and arguments.
@@ -103,7 +108,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 ## Tests
 
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
-`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`).
+`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
+`clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
 
 ## API overview
 
@@ -120,6 +126,8 @@ See `opentofu_provider/README.md` for all resources and arguments.
 | `WS /api/v1/vms/{id}/vnc` | VNC console (WebSocket) |
 | `GET /api/v1/networks/{id}/config`, `PUT /api/v1/networks/{id}`, `PUT …/xml`, `POST/PUT/DELETE …/hosts` | Network editing, DHCP reservations |
 | `GET /api/v1/hosts/info`, `GET /api/v1/hosts/resources` | Host info and setup issues |
+| `GET/POST /api/v1/clusters`, `GET/DELETE …/{id}`, `POST …/{id}/{start,stop}` | Kubernetes clusters (create/start/stop are tasks) |
+| `GET …/clusters/{id}/kubeconfig`, `GET …/{id}/kubectl/{nodes,pods}`, `POST …/{id}/workers`, `DELETE …/{id}/nodes/{name}` | Kubeconfig, kubectl views, scaling |
 
 Full interactive docs: `/docs`.
 
