@@ -200,3 +200,103 @@ def set_boot_order(root: ET.Element, order: List[str]) -> None:
             boot = ET.Element("boot", {"dev": kind})
             boot.tail = (os_el.text or "\n")
             os_el.insert(index + offset, boot)
+
+
+# Network interfaces (NICs), identified by MAC address
+
+# Emulated NIC models offered by the app (QEMU device names). igb = Intel 82576 with SR-IOV
+# (VFs created in the guest through sriov_numvfs), e1000e = Intel 82574, rtl8139 for old guests.
+NIC_MODELS = ("virtio", "e1000e", "igb", "e1000", "rtl8139")
+
+
+def interface_elements(root: ET.Element) -> List[ET.Element]:
+    return root.findall("./devices/interface")
+
+
+def _mac(iface: ET.Element) -> Optional[str]:
+    mac = iface.find("mac")
+    return (mac.get("address", "").lower() or None) if mac is not None else None
+
+
+def find_interface(root: ET.Element, mac: str) -> Optional[ET.Element]:
+    for iface in interface_elements(root):
+        if _mac(iface) == mac.lower():
+            return iface
+    return None
+
+
+def nic_info(iface: ET.Element) -> Dict[str, Any]:
+    source = iface.find("source")
+    model = iface.find("model")
+    link = iface.find("link")
+    target = iface.find("target")
+    alias = iface.find("alias")
+    network = None
+    if source is not None:
+        network = source.get("network") or source.get("bridge") or source.get("dev")
+    return {
+        "mac": _mac(iface),
+        "type": iface.get("type"),  # network | bridge | direct | hostdev ...
+        "network": network,
+        "model": model.get("type") if model is not None else None,
+        "link_state": link.get("state", "up") if link is not None else "up",
+        "device": target.get("dev") if target is not None else None,  # host tap (vnetN), running only
+        "alias": alias.get("name") if alias is not None else None,
+    }
+
+
+def nic_xml(network: str, model: Optional[str] = "virtio", mac: Optional[str] = None,
+            link_state: Optional[str] = None) -> str:
+    """<interface type='network'>. model=None for hostdev (SR-IOV VF pool) networks: the guest
+    gets the VF itself, there is no emulated model."""
+    mac_xml = f"<mac address={quoteattr(mac.lower())}/>" if mac else ""
+    model_xml = f"<model type={quoteattr(model)}/>" if model else ""
+    link_xml = f"<link state={quoteattr(link_state)}/>" if link_state and link_state != "up" else ""
+    return (f"<interface type='network'>{mac_xml}<source network={quoteattr(network)}/>"
+            f"{model_xml}{link_xml}</interface>")
+
+
+def nic_update_xml(iface: ET.Element, link_state: Optional[str] = None, network: Optional[str] = None) -> str:
+    """Copy of an interface element with a new link state and/or source network, for updateDeviceFlags"""
+    el = ET.fromstring(ET.tostring(iface))
+    if link_state:
+        link = el.find("link")
+        if link is None:
+            link = ET.SubElement(el, "link")
+        link.set("state", link_state)
+    if network:
+        source = el.find("source")
+        if source is None:
+            source = ET.SubElement(el, "source")
+        source.attrib.clear()
+        source.set("network", network)
+        el.set("type", "network")
+    return ET.tostring(el, encoding="unicode")
+
+
+# Virtual IOMMU (intel-iommu): needed to pass devices (e.g. SR-IOV VFs) through to vfio in the guest.
+# Interrupt remapping needs QEMU's split irqchip (<ioapic driver='qemu'/>); caching_mode lets the
+# guest assign devices to vfio / its own VMs; iotlb = device IOTLB for vhost / ATS-capable devices.
+
+IOMMU_XML = "<iommu model='intel'><driver intremap='on' caching_mode='on' iotlb='on'/></iommu>"
+
+
+def has_iommu(root: ET.Element) -> bool:
+    return root.find("./devices/iommu") is not None
+
+
+def set_iommu(root: ET.Element, enabled: bool) -> None:
+    """Add / remove the vIOMMU (and the split irqchip it needs) in a domain definition, in place"""
+    devices = root.find("devices")
+    features = root.find("features")
+    for el in devices.findall("iommu"):
+        devices.remove(el)
+    if features is not None:
+        for el in features.findall("ioapic"):
+            features.remove(el)
+    if not enabled:
+        return
+    if features is None:
+        features = ET.SubElement(root, "features")
+    ET.SubElement(features, "ioapic", {"driver": "qemu"})
+    devices.append(ET.fromstring(IOMMU_XML))

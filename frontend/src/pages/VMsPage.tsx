@@ -23,7 +23,7 @@ import {
 import { ActionsColumn, ExpandableRowContent, IAction, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { DesktopIcon, VirtualMachineIcon } from '@patternfly/react-icons';
 import { DeviceChange, VM, VMDetail, VMPowerAction } from '../types';
-import { BootControl, CdromControl, DisksTable } from '../components/vms/VmDevices';
+import { BootControl, CdromControl, DisksTable, IommuControl, NicsTable } from '../components/vms/VmDevices';
 import { vmApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { useLiveEvents } from '../hooks/useEvents';
@@ -120,6 +120,9 @@ const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: s
     </DescriptionList>
     <Title headingLevel="h4" size="md" style={{ margin: '16px 0 4px' }}>Disks</Title>
     <DisksTable vm={vm} onResult={onResult} onError={onError} />
+    <Title headingLevel="h4" size="md" style={{ margin: '16px 0 4px' }}>Network interfaces</Title>
+    <NicsTable vm={vm} onResult={onResult} onError={onError} />
+    <div style={{ marginTop: 12 }}><IommuControl vm={vm} onResult={onResult} onError={onError} /></div>
     </>
   );
 };

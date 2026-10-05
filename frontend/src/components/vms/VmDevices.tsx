@@ -16,8 +16,8 @@ import {
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { AngleDownIcon, AngleUpIcon, EjectIcon } from '@patternfly/react-icons';
-import { BootDevice, DeviceChange, ISOImage, VMDetail, VMDisk } from '../../types';
-import { storageApi, vmApi } from '../../services/api';
+import { BootDevice, DeviceChange, ISOImage, Network, NicModel, VMDetail, VMDisk, VMNic } from '../../types';
+import { networkApi, storageApi, vmApi } from '../../services/api';
 import { errorText, formatBytes } from '../../utils/format';
 
 /** Called with the API's result (its message says whether the change is live or pending) */
@@ -297,5 +297,227 @@ export const DisksTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: O
           isChecked={deleteVolume} onChange={(_e, v) => setDeleteVolume(v)} />
       </Modal>
     </>
+  );
+};
+
+export const NIC_MODELS: [NicModel, string][] = [
+  ['virtio', 'virtio (paravirtualized, fastest)'],
+  ['e1000e', 'Intel 82574 (e1000e)'],
+  ['igb', 'Intel 82576 (igb) — emulated SR-IOV, up to 7 VFs'],
+  ['e1000', 'Intel 82540EM (e1000, legacy)'],
+  ['rtl8139', 'Realtek RTL8139 (legacy)'],
+];
+
+/** Network dropdown label: SR-IOV VF pools (forward mode hostdev) say which PF they hand VFs from */
+export const networkLabel = (n: Network) =>
+  n.forward_mode === 'hostdev'
+    ? `${n.name} — SR-IOV VF pool (${n.forward_dev || '?'})${n.active ? '' : ' (inactive)'}`
+    : `${n.name}${n.active ? '' : ' (inactive)'}`;
+
+const MAC_RE = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+
+/** NICs table with Add / link up-down / change network / Remove */
+export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: OnError }> = ({ vm, onResult, onError }) => {
+  const [networks, setNetworks] = useState<Network[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [moving, setMoving] = useState<VMNic | null>(null);
+  const [removing, setRemoving] = useState<VMNic | null>(null);
+  const [network, setNetwork] = useState('');
+  const [model, setModel] = useState<NicModel>('virtio');
+  const [mac, setMac] = useState('');
+  const [busy, setBusy] = useState(false);
+  const running = vm.status === 'running' || vm.status === 'paused';
+
+  const loadNetworks = () =>
+    networkApi.list().then((nets) => {
+      setNetworks(nets);
+      return nets;
+    }).catch((err) => { onError(errorText(err)); return [] as Network[]; });
+
+  const run = async (call: () => Promise<DeviceChange>) => {
+    setBusy(true);
+    try {
+      onResult(await call());
+      setAdding(false);
+      setMoving(null);
+      setRemoving(null);
+    } catch (err) {
+      onError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openAdd = async () => {
+    const nets = await loadNetworks();
+    setNetwork((nets.find((n) => n.name === 'default') || nets[0])?.name || '');
+    setModel('virtio');
+    setMac('');
+    setAdding(true);
+  };
+
+  const openMove = async (nic: VMNic) => {
+    await loadNetworks();
+    setNetwork(nic.network || '');
+    setMoving(nic);
+  };
+
+  const selected = networks.find((n) => n.name === network);
+  const vfPool = selected?.forward_mode === 'hostdev';
+  const ipsOf = (nic: VMNic) =>
+    vm.interfaces.filter((i) => i.mac && nic.mac && i.mac.toLowerCase() === nic.mac.toLowerCase()).flatMap((i) => i.addresses);
+  const macValid = !mac || MAC_RE.test(mac);
+
+  return (
+    <>
+      <Table aria-label={`Network interfaces of ${vm.name}`} variant="compact" borders={false}>
+        <Thead>
+          <Tr>
+            <Th>Network</Th>
+            <Th>Model</Th>
+            <Th>MAC</Th>
+            <Th>IP addresses</Th>
+            <Th>Link</Th>
+            <Th screenReaderText="Actions" />
+          </Tr>
+        </Thead>
+        <Tbody>
+          {vm.nics.map((nic) => {
+            const vf = nic.vf;
+            const ips = ipsOf(nic);
+            return (
+              <Tr key={nic.mac || nic.network}>
+                <Td dataLabel="Network">
+                  {nic.network || '—'}{' '}
+                  {nic.pending === 'attach' && <Label isCompact color="orange">attached at next start</Label>}
+                  {nic.pending === 'detach' && <Label isCompact color="orange">removal pending</Label>}
+                  {nic.pending === 'change' && <Label isCompact color="orange">change applies at next start</Label>}
+                </Td>
+                <Td dataLabel="Model">
+                  {vf ? <Label isCompact color="purple">SR-IOV VF</Label> : nic.model}
+                  {nic.model === 'igb' && <> <Label isCompact color="purple">SR-IOV PF</Label></>}
+                </Td>
+                <Td dataLabel="MAC"><code>{nic.mac}</code></Td>
+                <Td dataLabel="IP addresses">{ips.length ? ips.join(', ') : '—'}</Td>
+                <Td dataLabel="Link">
+                  <Switch
+                    id={`link-${vm.id}-${nic.mac}`}
+                    aria-label={`Link of ${nic.mac}`}
+                    label="up"
+                    labelOff="down"
+                    isChecked={nic.link_state !== 'down'}
+                    isDisabled={busy || vf || nic.pending === 'detach'}
+                    onChange={(_e, v) => nic.mac && run(() => vmApi.updateNic(vm.id, nic.mac!, { link_state: v ? 'up' : 'down' }))}
+                  />
+                </Td>
+                <Td isActionCell>
+                  <Button variant="link" size="sm" isInline isDisabled={vf || nic.pending === 'detach'}
+                    onClick={() => openMove(nic)}>Network…</Button>{' '}
+                  <Button variant="link" size="sm" isInline isDanger isDisabled={nic.pending === 'detach'}
+                    onClick={() => setRemoving(nic)}>Remove</Button>
+                </Td>
+              </Tr>
+            );
+          })}
+        </Tbody>
+      </Table>
+      <Button variant="secondary" size="sm" style={{ marginTop: 8 }} onClick={openAdd}>Add network interface</Button>
+
+      <Modal variant={ModalVariant.small} title={`Add a network interface to ${vm.name}`} isOpen={adding} onClose={() => setAdding(false)}
+        actions={[
+          <Button key="add" variant="primary" isLoading={busy} isDisabled={busy || !network || !macValid}
+            onClick={() => run(() => vmApi.addNic(vm.id, { network, model, mac: mac || undefined }))}>Add</Button>,
+          <Button key="cancel" variant="link" onClick={() => setAdding(false)}>Cancel</Button>,
+        ]}>
+        <Form onSubmit={(e) => e.preventDefault()}>
+          <FormGroup label="Network" isRequired fieldId="nic-network">
+            <FormSelect id="nic-network" value={network} onChange={(_e, v) => setNetwork(v)}>
+              {networks.map((n) => <FormSelectOption key={n.id} value={n.name} label={networkLabel(n)} />)}
+            </FormSelect>
+          </FormGroup>
+          <FormGroup label="Model" fieldId="nic-model">
+            <FormSelect id="nic-model" value={vfPool ? '' : model} isDisabled={vfPool} onChange={(_e, v) => setModel(v as NicModel)}>
+              {vfPool && <FormSelectOption value="" label="SR-IOV VF (passed through from the host)" />}
+              {NIC_MODELS.map(([value, label]) => <FormSelectOption key={value} value={value} label={label} />)}
+            </FormSelect>
+          </FormGroup>
+          <FormGroup label="MAC address (optional)" fieldId="nic-mac">
+            <TextInput id="nic-mac" value={mac} placeholder="generated" validated={macValid ? 'default' : 'error'}
+              onChange={(_e, v) => setMac(v.trim())} />
+          </FormGroup>
+          <div className="pf-v5-u-font-size-sm pf-v5-u-color-200">
+            {vfPool
+              ? 'libvirt hands the VM a free VF of this pool (PCI passthrough, needs an IOMMU on the host).'
+              : model === 'igb'
+                ? 'In the guest: echo 4 > /sys/class/net/<nic>/device/sriov_numvfs creates igbvf VFs. For vfio / DPDK, also enable the virtual IOMMU below.'
+                : ''}
+            {running ? ' The NIC is hot-plugged into the running VM.' : ''}
+          </div>
+        </Form>
+      </Modal>
+
+      <Modal variant={ModalVariant.small} title={`Move ${moving?.mac} to another network`} isOpen={!!moving} onClose={() => setMoving(null)}
+        actions={[
+          <Button key="move" variant="primary" isLoading={busy} isDisabled={busy || !network || network === moving?.network}
+            onClick={() => moving && run(() => vmApi.updateNic(vm.id, moving.mac!, { network }))}>Move</Button>,
+          <Button key="cancel" variant="link" onClick={() => setMoving(null)}>Cancel</Button>,
+        ]}>
+        <Form onSubmit={(e) => e.preventDefault()}>
+          <FormGroup label="Network" fieldId="nic-move-network">
+            <FormSelect id="nic-move-network" value={network} onChange={(_e, v) => setNetwork(v)}>
+              {networks.filter((n) => n.forward_mode !== 'hostdev').map((n) => (
+                <FormSelectOption key={n.id} value={n.name} label={networkLabel(n)} />
+              ))}
+            </FormSelect>
+          </FormGroup>
+          <div className="pf-v5-u-font-size-sm pf-v5-u-color-200">
+            {running ? 'The NIC is reconnected live; the guest keeps its interface but may need to renew its DHCP lease.' : ''}
+          </div>
+        </Form>
+      </Modal>
+
+      <Modal variant={ModalVariant.small} title={`Remove ${removing?.mac}?`} titleIconVariant="warning"
+        isOpen={!!removing} onClose={() => setRemoving(null)}
+        actions={[
+          <Button key="remove" variant="danger" isLoading={busy} isDisabled={busy}
+            onClick={() => removing && run(() => vmApi.removeNic(vm.id, removing.mac!))}>Remove</Button>,
+          <Button key="cancel" variant="link" onClick={() => setRemoving(null)}>Cancel</Button>,
+        ]}>
+        {running
+          ? 'The NIC is hot-unplugged. If the guest does not release it, it goes away at the next shutdown.'
+          : 'The NIC is removed from the VM configuration.'}
+      </Modal>
+    </>
+  );
+};
+
+/** Virtual IOMMU switch (saved config; applies at the next cold start) */
+export const IommuControl: React.FC<{ vm: VMDetail; onResult: OnResult; onError: OnError }> = ({ vm, onResult, onError }) => {
+  const [busy, setBusy] = useState(false);
+  const enabled = !!vm.iommu?.enabled;
+  const pending = vm.iommu?.active != null && vm.iommu.active !== enabled;
+  const change = async (on: boolean) => {
+    setBusy(true);
+    try {
+      onResult(await vmApi.setIommu(vm.id, on));
+    } catch (err) {
+      onError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
+      <FlexItem>
+        <Switch id={`iommu-${vm.id}`} label="Virtual IOMMU" isChecked={enabled} isDisabled={busy}
+          onChange={(_e, v) => change(v)} />
+      </FlexItem>
+      {pending && (
+        <FlexItem><Label color="orange" isCompact>applies after power off + start</Label></FlexItem>
+      )}
+      <FlexItem className="pf-v5-u-font-size-sm pf-v5-u-color-200">
+        Needed for VF passthrough / vfio in the guest (boot it with intel_iommu=on iommu=pt)
+      </FlexItem>
+    </Flex>
   );
 };

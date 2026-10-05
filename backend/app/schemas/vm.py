@@ -39,6 +39,13 @@ class VMCreate(VMBase):
     network_name: Optional[str] = None
     # Fixed MAC (e.g. to match a static DHCP reservation); libvirt picks one if unset
     mac_address: Optional[str] = Field(None, pattern=r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
+    # More NICs after the first one (e.g. an igb NIC for SR-IOV labs)
+    extra_nics: List["VMNicCreate"] = Field([], max_length=15)
+    # Virtual IOMMU (intel-iommu), needed for vfio / VF passthrough inside the guest
+    iommu: bool = False
+    # Cloud images: appended to the guest kernel command line at first boot (then one reboot),
+    # e.g. "intel_iommu=on iommu=pt" for vfio in the guest
+    guest_kernel_args: Optional[str] = Field(None, max_length=512, pattern=r"^[A-Za-z0-9_.,:=/+ -]*$")
 
     autostart: bool = False
     start: bool = False
@@ -127,9 +134,44 @@ class VMInterface(BaseModel):
     addresses: List[str] = []
 
 
+NicModel = Literal["virtio", "e1000e", "igb", "e1000", "rtl8139"]
+LinkState = Literal["up", "down"]
+MAC_PATTERN = r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+
+
 class VMNic(BaseModel):
-    network: Optional[str] = None
+    network: Optional[str] = None  # libvirt network (or bridge / host device for other types)
     mac: Optional[str] = None
+    type: Optional[str] = None  # network | bridge | direct | hostdev ...
+    model: Optional[str] = None  # virtio, e1000e, igb ...; None for SR-IOV VFs (hostdev networks)
+    link_state: str = "up"  # "down" = cable unplugged
+    device: Optional[str] = None  # host tap device while running (vnetN)
+    vf: bool = False  # an SR-IOV VF passed through from the host (VF pool network)
+    # Running VM only: "attach" = appears at next start, "detach" = goes away when the guest releases it,
+    # "change" = network / link state saved for the next start differ from the running ones
+    pending: Optional[str] = None
+
+
+class VMNicCreate(BaseModel):
+    network: str = Field(..., min_length=1)
+    # Ignored for SR-IOV VF pool networks (forward mode hostdev): the guest gets the VF itself
+    model: NicModel = "virtio"
+    mac: Optional[str] = Field(None, pattern=MAC_PATTERN)
+    link_state: LinkState = "up"
+
+
+class VMNicUpdate(BaseModel):
+    link_state: Optional[LinkState] = None
+    network: Optional[str] = Field(None, min_length=1)
+
+
+class VMIommu(BaseModel):
+    enabled: bool = False  # in the saved config
+    active: Optional[bool] = None  # in the running instance (None = shut off)
+
+
+class VMIommuUpdate(BaseModel):
+    enabled: bool
 
 
 class VMConsole(BaseModel):
@@ -145,6 +187,7 @@ class VMDetail(VM):
     disks: List[VMDisk] = []
     interfaces: List[VMInterface] = []
     nics: List[VMNic] = []
+    iommu: Optional[VMIommu] = None
     console: Optional[VMConsole] = None
     cdrom: Optional[VMCdrom] = None
     boot: Optional[VMBoot] = None
@@ -176,3 +219,6 @@ class VMTemplate(VMTemplateBase):
     cloudinit_defaults: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: datetime
+
+
+VMCreate.model_rebuild()

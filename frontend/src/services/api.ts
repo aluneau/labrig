@@ -5,7 +5,8 @@ import {
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
-  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
+  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
+  VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -77,6 +78,12 @@ export const vmApi = {
     request<DeviceChange>(`/vms/${id}/disks/${target}`, { method: 'PUT', body: JSON.stringify({ size_gb: sizeGb }) }),
   detachDisk: (id: number, target: string, deleteVolume: boolean) =>
     del<DeviceChange>(`/vms/${id}/disks/${target}?delete_volume=${deleteVolume}`),
+  addNic: (id: number, data: VMNicCreate) => post<DeviceChange>(`/vms/${id}/nics`, data),
+  updateNic: (id: number, mac: string, data: VMNicUpdate) =>
+    request<DeviceChange>(`/vms/${id}/nics/${encodeURIComponent(mac)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  removeNic: (id: number, mac: string) => del<DeviceChange>(`/vms/${id}/nics/${encodeURIComponent(mac)}`),
+  setIommu: (id: number, enabled: boolean) =>
+    request<DeviceChange>(`/vms/${id}/iommu`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
 };
 
 export const storageApi = {
@@ -144,6 +151,14 @@ export const groupApi = {
   routerConfig: (id: number) => request<RouterConfig>(`/groups/${id}/router/config`),
   applyRouterConfig: (id: number) => post<GroupDetail>(`/groups/${id}/router/apply`),
   exportSpec: (id: number) => request<{ yaml: string; spec: GroupSpec }>(`/groups/${id}/export`),
+  addDhcpHost: (id: number, host: GroupDHCPHost) => post<GroupDetail>(`/groups/${id}/dhcp-hosts`, host),
+  updateDhcpHost: (id: number, mac: string, host: GroupDHCPHost) =>
+    request<GroupDetail>(`/groups/${id}/dhcp-hosts/${encodeURIComponent(mac)}`, { method: 'PUT', body: JSON.stringify(host) }),
+  deleteDhcpHost: (id: number, mac: string, releaseLease = false) =>
+    del<GroupDetail>(`/groups/${id}/dhcp-hosts/${encodeURIComponent(mac)}?release_lease=${releaseLease}`),
+  leases: (id: number) => request<GroupLease[]>(`/groups/${id}/leases`),
+  releaseLease: (id: number, mac: string, force = false) =>
+    del<LeaseRelease>(`/groups/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
 };
 
 export const taskApi = {
@@ -169,6 +184,9 @@ export const clusterApi = {
 export const hostApi = {
   info: () => request<HostInfo>('/hosts/info'),
   resources: () => request<HostResources>('/hosts/resources'),
+  sriov: () => request<SriovStatus>('/hosts/sriov'),
+  setNumVfs: (pf: string, numVfs: number) =>
+    request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),
 };
 
 export const libvirtApi = {

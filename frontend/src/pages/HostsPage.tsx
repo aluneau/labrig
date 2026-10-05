@@ -19,6 +19,7 @@ import { usePolling } from '../hooks/usePolling';
 import { formatBytes } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
 import { LibvirtCard } from '../components/host/LibvirtCard';
+import { SriovCard } from '../components/host/SriovCard';
 import { useLibvirt } from '../hooks/useLibvirt';
 
 const Item: React.FC<{ term: string; children: React.ReactNode }> = ({ term, children }) => (
@@ -47,6 +48,7 @@ export const HostsPage: React.FC = () => {
 /** Needs libvirt: only mounted while it runs */
 const HostDetails: React.FC = () => {
   const { data: host, error, loading } = usePolling(hostApi.info, 15000);
+  const { data: sriov, reload: reloadSriov } = usePolling(hostApi.sriov, 30000);
 
   if (loading) return <Bullseye><Spinner size="xl" /></Bullseye>;
 
@@ -96,6 +98,7 @@ const HostDetails: React.FC = () => {
             </Card>
           </Gallery>
         )}
+        {host && <div style={{ marginTop: 16 }}><SriovCard status={sriov} reload={reloadSriov} /></div>}
       </PageSection>
     </>
   );

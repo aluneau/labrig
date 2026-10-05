@@ -59,6 +59,8 @@ Computed: `id`, `bridge`, `active`. Settings changes restart the network.
 | `wait_for_ip` | `false` | wait up to 5 min for a DHCP address |
 | `boot_order` | computed, in place | list of `hd`, `cdrom`, `network`; applies at the next start |
 | `cdrom` | computed, in place | ISO volume path in the CD-ROM drive, `""` = empty (live when running) |
+| `iommu` | `false`, in place | virtual IOMMU (vfio / VF passthrough in the guest); applies after a power off + start (warning) |
+| `guest_kernel_args` | optional, replace | cloud images: added to the kernel command line at first boot, e.g. `intel_iommu=on iommu=pt` |
 
 Computed: `id`, `uuid`, `status`, `ip_addresses`, `vnc_port`. Destroy deletes the VM's disks.
 
@@ -72,6 +74,20 @@ Computed: `id`, `uuid`, `status`, `ip_addresses`, `vnc_port`. Destroy deletes th
 Computed: `id` (`<vm_id>/<target>`), `target` (vdb, …), `path`. Hot-plugged when the VM runs. Destroy
 detaches it and deletes the volume.
 
+### `vmmanager_nic`
+| Argument | | |
+|---|---|---|
+| `vm_id` | required, replace | |
+| `network` | required, in place | live reconnect; not to / from an SR-IOV VF pool |
+| `model` | `virtio`, replace | `virtio`, `e1000e`, `igb` (emulated SR-IOV, 7 VFs), `e1000`, `rtl8139`; ignored on VF pools |
+| `mac` | generated, replace | |
+| `link_state` | `up`, in place | `down` = cable unplugged (live) |
+
+Computed: `id` (`<vm_id>/<mac>`), `vf` (an SR-IOV VF from a VF pool network). Hot-plugged when the VM runs;
+destroy hot-unplugs it. A separate resource (like `vmmanager_disk`) rather than blocks on `vmmanager_vm`, so
+adding / removing a NIC never touches the VM (whose hardware attributes force a replacement). Example:
+`examples/opentofu/sriov`.
+
 ### `vmmanager_group`
 A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS, NAT), members `<name>-<member>`.
 | Argument | | |
@@ -84,6 +100,7 @@ A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS,
 | `dns_forwarders` | uplink's DNS, in place | |
 | `member` blocks | in place | `name`, `image` (`debian-13`), `memory` (1024), `vcpu` (1), `disk_size` (10), `role`, `ip` (assigned if unset). Added/removed live; changing image/size recreates that member |
 | `dns_record` blocks | in place, live | `name` (relative to `domain`, `*.x` wildcards), `a` or `cname` |
+| `dhcp_host` blocks | in place, live | static reservation for a non-member machine (e.g. a `vmmanager_vm` on `network_name`): `mac`, `ip` (in `cidr`, not the router's/a member's), optional `hostname` (→ `<hostname>.<domain>`) |
 | `running` | `true`, in place | start (router first) / stop (router last) |
 
 Computed: `id`, `network_name`, `router_ip`, `router_vm_id`, `member_ips`, `member_macs`, `member_vm_ids`

@@ -18,8 +18,9 @@ import {
   TextInput,
 } from '@patternfly/react-core';
 import { ActionsColumn, ExpandableRowContent, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { Network, NetworkDetail } from '../types';
-import { networkApi } from '../services/api';
+import { Network, NetworkDetail, SriovStatus } from '../types';
+import { hostApi, networkApi } from '../services/api';
+import { NumVfsControl } from '../components/host/SriovCard';
 import { usePolling } from '../hooks/usePolling';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatDate } from '../utils/format';
@@ -55,11 +56,22 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
   const [autostart, setAutostart] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sriov, setSriov] = useState<SriovStatus | null>(null);
+  const [pf, setPf] = useState('');
+  const vfPool = mode === 'hostdev';
+
+  const loadSriov = () =>
+    hostApi.sriov().then((s) => {
+      setSriov(s);
+      setPf((cur) => cur || s.pfs[0]?.name || '');
+    }).catch((err) => setError(errorText(err)));
 
   const submit = async () => {
     setBusy(true);
     try {
-      await networkApi.create({ name, forward_mode: mode, ip_address: ip, prefix: Number(prefix), dhcp_enabled: dhcp, autostart });
+      await networkApi.create(vfPool
+        ? { name, forward_mode: 'hostdev', forward_dev: pf, dhcp_enabled: false, autostart }
+        : { name, forward_mode: mode, ip_address: ip, prefix: Number(prefix), dhcp_enabled: dhcp, autostart });
       setName('');
       onDone();
       onClose();
@@ -73,7 +85,7 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
   return (
     <Modal variant={ModalVariant.small} title="Create network" isOpen={isOpen} onClose={onClose}
       actions={[
-        <Button key="ok" onClick={submit} isDisabled={!name || !ip || busy} isLoading={busy}>Create</Button>,
+        <Button key="ok" onClick={submit} isDisabled={!name || (vfPool ? !pf : !ip) || busy} isLoading={busy}>Create</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); submit(); }}>
@@ -82,13 +94,43 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
           <TextInput id="net-name" value={name} onChange={(_e, v) => setName(v)} />
         </FormGroup>
         <FormGroup label="Mode" fieldId="net-mode">
-          <FormSelect id="net-mode" value={mode} onChange={(_e, v) => setMode(v)}>
+          <FormSelect id="net-mode" value={mode} onChange={(_e, v) => { setMode(v); if (v === 'hostdev') loadSriov(); }}>
             <FormSelectOption value="nat" label="NAT (VMs reach outside through the host)" />
             <FormSelectOption value="route" label="Routed" />
             <FormSelectOption value="isolated" label="Isolated (VMs and host only)" />
+            <FormSelectOption value="hostdev" label="SR-IOV VF pool (VFs of a host NIC passed through to VMs)" />
           </FormSelect>
         </FormGroup>
-        <Grid hasGutter>
+        {vfPool && sriov && (
+          <>
+            {!sriov.iommu.enabled && <Alert variant="warning" isInline title="No IOMMU on this host">{sriov.iommu.message}</Alert>}
+            {sriov.pfs.length === 0 ? (
+              <Alert variant="info" isInline title="No SR-IOV capable NIC on this host">
+                Use an igb NIC on a VM instead (emulated SR-IOV inside the guest).
+              </Alert>
+            ) : (
+              <>
+                <FormGroup label="Physical function (PF)" isRequired fieldId="net-pf">
+                  <FormSelect id="net-pf" value={pf} onChange={(_e, v) => setPf(v)}>
+                    {sriov.pfs.map((p) => (
+                      <FormSelectOption key={p.name} value={p.name}
+                        label={`${p.name} (${p.driver}, ${p.vendor_id}:${p.device_id}) — ${p.num_vfs}/${p.total_vfs} VFs`} />
+                    ))}
+                  </FormSelect>
+                </FormGroup>
+                {sriov.pfs.filter((p) => p.name === pf).map((p) => (
+                  <FormGroup key={p.name} label="VFs enabled on this PF" fieldId={`numvfs-${p.name}`}>
+                    <NumVfsControl pf={p} onDone={loadSriov} onError={setError} />
+                  </FormGroup>
+                ))}
+                <div className="pf-v5-u-font-size-sm pf-v5-u-color-200">
+                  Each VM NIC on this network gets a free VF as a PCI device (managed: bound to vfio-pci while the VM runs).
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {!vfPool && <Grid hasGutter>
           <GridItem span={8}>
             <FormGroup label="Host address" isRequired fieldId="net-ip">
               <TextInput id="net-ip" value={ip} onChange={(_e, v) => setIp(v)} />
@@ -99,8 +141,8 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
               <TextInput id="net-prefix" type="number" min={8} max={30} value={prefix} onChange={(_e, v) => setPrefix(v)} />
             </FormGroup>
           </GridItem>
-        </Grid>
-        <Checkbox id="net-dhcp" label="DHCP (whole subnet)" isChecked={dhcp} onChange={(_e, v) => setDhcp(v)} />
+        </Grid>}
+        {!vfPool && <Checkbox id="net-dhcp" label="DHCP (whole subnet)" isChecked={dhcp} onChange={(_e, v) => setDhcp(v)} />}
         <Checkbox id="net-autostart" label="Autostart" isChecked={autostart} onChange={(_e, v) => setAutostart(v)} />
       </Form>
     </Modal>

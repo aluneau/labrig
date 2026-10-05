@@ -150,11 +150,27 @@ class CloudImageService:
 
     def build_user_data(self, hostname: str, username: Optional[str], password: Optional[str],
                         ssh_keys: List[str], custom: Optional[str], keyboard: Optional[str] = None,
-                        fqdn: Optional[str] = None) -> str:
+                        fqdn: Optional[str] = None, kernel_args: Optional[str] = None) -> str:
+        """kernel_args: appended to the guest kernel command line, then one reboot at the end of the
+        first boot (ignored with custom user-data)"""
         if custom and custom.strip():
             return custom
         config = self.build_cloud_config(hostname, username, password, ssh_keys, keyboard, fqdn)
+        if kernel_args and kernel_args.strip():
+            self.add_kernel_args(config, kernel_args.strip())
         return "#cloud-config\n" + yaml.safe_dump(config, sort_keys=False)
+
+    @staticmethod
+    def add_kernel_args(config: Dict[str, Any], kernel_args: str) -> None:
+        """Add kernel arguments (validated by the API: no quotes / shell characters) through grubby on
+        EL / Fedora, or a /etc/default/grub.d drop-in + update-grub on Debian / Ubuntu, and reboot once
+        when cloud-init is done so they take effect."""
+        config.setdefault("runcmd", []).append(
+            f"if command -v grubby >/dev/null; then grubby --update-kernel=ALL --args='{kernel_args}';"
+            f" else mkdir -p /etc/default/grub.d && printf 'GRUB_CMDLINE_LINUX_DEFAULT=\"$GRUB_CMDLINE_LINUX_DEFAULT"
+            f" {kernel_args}\"\\n' > /etc/default/grub.d/90-vm-manager.cfg && update-grub; fi")
+        config["power_state"] = {"mode": "reboot", "message": "Rebooting to apply kernel arguments",
+                                 "condition": True, "delay": "now"}
 
     def build_cloud_config(self, hostname: str, username: Optional[str], password: Optional[str],
                            ssh_keys: List[str], keyboard: Optional[str] = None,
@@ -197,6 +213,21 @@ class CloudImageService:
         elif ssh_keys:
             config["ssh_authorized_keys"] = ssh_keys
         return config
+
+    @staticmethod
+    def dhcp_all_network_config(primary_mac: str) -> str:
+        """network-config v2: DHCP on every NIC, including ones hot-plugged later (netplan + networkd on
+        Debian / Ubuntu, where cloud-init's default only configures the first NIC). Other NICs get a
+        higher route metric so the primary NIC keeps the default route, and are optional (boot doesn't
+        wait for NICs on networks without DHCP). networkd uses the first matching file by name:
+        "nic0" (primary, by MAC) sorts before "nicx" (everything else). EL images don't need this:
+        NetworkManager already runs DHCP on new NICs."""
+        others = {"dhcp4": True, "optional": True, "dhcp4-overrides": {"route-metric": 200}}
+        return yaml.safe_dump({"version": 2, "ethernets": {
+            "nic0": {"match": {"macaddress": primary_mac.lower()}, "dhcp4": True},
+            "nicx": {"match": {"name": "en*"}, **others},
+            "nicy": {"match": {"name": "eth*"}, **others},
+        }}, sort_keys=False)
 
     def build_seed_iso(self, hostname: str, user_data: str, network_config: Optional[str] = None) -> bytes:
         """NoCloud seed: ISO9660 volume labelled 'cidata' with user-data, meta-data

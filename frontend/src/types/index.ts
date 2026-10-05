@@ -63,6 +63,38 @@ export interface VMInterface {
   addresses: string[];
 }
 
+export type NicModel = 'virtio' | 'e1000e' | 'igb' | 'e1000' | 'rtl8139';
+export type LinkState = 'up' | 'down';
+
+export interface VMNic {
+  network?: string | null;
+  mac?: string | null;
+  type?: string | null; // network | bridge | direct | hostdev ...
+  model?: string | null; // null for SR-IOV VFs (hostdev networks)
+  link_state: LinkState;
+  device?: string | null; // host tap while running
+  vf: boolean; // SR-IOV VF passed through from the host (VF pool network)
+  // running VM only: 'attach' = appears at next start, 'detach' = goes away when released, 'change' = saved differs
+  pending?: 'attach' | 'detach' | 'change' | null;
+}
+
+export interface VMNicCreate {
+  network: string;
+  model?: NicModel;
+  mac?: string;
+  link_state?: LinkState;
+}
+
+export interface VMNicUpdate {
+  link_state?: LinkState;
+  network?: string;
+}
+
+export interface VMIommu {
+  enabled: boolean; // saved config
+  active?: boolean | null; // running instance (null = shut off)
+}
+
 export interface ConsoleInfo {
   type: string;
   host: string;
@@ -73,6 +105,8 @@ export interface VMDetail extends VM {
   autostart: boolean;
   disks: VMDisk[];
   interfaces: VMInterface[];
+  nics: VMNic[];
+  iommu?: VMIommu | null;
   console?: ConsoleInfo | null;
   cdrom?: VMCdrom | null;
   boot?: VMBoot | null;
@@ -95,6 +129,9 @@ export interface VMCreate {
   cloudinit_userdata?: string;
   cloudinit_keyboard?: string;
   network_name?: string;
+  extra_nics?: VMNicCreate[];
+  iommu?: boolean;
+  guest_kernel_args?: string;
   autostart?: boolean;
   start?: boolean;
 }
@@ -256,7 +293,8 @@ export interface NetworkUpdate {
 
 export interface NetworkCreate {
   name: string;
-  forward_mode: string;
+  forward_mode: string; // nat | route | isolated | hostdev (SR-IOV VF pool: forward_dev = PF)
+  forward_dev?: string;
   ip_address?: string;
   prefix?: number;
   dhcp_enabled: boolean;
@@ -514,6 +552,7 @@ export interface GroupSpec {
   reservations?: ReservationSpec[];
   load_balancers?: LoadBalancerSpec[];
   owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
+  dhcp_hosts?: GroupDHCPHost[];
 }
 
 export interface GroupHostInfo {
@@ -524,6 +563,13 @@ export interface GroupHostInfo {
   fqdn?: string | null;
   vm_id?: number | null;
   state: string;
+}
+
+/** Static DHCP reservation of a non-member machine on the group network */
+export interface GroupDHCPHost {
+  mac: string;
+  ip: string;
+  hostname?: string | null; // also served as <hostname>.<domain>
 }
 
 export interface GroupMemberInfo {
@@ -571,6 +617,10 @@ export interface GroupLease {
   mac: string;
   hostname?: string | null;
   expiry?: number | null;
+  kind?: 'member' | 'reservation' | 'dynamic';
+  member?: string | null;
+  vm_name?: string | null; // VM with this MAC on the group network
+  vm_running?: boolean;
 }
 
 export interface GroupDetail extends Group {
@@ -587,4 +637,29 @@ export interface RouterConfig {
   config_applied: boolean;
   config_applied_at?: string | null;
   config_error?: string | null;
+}
+
+export interface SriovVF {
+  index: number;
+  pci?: string | null;
+  driver?: string | null; // igbvf, iavf, vfio-pci (passed through), ...
+  netdev?: string | null;
+}
+
+export interface SriovPF {
+  name: string;
+  pci?: string | null;
+  driver?: string | null;
+  vendor_id?: string | null;
+  device_id?: string | null;
+  vf_device_id?: string | null;
+  total_vfs: number;
+  num_vfs: number;
+  operstate?: string | null;
+  vfs: SriovVF[];
+}
+
+export interface SriovStatus {
+  iommu: { enabled: boolean; groups: number; message?: string | null };
+  pfs: SriovPF[];
 }

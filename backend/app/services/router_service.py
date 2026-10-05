@@ -109,7 +109,22 @@ class ELRouterBackend(RouterBackend):
             lines.append(f"host-record={r.name}.{domain},{r.name},{r.ip}")
         lines += ["", "# records"]
         lines += [self._record(r, domain) for r in spec.router.dns.records]
+        lines += self._dhcp_host_lines(spec)
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _dhcp_host_lines(spec: GroupSpec) -> List[str]:
+        """Static reservations of non-member machines (spec.dhcp_hosts)"""
+        if not spec.dhcp_hosts:
+            return []
+        lines = ["", "# reservations"]
+        for h in spec.dhcp_hosts:
+            if h.hostname:
+                lines.append(f"dhcp-host={h.mac},{h.ip},{h.hostname}")
+                lines.append(f"host-record={h.hostname}.{spec.domain},{h.hostname},{h.ip}")
+            else:
+                lines.append(f"dhcp-host={h.mac},{h.ip}")
+        return lines
 
     @staticmethod
     def _record(record: DNSRecord, domain: str) -> str:

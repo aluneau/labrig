@@ -9,7 +9,8 @@ from app.schemas import Task
 from app.schemas.group import (
     DNSRecord, Group, GroupCreateResult, GroupDetail, GroupExport, GroupSpec, MemberSpec, RouterConfig,
 )
-from app.services.group_service import group_service
+from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
+from app.services.group_service import LeaseInUse, group_service
 
 router = APIRouter()
 
@@ -177,3 +178,71 @@ def apply_router_config(group_id: int, db: Session = Depends(get_db)):
 def export_group(group_id: int, db: Session = Depends(get_db)):
     """The group spec as YAML (POST it back to /groups to recreate the lab)"""
     return group_service.export_yaml(_group_or_404(db, group_id))
+
+
+# Static DHCP reservations for non-member machines + the router's leases
+
+@router.get("/{group_id}/dhcp-hosts", response_model=List[DHCPHostSpec])
+def list_dhcp_hosts(group_id: int, db: Session = Depends(get_db)):
+    return group_service.dhcp_hosts(_group_or_404(db, group_id))
+
+
+@router.post("/{group_id}/dhcp-hosts", response_model=GroupDetail, status_code=201)
+def add_dhcp_host(group_id: int, host: DHCPHostSpec, db: Session = Depends(get_db)):
+    """Reserve an IP (and optionally <hostname>.<domain>) for a MAC; applied live on the router.
+    A running machine gets the address when it renews its lease (or reboots)."""
+    _group_or_404(db, group_id)
+    try:
+        group_service.set_dhcp_host(db, group_id, host)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _detail(db, group_id)
+
+
+@router.put("/{group_id}/dhcp-hosts/{mac}", response_model=GroupDetail)
+def update_dhcp_host(group_id: int, mac: str, host: DHCPHostSpec, db: Session = Depends(get_db)):
+    """Replace the reservation of `mac` (the body may change the MAC too)"""
+    _group_or_404(db, group_id)
+    try:
+        group_service.set_dhcp_host(db, group_id, host, replace_mac=mac)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _detail(db, group_id)
+
+
+@router.delete("/{group_id}/dhcp-hosts/{mac}", response_model=GroupDetail)
+def remove_dhcp_host(
+    group_id: int, mac: str,
+    release_lease: bool = Query(False, description="Also drop the MAC's current lease on the router"),
+    db: Session = Depends(get_db),
+):
+    _group_or_404(db, group_id)
+    try:
+        group_service.remove_dhcp_host(db, group_id, mac, release_lease=release_lease)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _detail(db, group_id)
+
+
+@router.get("/{group_id}/leases", response_model=List[GroupLease])
+def list_leases(group_id: int, db: Session = Depends(get_db)):
+    """The router's DHCP leases (read through the guest agent), marked member / reservation / dynamic"""
+    return group_service.leases(_group_or_404(db, group_id))
+
+
+@router.delete("/{group_id}/leases/{mac}", response_model=LeaseRelease)
+def release_lease(group_id: int, mac: str, force: bool = Query(False), db: Session = Depends(get_db)):
+    """Drop a lease on the router (409 if a running VM has this MAC, unless force)"""
+    _group_or_404(db, group_id)
+    try:
+        return group_service.release_lease(db, group_id, mac, force=force)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LeaseInUse as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))

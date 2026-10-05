@@ -36,6 +36,13 @@ variable "dns_records" {
   }
 }
 
+variable "dhcp_hosts" {
+  description = "Static reservations for non-member machines on the group network: MAC => {ip, hostname}"
+  type        = map(object({ ip = string, hostname = optional(string) }))
+  default     = {}
+  # e.g. { "52:54:00:12:34:56" = { ip = "10.42.60.60", hostname = "appliance" } }
+}
+
 variable "password" {
   type      = string
   default   = null

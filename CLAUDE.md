@@ -46,7 +46,8 @@ frontend/src/
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
   pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _group, _cluster
+docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _cluster
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
@@ -90,6 +91,14 @@ e2e/                  Playwright browser tests against the real app (see below)
   else reports `pending`. VM delete with disks takes disks from both live and saved XML.
 - DB schema: `database.init_db()` creates tables and adds missing **nullable** columns (no migration
   tool); new columns must be nullable or have a server default.
+- **NICs** are identified by MAC (`/vms/{id}/nics/{mac}`), same live+config pattern as disks (hot-plug, unplug
+  waits for DEVICE_REMOVED, else pending); link state / network changes use `updateDeviceFlags`. A NIC on a
+  hostdev ("SR-IOV VF pool") network runs as `<interface type='hostdev'>` (live XML has no source network:
+  read it from the saved config; `vf: true`). Debian/Ubuntu cloud-image VMs get a network-config with DHCP on
+  every NIC (primary by MAC keeps the default route; EL's NetworkManager does it by itself).
+- **vIOMMU** = `<iommu model='intel'>` + `<ioapic driver='qemu'/>` (domain_xml.set_iommu), saved config only:
+  applies at the next cold start. Host SR-IOV state is read from sysfs (`sriov_service`); VF counts go through
+  the helper (`sriov-set-numvfs`). This rig has no IOMMU: test VF pools nested (docs/sriov.md).
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
 - **Lab groups**: the `GroupSpec` (schemas/group.py) is the source of truth; `normalize()` assigns router
@@ -101,6 +110,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
   permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp, wireguard,
   vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
+  `spec.dhcp_hosts` = static reservations of non-member machines (`dhcp-host=` + `host-record=` lines,
+  validated against router/member IPs/MACs/names in `GroupSpec`). Leases are read from the router's
+  `/var/lib/dnsmasq/dnsmasq.leases` via guest-exec; releasing one = stop dnsmasq, delete the line, start it.
   Members (`MemberSpec`) have `source`: `cloud_image` (default, `image` + cloud-init) | `iso` (`iso` = volume
   path or name) | `empty`; the last two get no seed, only the MAC reservation + DNS name. Both the quick
   "Add member" form and CreateVMModal in group mode (`group` prop, or its "Lab group" select) POST a
@@ -161,12 +173,13 @@ e2e/                  Playwright browser tests against the real app (see below)
 cd backend && venv/bin/python -c "import app.main"            # backend imports
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
-node lifecycle.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
+node lifecycle.js | devices.js | nics.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
 node console.js                                                 # console fidelity: virsh screenshot vs canvas vs page, several viewports/DPRs
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 KUBECTL=… node kubeadm.js                                       # kubeadm in an auto-created group: LB endpoint, kubectl commands, service, stop/start, delete (IMAGE, CTLPLANES=3 HA=1)
 KUBECTL=… node clusters.js                                      # k3s: create, host kubectl, copy-paste kubectl commands in bash + fish, stop/start, delete
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
+node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

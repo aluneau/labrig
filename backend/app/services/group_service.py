@@ -30,7 +30,7 @@ from app.events import event_bus
 from app.libvirt_client import libvirt_client
 from app.models import CloudImage, Group, GroupMember, Network, Task, VM
 from app.schemas import TaskCreate, VMCreate
-from app.schemas.group import DHCPRange, DNSRecord, GroupSpec, MemberSpec
+from app.schemas.group import DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec
 from app.services.cloud_image_service import cloud_image_service
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
 from app.services.task_service import task_service
@@ -45,6 +45,10 @@ LEASES_FILE = "/var/lib/dnsmasq/dnsmasq.leases"
 
 # Member fields that can't change in place (the VM must be recreated)
 MEMBER_IMMUTABLE = ("source", "image", "iso", "memory", "vcpu", "disk_size", "role", "mac", "cloud_init", "user_data")
+
+
+class LeaseInUse(Exception):
+    """The lease belongs to a running VM"""
 
 
 def _now() -> datetime:
@@ -182,6 +186,7 @@ class GroupService:
             if dhcp_start <= ipaddress.IPv4Address(r.ip) <= dhcp_end:
                 raise ValueError(f"Reserved host {r.name} IP {r.ip} is inside the dynamic DHCP range")
         used_ips = {router.ip} | {m.ip for m in spec.members if m.ip} | {r.ip for r in spec.reservations}
+        used_ips |= {h.ip for h in spec.dhcp_hosts}
         static_pool = [h for h in hosts[9 if len(hosts) >= 64 else 1:] if not dhcp_start <= h <= dhcp_end]
         for m in spec.members:
             prev = old_members.get(m.name)
@@ -571,6 +576,7 @@ class GroupService:
         start, end = ipaddress.IPv4Address(spec.dhcp.start), ipaddress.IPv4Address(spec.dhcp.end)
         used = set(taken) | {spec.router.ip} | {m.ip for m in spec.members if m.ip}
         used |= {r.ip for r in spec.reservations} | {r.a for r in spec.router.dns.records if r.a}
+        used |= {h.ip for h in spec.dhcp_hosts}
         for h in hosts[9 if len(hosts) >= 64 else 1:]:
             if not start <= h <= end and str(h) not in used:
                 return str(h)
@@ -989,17 +995,7 @@ class GroupService:
         spec = data["spec"]
         rtr = router_vm_name(spec.name)
         data["router_uplink_ips"] = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]]
-        data["leases"] = []
-        if data["router"]["state"] == "running":
-            try:
-                out = libvirt_client.agent_exec(rtr, "/bin/cat", [LEASES_FILE], timeout=5)["stdout"]
-                for line in out.splitlines():
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        data["leases"].append({"expiry": int(parts[0]), "mac": parts[1], "ip": parts[2],
-                                               "hostname": None if parts[3] == "*" else parts[3]})
-            except (libvirt.libvirtError, TimeoutError, KeyError, ValueError):
-                pass  # agent not ready / no leases yet
+        data["leases"] = self.leases(group, running=data["router"]["state"] == "running")
         return data
 
     @staticmethod
@@ -1007,6 +1003,130 @@ class GroupService:
         from app.models import Cluster
         return [{"id": c.id, "name": c.name, "type": c.type}
                 for c in db.query(Cluster).filter(Cluster.group_id == group.id).order_by(Cluster.name).all()]
+
+    # Static DHCP reservations (non-member machines) and the router's leases
+
+    def dhcp_hosts(self, group: Group) -> List[DHCPHostSpec]:
+        return GroupSpec.model_validate(group.spec).dhcp_hosts
+
+    def set_dhcp_host(self, db: Session, group_id: int, host: DHCPHostSpec,
+                      replace_mac: Optional[str] = None) -> Optional[Group]:
+        """Add a reservation, or replace the one for replace_mac (applied live on the router)"""
+        group = self.get_group(db, group_id)
+        if not group:
+            return None
+        spec = GroupSpec.model_validate(group.spec)
+        hosts = spec.dhcp_hosts
+        if replace_mac is not None:
+            replace_mac = replace_mac.lower()
+            if not any(h.mac == replace_mac for h in hosts):
+                raise LookupError(f"No reservation for {replace_mac}")
+            hosts = [h for h in hosts if h.mac != replace_mac]
+        if any(h.mac == host.mac for h in hosts):
+            raise ValueError(f"{host.mac} already has a reservation "
+                             f"({next(h.ip for h in hosts if h.mac == host.mac)})")
+        spec.dhcp_hosts = hosts + [host]
+        try:
+            spec = GroupSpec.model_validate(spec.model_dump())  # conflicts, with a readable message
+        except ValidationError as e:
+            raise ValueError("; ".join(err["msg"].replace("Value error, ", "") for err in e.errors()))
+        return self.update_group(db, group_id, spec)
+
+    def remove_dhcp_host(self, db: Session, group_id: int, mac: str, release_lease: bool = False) -> Optional[Group]:
+        """Remove a reservation; release_lease also drops the MAC's current lease on the router"""
+        group = self.get_group(db, group_id)
+        if not group:
+            return None
+        mac = mac.lower()
+        spec = GroupSpec.model_validate(group.spec)
+        if not any(h.mac == mac for h in spec.dhcp_hosts):
+            raise LookupError(f"No reservation for {mac}")
+        spec.dhcp_hosts = [h for h in spec.dhcp_hosts if h.mac != mac]
+        group = self.update_group(db, group_id, spec)
+        if release_lease and any(lease["mac"] == mac for lease in self.leases(group)):
+            self.release_lease(db, group_id, mac, force=True)
+        return group
+
+    @staticmethod
+    def _read_leases(vm_name: str) -> List[Dict[str, Any]]:
+        """dnsmasq lease file on the router: '<expiry> <mac> <ip> <hostname|*> <client-id|*>'"""
+        out = libvirt_client.agent_exec(vm_name, "/bin/cat", [LEASES_FILE], timeout=5)["stdout"]
+        leases = []
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and ":" in parts[1] and "." in parts[2]:  # IPv4 leases only
+                leases.append({"expiry": int(parts[0]), "mac": parts[1].lower(), "ip": parts[2],
+                               "hostname": None if parts[3] == "*" else parts[3]})
+        return leases
+
+    def leases(self, group: Group, running: Optional[bool] = None) -> List[Dict[str, Any]]:
+        """The router's current leases, each marked member / reservation / dynamic, with the VM
+        (any VM attached to the group network) that has the MAC. Empty when the router is down."""
+        spec = GroupSpec.model_validate(group.spec)
+        rtr = router_vm_name(spec.name)
+        if running is None:
+            running = (libvirt_client.get_vm(rtr) or {}).get("state") == "running"
+        if not running:
+            return []
+        try:
+            leases = self._read_leases(rtr)
+        except (libvirt.libvirtError, TimeoutError, KeyError, ValueError):
+            return []  # agent not ready / no lease file yet
+        members = {m.mac: m.name for m in spec.members if m.mac}
+        reserved = {h.mac for h in spec.dhcp_hosts} | {r.mac for r in spec.reservations}
+        vms = self._network_vms(network_name(spec.name))
+        for lease in leases:
+            mac = lease["mac"]
+            lease["kind"] = "member" if mac in members else "reservation" if mac in reserved else "dynamic"
+            lease["member"] = members.get(mac)
+            vm = vms.get(mac)
+            lease["vm_name"] = vm["vm"] if vm else None
+            lease["vm_running"] = bool(vm and vm["active"])
+            lease["vm_unknown"] = vms is None
+        return leases
+
+    @staticmethod
+    def _network_vms(network: str) -> Optional[Dict[str, Dict[str, Any]]]:
+        """MAC -> {vm, active} for the VMs on a network; None if libvirt can't tell (a domain deleted
+        while listing them raises: retry a few times)"""
+        for attempt in range(3):
+            try:
+                return {i["mac"].lower(): i for i in libvirt_client.network_interfaces(network)}
+            except libvirt.libvirtError as e:
+                logger.info(f"Listing the VMs on {network} failed ({e}), retrying")
+                time.sleep(0.2)
+        return None
+
+    def release_lease(self, db: Session, group_id: int, mac: str, force: bool = False) -> Optional[Dict[str, Any]]:
+        """Drop a lease on the router: stop dnsmasq, delete the MAC's line from its lease file, start it.
+        dhcp_release would need dnsmasq-utils on the router (absent on existing routers) and the LAN
+        interface name; the restart is the same short blip as every config push.
+        Refused while a VM with this MAC is running (it would renew), unless force."""
+        group = self.get_group(db, group_id)
+        if not group:
+            return None
+        mac = mac.lower()
+        spec = GroupSpec.model_validate(group.spec)
+        rtr = router_vm_name(spec.name)
+        with self._lock(group.name):
+            lease = next((le for le in self.leases(group) if le["mac"] == mac), None)
+            if lease is None:
+                raise LookupError(f"No DHCP lease for {mac} on the router of group '{spec.name}'")
+            logger.debug(f"Release {mac} on {rtr}: lease {lease}, force={force}")
+            if lease.pop("vm_unknown") and not force:
+                raise RuntimeError("Could not list the VMs on the group network: try again")
+            if lease["vm_running"] and not force:
+                raise LeaseInUse(f"VM '{lease['vm_name']}' is running with this MAC: it would renew the lease. "
+                                 "Stop it first.")
+            script = (f"systemctl stop dnsmasq && sed -i '/^[0-9]* {mac} /Id' {LEASES_FILE}; "
+                      "systemctl start dnsmasq && systemctl is-active dnsmasq")
+            result = libvirt_client.agent_exec(rtr, "/bin/sh", ["-c", script], timeout=60)
+            if result["exitcode"] != 0:
+                raise RuntimeError(f"Could not release the lease: {(result['stderr'] or result['stdout']).strip()}")
+            released = not any(le["mac"] == mac for le in self._read_leases(rtr))
+        logger.info(f"Released lease {lease['ip']} ({mac}) on {rtr}: {released}")
+        self._publish(group, "updated")
+        return {"mac": mac, "ip": lease["ip"], "released": released}
 
     def export_yaml(self, group: Group) -> Dict[str, Any]:
         """The user's part of the spec: what the app manages (cluster nodes, their records and

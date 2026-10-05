@@ -8,6 +8,10 @@ Fixed command whitelist, every argument validated here (never trust the caller):
   helper dhcp-release <network> <ipv4> <mac>
       Drop a DHCP lease from the dnsmasq of a libvirt network (dnsmasq's dhcp_release). The bridge
       is resolved from libvirt, and the lease must exist in that network.
+  helper sriov-set-numvfs <interface> <n>
+      Set the number of SR-IOV VFs of a physical function (sysfs sriov_numvfs). The interface must be
+      a PCI device with sriov_totalvfs >= n; changing a non-zero count goes through 0 (kernel rule).
+      Refused while one of its VFs is bound to vfio-pci (likely passed through to a running VM).
 
 Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed.
 """
@@ -18,12 +22,13 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-VERSION = "1"
+VERSION = "2"
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 CLIENTID_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){0,127}$")
 BRIDGE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 
 
 def fail(code, message):
@@ -97,9 +102,50 @@ def dhcp_release(args):
     print(f"released {ip} ({mac}) on {bridge}")
 
 
+def sriov_set_numvfs(args):
+    if len(args) != 2:
+        fail(2, "usage: sriov-set-numvfs <interface> <n>")
+    iface, count = args
+    if not IFACE_RE.match(iface) or iface in (".", ".."):
+        fail(2, f"invalid interface name {iface!r}")
+    if not count.isdigit() or len(count) > 4:
+        fail(2, f"invalid VF count {count!r}")
+    count = int(count)
+    device = os.path.realpath(f"/sys/class/net/{iface}/device")
+    if not device.startswith("/sys/devices/pci") or not os.path.isfile(os.path.join(device, "sriov_totalvfs")):
+        fail(4, f"{iface} is not an SR-IOV capable PCI network interface")
+
+    def read(name):
+        with open(os.path.join(device, name)) as f:
+            return int(f.read().strip() or 0)
+
+    total, current = read("sriov_totalvfs"), read("sriov_numvfs")
+    if count > total:
+        fail(2, f"{iface} supports at most {total} VFs")
+    if count == current:
+        print(f"{iface}: {count} VFs")
+        return
+    for entry in os.listdir(device):
+        if entry.startswith("virtfn"):
+            driver = os.path.join(device, entry, "driver")
+            if os.path.islink(driver) and os.path.basename(os.readlink(driver)) == "vfio-pci":
+                fail(5, f"VF {os.path.basename(os.readlink(os.path.join(device, entry)))} of {iface} is bound to "
+                        f"vfio-pci (passed through to a VM?): stop the VMs using it first")
+    try:
+        if current and count:
+            with open(os.path.join(device, "sriov_numvfs"), "w") as f:
+                f.write("0")
+        with open(os.path.join(device, "sriov_numvfs"), "w") as f:
+            f.write(str(count))
+    except OSError as e:
+        fail(5, f"cannot set sriov_numvfs on {iface}: {e.strerror or e}")
+    print(f"{iface}: {count} VFs")
+
+
 COMMANDS = {
     "version": lambda args: print(VERSION),
     "dhcp-release": dhcp_release,
+    "sriov-set-numvfs": sriov_set_numvfs,
 }
 
 

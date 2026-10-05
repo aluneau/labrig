@@ -230,6 +230,35 @@ class DHCPRange(BaseModel):
     end: str
 
 
+HOSTNAME = r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+
+
+class DHCPHostSpec(BaseModel):
+    """Static DHCP reservation for a non-member machine on the group network (e.g. a VM attached
+    from the VMs page). With a hostname, the router also serves <hostname>.<domain>."""
+    mac: str = Field(..., pattern=MAC)
+    ip: str
+    hostname: Optional[str] = Field(None, pattern=HOSTNAME)
+
+    @field_validator("mac", mode="before")
+    @classmethod
+    def _mac(cls, v: Any) -> Any:
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("ip")
+    @classmethod
+    def _ip(cls, v: str) -> str:
+        return _ipv4(v, "Reservation IP")
+
+    @field_validator("hostname", mode="before")
+    @classmethod
+    def _hostname(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip().lower()
+            return v or None
+        return v
+
+
 class GroupSpec(BaseModel):
     name: str = Field(..., pattern=LABEL, description="Lowercase letters, digits and '-', max 32 chars")
     cidr: str = Field(..., description="IPv4 subnet of the group network, e.g. 10.42.7.0/24")
@@ -244,6 +273,7 @@ class GroupSpec(BaseModel):
     reservations: List[ReservationSpec] = []
     load_balancers: List[LoadBalancerSpec] = []
     owner: Optional[str] = None  # "cluster:<name>" for a group created for (and deleted with) a cluster
+    dhcp_hosts: List[DHCPHostSpec] = []  # static reservations for non-member machines
 
     @field_validator("cidr")
     @classmethod
@@ -320,7 +350,40 @@ class GroupSpec(BaseModel):
         reserved = sorted(str(p) for p in set(lb_ports) & RESERVED_ROUTER_PORTS)
         if reserved:
             raise ValueError(f"Port {', '.join(reserved)} is used by the router itself")
+        self._check_dhcp_hosts(net)
         return self
+
+    def _check_dhcp_hosts(self, net: ipaddress.IPv4Network) -> None:
+        """Reservations: usable address of the subnet (inside the dynamic range is fine: dnsmasq never
+        hands a reserved address to another client), no clash with the router, members or each other"""
+        owners: Dict[str, str] = {}  # ip / mac / hostname -> who uses it
+        if self.router.ip:
+            owners[self.router.ip] = "the router"
+        for mac in (self.router.lan_mac, self.router.uplink_mac):
+            if mac:
+                owners[mac] = "the router"
+        owners["router"] = "the router"
+        for m in self.members:
+            for key in (m.ip, m.mac, m.name):
+                if key:
+                    owners[key] = f"member {m.name}"
+        for r in self.reservations:  # cluster nodes
+            for key in (r.ip, r.mac, r.name):
+                owners[key] = f"{r.owner or 'reserved host'} ({r.name})"
+        for h in self.dhcp_hosts:
+            addr = ipaddress.IPv4Address(h.ip)
+            if addr not in net or addr in (net.network_address, net.broadcast_address):
+                raise ValueError(f"Reservation {h.mac}: {h.ip} is not a usable address of {net}")
+            if owners.get(h.mac) == f"the reservation for {h.mac}":
+                raise ValueError(f"Duplicate reservation for {h.mac}")
+            for label, key in (("MAC", h.mac), ("IP", h.ip), ("hostname", h.hostname)):
+                if key and key in owners:
+                    raise ValueError(f"Reservation {h.mac}: {label} {key} is already used by {owners[key]}")
+            if h.hostname and any(r.name == h.hostname for r in self.router.dns.records):
+                raise ValueError(f"Reservation {h.mac}: hostname {h.hostname} is already a DNS record")
+            owners[h.mac] = owners[h.ip] = f"the reservation for {h.mac}"
+            if h.hostname:
+                owners[h.hostname] = f"the reservation for {h.mac}"
 
 
 # API responses
@@ -346,6 +409,16 @@ class GroupLease(BaseModel):
     mac: str
     hostname: Optional[str] = None
     expiry: Optional[int] = None  # epoch seconds, 0 = infinite
+    kind: str = "dynamic"           # member | reservation | dynamic
+    member: Optional[str] = None    # member name (kind == member)
+    vm_name: Optional[str] = None   # VM with this MAC on the group network, if any
+    vm_running: bool = False
+
+
+class LeaseRelease(BaseModel):
+    mac: str
+    ip: str
+    released: bool
 
 
 class Group(BaseModel):

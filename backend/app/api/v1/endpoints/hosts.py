@@ -3,9 +3,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas import HostInfo, HostResources, LibvirtStatus, LibvirtStop, LibvirtAction, TaskCreate
+from app.schemas import (
+    HostInfo, HostResources, LibvirtStatus, LibvirtStop, LibvirtAction, TaskCreate, SriovStatus, SriovPF, SriovNumVfs,
+)
 from app.services.daemon_service import daemon_service
 from app.services.host_service import host_service
+from app.services.sriov_service import sriov_service
 from app.services.task_service import task_service
 
 router = APIRouter()
@@ -72,3 +75,20 @@ def get_host_logs(lines: int = Query(100, ge=1, le=1000)):
     """Get system logs"""
     logs = host_service.get_system_logs(lines)
     return {"logs": logs}
+
+
+@router.get("/sriov", response_model=SriovStatus)
+def get_sriov():
+    """Host IOMMU state and SR-IOV capable NICs (PFs) with their VFs"""
+    return sriov_service.status()
+
+
+@router.put("/sriov/{pf}", response_model=SriovPF)
+def set_sriov_num_vfs(pf: str, data: SriovNumVfs):
+    """Create / remove VFs on a PF (privileged helper; not persistent across host reboots)"""
+    try:
+        return sriov_service.set_num_vfs(pf, data.num_vfs)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
