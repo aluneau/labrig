@@ -16,9 +16,14 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 - **Storage**: pools, volumes, ISO upload or download from URL.
 - **Networks**: create NAT / routed / isolated networks, start/stop, autostart; edit subnet, DHCP range,
   domain and forward mode; static DHCP reservations (applied live, "make static" from a lease); raw XML editor.
-- **Kubernetes clusters (k3s)**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image, on
-  their own NAT network with fixed addresses and DNS (`api.<cluster>.<domain>`); ready in ~2 minutes;
+- **Kubernetes clusters**: 1 or 3 control planes + N workers from a Debian / AlmaLinux cloud image;
   kubeconfig download (works from the host), `kubectl get nodes/pods` in the UI, start/stop, add/remove workers.
+  - **k3s** on a standalone NAT network (no router) with fixed addresses and DNS (`api.<cluster>.<domain>`
+    = first control plane); ready in ~2 minutes.
+  - **kubeadm** (vanilla Kubernetes from pkgs.k8s.io, containerd, Flannel) inside a **lab group**: an
+    existing one, or one created for the cluster and deleted with it. The group router serves the node
+    leases and DNS (`api` / `api-int.<cluster>.<domain>`) and load-balances the API with haproxy over every
+    control plane; the host reaches it on the router's reserved uplink address. Ready in ~3 min (Debian 13).
   The cluster page has copy-paste kubectl commands (bash/zsh/fish): one sets `KUBECONFIG` for the current
   shell, the other merges the cluster into `~/.kube/config` as context `<cluster>`. For example:
   ```bash
@@ -27,7 +32,8 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
   ```
 - **Lab groups**: an isolated network + a router VM (EL cloud image with dnsmasq + nftables: DHCP,
   DNS zone, NAT to an uplink) + member VMs with fixed MACs, static leases and `<member>.<domain>` names,
-  plus custom DNS records (wildcards too). Members and records are added/removed live (the router config
+  plus custom DNS records (wildcards too) and TCP load balancers (haproxy on the router, reachable from the
+  host on the router's reserved uplink address). Members and records are added/removed live (the router config
   is re-rendered and pushed through the QEMU guest agent); start/stop/delete the whole lab; export its spec.
   Members come from a quick "Add member" row or the full Create VM form ("Custom VM…" on the Members tab,
   or "Lab group" in Create VM): cloud image, ISO install or empty disk; ISO/empty members have no cloud-init
@@ -129,6 +135,7 @@ make -C opentofu_provider install
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
 cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
+cd examples/opentofu/kubeadm                               # kubeadm cluster in a lab group (auto-created or existing)
 cd examples/opentofu/devices                               # extra disk, ISO in the CD-ROM, boot order
 cd examples/opentofu/group                                 # lab group: router + 2 members + DNS records
 ```
@@ -139,7 +146,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
 `cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
-`clusters.js`; the last one needs ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
+`clusters.js`, `kubeadm.js`; the last ones need ~6 GB of RAM and uses the host's `kubectl` if `KUBECTL` points at one).
 `devices.js`, `groups.js`, `group-members.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
 

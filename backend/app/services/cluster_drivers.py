@@ -202,10 +202,6 @@ retry() { n=0; until "$@"; do n=$((n + 1)); [ "$n" -ge 30 ] && return 1; sleep 1
 
 swapoff -a
 sed -i -E '/^[^#].*\sswap\s/ s/^/#/' /etc/fstab
-modprobe overlay
-modprobe br_netfilter
-modprobe nf_conntrack  # EL 10 doesn't load it before kube-proxy needs nf_conntrack_max
-sysctl --system >/dev/null
 
 . /etc/os-release
 if command -v apt-get >/dev/null; then
@@ -232,6 +228,11 @@ else
     setenforce 0
     sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
     systemctl disable --now firewalld 2>/dev/null
+    # EL 10's kernel-core has no br_netfilter / xt_conntrack (kube-proxy, Flannel): they are in
+    # kernel-modules-extra, which must match the running kernel
+    if ! modinfo br_netfilter >/dev/null 2>&1; then
+        retry dnf -y -q install "kernel-modules-extra-$(uname -r)" || fail "kernel-modules-extra-$(uname -r) (br_netfilter)"
+    fi
     MAJOR=${VERSION_ID%%.*}
     cat > /etc/yum.repos.d/docker-ce.repo <<EOF
 [docker-ce-stable]
@@ -255,6 +256,12 @@ EOF
     retry dnf -y -q install containerd.io "kubelet$V" "kubeadm$V" "kubectl$V" conntrack-tools socat iproute-tc \
         --disableexcludes=kubernetes || fail "containerd / kubeadm packages"
 fi
+
+modprobe overlay || fail "overlay module"
+modprobe br_netfilter || fail "br_netfilter module"
+modprobe nf_conntrack  # EL 10 doesn't load it before kube-proxy needs nf_conntrack_max
+sysctl --system >/dev/null
+[ "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1 ] || fail "bridge-nf-call-iptables"
 
 mkdir -p /etc/containerd
 containerd config default > /etc/containerd/config.toml || fail "containerd config"

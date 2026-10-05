@@ -152,6 +152,7 @@ class ELRouterBackend(RouterBackend):
             "    option tcplog",
             "    option dontlognull",
             "    retries 3",
+            "    option redispatch",  # a backend that just died: retry the connection on another one
             "    timeout connect 5s",
             # long-lived watches (kubectl get -w, controllers) go through the load balancer
             "    timeout client 1h",

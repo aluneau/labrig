@@ -78,7 +78,7 @@ A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS,
 |---|---|---|
 | `name`, `cidr` | required, replace | router = first address of `cidr` |
 | `uplink` | `default`, replace | libvirt network for the router's internet access |
-| `router_image`, `router_memory` | first ready EL image, 1024, replace | e.g. `almalinux-9` |
+| `router_image`, `router_memory` | first ready EL image, 512, replace | e.g. `almalinux-9`; 512 MiB is enough (1 GiB swap file for the first-boot dnf run) |
 | `cloud_init` | optional, replace | `{username, password, ssh_keys, keyboard}` for router and members |
 | `domain` | `<name>.lab`, in place | |
 | `dns_forwarders` | uplink's DNS, in place | |
@@ -94,20 +94,25 @@ group's VMs, disks and network.
 | Argument | | |
 |---|---|---|
 | `name` | required, replace | DNS label; nodes are `<name>-ctlplane-N` / `<name>-worker-N` |
-| `type` | `k3s`, replace | `kubeadm` / `openshift` are rejected as not supported yet |
-| `version` | stable channel, replace | k3s release (`v1.33.5+k3s1`); the installed one is read back |
-| `ctlplanes` | 1, replace | 3 or 5 = embedded etcd |
+| `type` | `k3s`, replace | `k3s` (standalone network, no router) or `kubeadm` (in a lab group with a router); `openshift` is rejected as not supported yet |
+| `version` | stable channel / pinned minor, replace | k3s release (`v1.33.5+k3s1`); kubeadm: `v1.37` or `v1.37.1`; the installed one is read back |
+| `ctlplanes` | 1, replace | 3 or 5 = embedded (k3s) / stacked (kubeadm) etcd |
 | `workers` | 2, **in place** | workers are added, or drained and removed (highest index first) |
 | `ctlplane_memory/_vcpu/_disk_size`, `worker_…` | 2048, 2, 20, replace | |
 | `cloud_image_id` | Debian 13, else AlmaLinux 9, replace | |
 | `domain` | `lab`, replace | API name `api.<name>.<domain>` |
-| `network`, `cidr` | new NAT network `vmm-k-<name>` on a free /24, replace | or an existing network (DHCP reservations + DNS records are added to it) |
+| `network`, `cidr` | new NAT network `vmm-k-<name>` on a free /24, replace | k3s; or an existing network (DHCP reservations + DNS records are added to it). kubeadm: computed (the group's network); `cidr` = subnet of an auto-created group |
+| `group_id` | new group `<name>`, replace | kubeadm: an existing `vmmanager_group` id; its other members and records are kept when the cluster is destroyed. Default: a group created for the cluster, deleted with it |
+| `router_memory` | group default (512), replace | kubeadm with an auto-created group |
 | `extra_args`, `username`, `password`, `ssh_keys` | optional, replace | extra k3s server flags; node login |
 | `running` | `true`, in place | stop (ACPI, workers first) / start (waits for all nodes Ready) |
 
-Computed: `id`, `status`, `api_hostname`, `api_endpoint` (`https://<ip>:6443`, reachable from the host),
+Computed: `id`, `status`, `api_hostname`, `api_endpoint` (k3s `https://<ctlplane-0>:6443`, kubeadm
+`https://<router uplink ip>:<port>` = haproxy in front of every control plane; reachable from the host),
 `node_ips` (map), `kubeconfig` (sensitive). Create waits until every node is Ready (up to 30 min).
-Destroy deletes the nodes, their disks and the cluster's own network. Example: `examples/opentofu/k3s`.
+Destroy deletes the nodes, their disks and the cluster's own network or auto-created group (an existing
+group only loses the cluster's nodes, records and load balancer). Examples: `examples/opentofu/k3s`,
+`examples/opentofu/kubeadm`.
 
 All resources support `tofu import <address> <id>` (ids are the API ids).
 
