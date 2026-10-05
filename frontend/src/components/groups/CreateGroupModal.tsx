@@ -24,6 +24,7 @@ import { KEYBOARD_LAYOUTS, defaultKeyboard } from '../vms/CreateVMModal';
 
 const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 const EL = ['almalinux', 'rocky', 'centos'];
+const ROUTER_IMAGES = ['almalinux-9', 'almalinux-10', 'rocky-9', 'centos-9-stream', 'centos-10-stream'];
 
 interface MemberRow { name: string; image: string; memoryGiB: string; ip: string }
 
@@ -65,7 +66,9 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
         setImages(ready);
         setNetworks(nets);
         setCidr((c) => c || suggestCidr(groups, nets));
-        const el = ready.find((i) => EL.includes(i.distribution));
+        // same preference as the backend default (router_service.EL_IMAGES)
+        const el = ROUTER_IMAGES.map((s) => ready.find((i) => imageSlug(i) === s)).find(Boolean)
+          || ready.find((i) => EL.includes(i.distribution));
         setRouterImage((r) => r || (el ? imageSlug(el) : ''));
         const member = ready.find((i) => i.distribution === 'debian') || ready[0];
         const img = member ? imageSlug(member) : '';

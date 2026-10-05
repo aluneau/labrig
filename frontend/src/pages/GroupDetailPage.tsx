@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -280,7 +280,9 @@ export const GroupDetailPage: React.FC = () => {
   const [toRemove, setToRemove] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const deleting = useRef(false);  // VM events during a delete would reload a vanishing group
   const load = useCallback(async () => {
+    if (deleting.current) return;
     try {
       setGroup(await groupApi.get(groupId));
     } catch (err) {
@@ -451,10 +453,12 @@ export const GroupDetailPage: React.FC = () => {
 
       <ConfirmModal title={`Delete group ${group.name}?`} isOpen={confirmDelete} confirmLabel="Delete"
         onConfirm={async () => {
+          deleting.current = true;
           try {
             await groupApi.delete(group.id, deleteDisks);
             navigate('/groups');
           } catch (err) {
+            deleting.current = false;
             onError(errorText(err));
           }
         }}

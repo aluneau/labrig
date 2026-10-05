@@ -158,7 +158,13 @@ class LibvirtClient:
     def list_vms(self) -> List[Dict[str, Any]]:
         """List all VMs (running and defined)"""
         conn = self.connect()
-        return [self._domain_dict(d) for d in conn.listAllDomains(0)]
+        vms = []
+        for d in conn.listAllDomains(0):
+            try:
+                vms.append(self._domain_dict(d))
+            except libvirt.libvirtError:
+                pass  # undefined meanwhile (e.g. by another client)
+        return vms
 
     def get_vm(self, name: str) -> Optional[Dict[str, Any]]:
         """Get VM by name"""
@@ -752,7 +758,11 @@ class LibvirtClient:
         """MAC addresses of every domain interface on this host"""
         macs = []
         for dom in self.connect().listAllDomains(0):
-            for mac in ET.fromstring(dom.XMLDesc(0)).findall("./devices/interface/mac"):
+            try:
+                xml = dom.XMLDesc(0)
+            except libvirt.libvirtError:
+                continue
+            for mac in ET.fromstring(xml).findall("./devices/interface/mac"):
                 if mac.get("address"):
                     macs.append(mac.get("address").lower())
         return macs
