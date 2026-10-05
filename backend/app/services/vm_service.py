@@ -48,6 +48,21 @@ class VMService:
 
         db.commit()
 
+    @serialized
+    def _record_created_vm(self, db: Session, uuid: str, fields: Dict[str, Any]) -> VM:
+        """Insert the row for a domain we just defined. Under the sync lock, and an update if a
+        concurrent sync_vms (e.g. the VM list refreshing) already mirrored it: the domain exists
+        in libvirt before this row, and two inserts would collide on the unique name."""
+        vm = db.query(VM).filter(VM.uuid == uuid).first()
+        if vm is None:
+            vm = VM(uuid=uuid)
+            db.add(vm)
+        for key, value in fields.items():
+            setattr(vm, key, value)
+        db.commit()
+        db.refresh(vm)
+        return vm
+
     def list_vms(self, db: Session) -> List[VM]:
         self.sync_vms(db)
         return db.query(VM).order_by(VM.name).all()
@@ -152,8 +167,7 @@ class VMService:
         if vm_data.autostart:
             libvirt_client.set_autostart(vm_data.name, True)
 
-        db_vm = VM(
-            uuid=vm_uuid,
+        db_vm = self._record_created_vm(db, vm_uuid, dict(
             name=vm_data.name,
             description=vm_data.description,
             memory=vm_data.memory,
@@ -162,10 +176,7 @@ class VMService:
             arch=vm_data.arch,
             status="shutoff",
             template_id=vm_data.template_id,
-        )
-        db.add(db_vm)
-        db.commit()
-        db.refresh(db_vm)
+        ))
 
         if vm_data.start:
             libvirt_client.start_vm(vm_data.name)
