@@ -221,9 +221,11 @@ class VMService:
         if result["target"] is None:
             return {"message": "The VM has no CD-ROM drive", "pending": False}
         message = f"Inserted {iso_path.rsplit('/', 1)[-1]}" if iso_path else "Ejected the CD-ROM"
-        if result["pending"]:
+        if result["pending"] and result["added"]:
             message += ("; the VM had no CD-ROM drive: one was added to its configuration and appears "
                         "at the next start (SATA drives can't be hot-plugged)")
+        elif result["pending"]:
+            message += "; the CD-ROM drive was added while the VM was running, so this applies at the next start"
         return {"message": message, "pending": result["pending"], "target": result["target"], "path": iso_path}
 
     def set_boot(self, db: Session, vm: VM, order: Optional[List[str]], once: Optional[bool]) -> Dict[str, Any]:

@@ -203,7 +203,8 @@ class LibvirtClient:
         listen = quoteattr(settings.VNC_LISTEN)
         # libvirt only creates as many pcie-root-ports as the devices need, and hot-plugging a
         # disk or NIC on q35 needs a free one: declare 16 (~8 spare after the built-in devices)
-        root_ports = "<controller type='pci' model='pcie-root-port'/>" * 16
+        root_ports = "<controller type='pci' index='0' model='pcie-root'/>" + \
+            "<controller type='pci' model='pcie-root-port'/>" * 16
 
         # No <emulator> and machine='q35': libvirt resolves the emulator binary
         # and the latest q35 machine version from the host's capabilities.
@@ -457,7 +458,7 @@ class LibvirtClient:
             target = domain_xml.next_target([r for r in (live, config) if r is not None], "sd")
             domain.attachDeviceFlags(domain_xml.cdrom_xml(target, iso_path), libvirt.VIR_DOMAIN_AFFECT_CONFIG)
             self._publish_vm(domain, "devices")
-            return {"target": target, "pending": live is not None}
+            return {"target": target, "pending": live is not None, "added": True}
 
         if cd_live is not None:
             # FORCE: eject even if the guest locked the tray
@@ -477,7 +478,7 @@ class LibvirtClient:
             pending = live is not None
         self._publish_vm(domain, "devices")
         target = domain_xml.disk_info(cd_live if cd_live is not None else cd_config)["target"]
-        return {"target": target, "pending": pending}
+        return {"target": target, "pending": pending, "added": False}
 
     def set_boot_order(self, name: str, order: List[str]) -> None:
         """Persistent boot order (applies at the next cold start)"""
