@@ -1,89 +1,101 @@
-# Handoff: state on 2026-10-05 (end of session)
+# Handoff: state on 2026-10-05 (late evening, end of session)
 
 Read `CLAUDE.md` first (layout, run/verify commands, architecture rules, portability rules), then
-`future-features.md` ("Status at a glance", designs, §4 next steps). This file covers **where we are and what's next**.
+`future-features.md` ("Status at a glance", designs, §3.3 OpenShift plan, §4 next steps). This file covers
+**where we are and what's next**.
 
-## Status: working and verified
+## What this session added (all on `main`, service restarted, verified)
 
-Everything below was tested for real: headless Chrome against the real UI (`e2e/`), real libvirt on this
-host, and fresh nested VMs. On 2026-10-05 the whole suite passed against the final `main` on this rig with
-nothing left behind: `smoke lifecycle full netedit iso kbd devices nics console groups group-members
-group-dhcp clusters kubeadm` (+ `scripts/check-python.py`, backend import, `tsc` + CI build, `go vet`).
+| Feature | State | Docs |
+|---|---|---|
+| **WireGuard remote access** to a lab group | Router runs wg0; the app relays host UDP `51820-51869` → router (no root, no DNAT: libvirt's NAT rules reject inbound). Remote access tab: devices, QR code, `.conf` download, copy-paste commands to connect / clean up the laptop (NetworkManager, wg-quick, a one-line base64 import that works in bash/zsh/fish). Split tunnel (group CIDR + tunnel + router uplink + BGP ranges), router DNS. | `docs/wireguard.md` |
+| **OpenShift** (agent-based installer) | SNO / compact / HA in a lab group; router = DNS (`api`, `api-int`, `*.apps`) + haproxy (6443, 22623, 80, 443) ⇒ **one OpenShift cluster per group**. Version picker (upgrade graph API), cached `openshift-install`/`oc`, pull secret stored 0600 (never in DB/API). Install progress from the Assisted Service (curled from the router) then cluster operators; CSR approval; console, kubeadmin, kubeconfig with `tls-server-name`, SSH key. | `docs/openshift.md` |
+| **Add-ons** | Any OLM operator (curated list at create, live catalog after), LVMS, ODF (LSO + lean StorageCluster), SR-IOV (igb NICs on an isolated `vmm-s-<cluster>` network, vIOMMU, operator in dev mode, sample policy), MetalLB L2 or BGP + `hello` demo. Day-2 from the Operators tab. | `docs/openshift.md` |
+| **BGP** on group routers | FRR, router AS 64512, dynamic neighbors from the group network, only "announce ranges" accepted (a /27 of `10.45.0.0/16` per group), ECMP with port hashing. BGP tab with sessions/routes + copy-paste FRR / upstream MetalLB configs. | `docs/bgp.md` |
+| **Topology view** (owner's ask: "self-explanatory") | Topology tab on groups and OpenShift clusters: laptop → host → router → lab network → nodes → virtual IPs, plain-words tooltips, "Follow a packet" stepper, BGP / L2-ARP / NAT / WireGuard / DHCP-DNS explainers. MetalLB lab tab: diagram + live checks + failover demo. | in the UI |
+| Routers | Now also serve **NTP** (chrony `allow <cidr>` + DHCP option): the OpenShift installer checks node clocks. Group spec `address_pools` keep MetalLB pools out of DHCP/static IPs. | |
+| **OpenTofu** | `vmmanager_group` `wireguard*` + `bgp`; `vmmanager_wireguard_peer`; `vmmanager_cluster` `type = "openshift"` + `openshift {…}` block (read back from the server; in place: add operators, enable MetalLB / demo, switch L2⇄BGP), `console_url`, `kubeadmin_password`, import; `vmmanager_openshift_pull_secret`; data source `vmmanager_openshift_release`. Example `examples/opentofu/openshift`. | `docs/openshift.md` §OpenTofu |
+| Small fixes | Unknown `/api/...` paths return a JSON 404 (a newer UI on a not-restarted backend used to show "Unexpected token '<' … not valid JSON"). Clusters rebuilt from libvirt metadata: OpenShift spec comes back from `backend/data/openshift/clusters/<name>/spec.json`, kubeconfig from the install dir. | |
 
-| Area | State |
-|---|---|
-| VMs | create from cloud image (cloud-init: user, password, SSH keys, keyboard layout — applied on Debian *and* EL), ISO, or empty disk; power actions; delete (+ disks) |
-| VM devices | CD/DVD insert/eject (live), boot order + "boot from CD next start", disks add / grow / detach (hot-plug) |
-| NICs + SR-IOV | add/remove/move NICs live, link up/down; models virtio, e1000e, igb (emulated SR-IOV, 7 VFs), …; virtual IOMMU + guest kernel args; host SR-IOV view + VF count (helper); "SR-IOV VF pool" networks (`hostdev`), verified nested. See `docs/sriov.md` (OpenShift operator settings) |
-| Console | noVNC through the `/vms/{id}/vnc` WebSocket bridge; sharp scaling (no smoothing unless shrinking) + 1:1/Fit toggle — the "dark console" fix; AZERTY verified on Debian 13 and AlmaLinux 10 |
-| Storage / Networks | pools, volumes, ISOs (upload / download), cloud images; networks with live DHCP reservations, "make static", lease release (helper), raw XML |
-| libvirt daemon | connect on demand, closed when idle; 503 "libvirt is stopped" + Start button everywhere; start/stop from the UI (polkit, no sudo) |
-| Lab groups | isolated network + AlmaLinux router (512 MiB + first-boot swap; dnsmasq, nftables NAT, haproxy load balancers) + members (cloud image, ISO or empty disk; quick add or full "Custom VM…" form) + DNS records + static reservations / "Make static" / release for non-members; live router pushes; rebuild from libvirt metadata |
-| Clusters | **k3s** on its own network (no router, owner's choice); **kubeadm** in a lab group (existing or auto-created), API behind the router's haproxy on its pinned uplink address, 1 or 3 control planes, Kubernetes v1.37 + Flannel; kubeconfig download + copy-paste kubectl commands (bash/zsh/fish) |
-| OpenTofu | `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"`), `_vm`, `_disk`, `_nic`, `_group` (members with `source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`), `_cluster` (k3s, kubeadm, `group_id`); examples `basic lab devices group k3s kubeadm sriov`. Installed build = final `main` |
-| Install / ship | `scripts/setup.sh`, `scripts/package.sh`. Tarball verified on AlmaLinux 9, AlmaLinux 10 (re-verified at the end: Python 3.12), Debian 13 and this rig |
+### Verified for real (2026-10-05)
+- **OpenShift SNO 4.20.39** (`e2e-ocp`) installed end to end by the app: 34/34 cluster operators, LVMS default
+  StorageClass, SR-IOV 4 VFs on igb, NMState, MetalLB L2 then **BGP** (switched day 2): all 6 MetalLB lab checks
+  green on :8000, `hello.lab` answered from the router and from a WireGuard client.
+- WireGuard end to end in a nested AlmaLinux 9 install with a NetworkManager client VM (nmcli import, DNS,
+  split tunnel, disable/enable, device removal, restarts, `kubectl get nodes` over the tunnel, OpenTofu).
+- BGP lab (`e2e/bgp.js`): 2 members announcing an anycast /32, ECMP over both, refused out-of-range prefix,
+  failover when a member stops, reachability from a WireGuard client.
+- OpenTofu: import of the live SNO plans no changes; adding `web-terminal` applied in place (50 s); removing an
+  operator is refused; k3s example apply / re-plan / destroy unchanged.
+- On :8000 after the restart: `smoke.js` and `groups.js` pass; all OpenShift tabs load without errors.
+
+### Not verified (do these before relying on them)
+- **ODF** (needs 3 nodes with ~16 vCPU / 40 GiB each: doesn't fit next to the owner's VMs on this rig — try on a RHEL lab host).
+- **Compact / HA OpenShift** installs (same code path, never run), BGP ECMP over several OpenShift nodes,
+  creating a cluster directly in `metallb_mode = "bgp"`, the SR-IOV fix on a *fresh* install (on e2e-ocp the
+  policy was re-triggered by hand; the code now waits for NIC discovery), `vfio-pci` device type.
+- A full `tofu apply` that **creates** an OpenShift cluster (only import + in-place were run), `tofu apply` with
+  the group `bgp` attribute.
+- WireGuard from outside the LAN (needs a port forward on the home router), Windows/macOS/phone clients,
+  the ufw branch of `setup.sh --wg-ports`, an EL10 router with FRR.
 
 ## This host (CachyOS gaming rig)
 
-- `vm-manager` service (User=aluneau, 127.0.0.1:8000) and libvirtd are **not enabled at boot** (owner's
-  choice). After a reboot: `sudo systemctl start libvirtd vm-manager`.
-- **Pending owner action:** run `scripts/setup.sh --no-boot` once, then `sudo systemctl restart vm-manager`.
-  It installs the root helper `/usr/libexec/vm-manager/helper` (lease release, VF counts) and the polkit
-  rules for libvirt start/stop. Until then those UI actions don't work here. Do **not** run `e2e/libvirtctl.js`
-  against this host (it stops libvirt): it passed against nested AlmaLinux 9 / Debian 13 installs.
-- The rig's Python is **3.14** (lazy annotations): code that imports here can still fail on RHEL 9 / Alma 10.
-  Run `scripts/check-python.py` (it caught a real bug in `schemas/group.py` during this session).
-- No SR-IOV NIC and no IOMMU on this rig: real VF passthrough is only testable nested (docs/sriov.md).
-- Cloud images kept in the default pool: Debian 13, AlmaLinux 9, AlmaLinux 10. The `test` k3s cluster and
-  `mylab` group were the owner's; another session was asked by the owner to delete them.
-- Git: local repo, `main` only, no remote. Repo-local identity set (owner's name/email). All agent worktrees
-  and branches were merged and removed. Old podman containers `vm-manager-backend/frontend` are stale (deletable).
-- Changes made earlier with the owner's approval: user in `libvirt` group; `qemu-full`, `edk2-ovmf`, `swtpm`,
-  `libvirt-python`; `default` network autostart; ufw rules for `virbr+`. Nested KVM enabled.
+- `vm-manager` service (User=aluneau, 127.0.0.1:8000) and libvirtd are **not enabled at boot**. After a reboot:
+  `sudo systemctl start libvirtd vm-manager`. **Restart the service after merging backend changes** (and rebuild
+  the frontend): the UI is served from `frontend/build`, so a new UI on an old backend breaks new pages.
+- ufw: `51820:51869/udp` opened this session (WireGuard relay), plus the older `virbr+` rules.
+- **Still pending owner action:** `scripts/setup.sh --no-boot` (installs the root helper + polkit rules; the Host
+  page says "Privileged helper not installed"). Not needed for WireGuard/OpenShift/BGP.
+- **Running now** (owner's decision whether to keep them):
+  - `e2e-ocp` — test SNO from this session (24 GiB, group `e2e-ocp` with router, MetalLB **BGP** mode,
+    `hello.lab` → 10.45.0.1). Delete it from the Clusters page when done (also removes its group, ISO, `vmm-s-e2e-ocp`).
+  - `test2` — an OpenShift cluster the **owner** started from the UI this evening (installing at last check). Not ours: don't touch.
+  - `test` (kubeadm) and its group — the owner's.
+- OpenShift data: `backend/data/openshift/` (pull secret 0600, `bin/4.20.39`, base ISO cache ~1.4 GB,
+  `clusters/<name>/` install dirs with kubeadmin password + SSH key). `~/pull-secret.json` is mode 644: suggest `chmod 600`.
+- Git: local `main` only, no remote. All agent worktrees/branches merged and removed.
 
 ## Known limitations / open issues
 
-- **No authentication.** Listens on 127.0.0.1 by default; needed before `--listen 0.0.0.0` on shared machines.
-- An existing VM's CPU/memory can't be edited. One-shot boot only applies to starts through the app.
-- Groups: no FRR/BGP, VLANs, VyOS, snapshots, templates, export with disks; no group without an
-  uplink (the router installs packages at first boot); empty-disk members boot nothing without an ISO (no PXE).
-  `missing` groups (network deleted outside the app) are kept as records; they no longer block the name/subnet.
-- Clusters: k3s with 3 control planes points `api` at ctlplane-0 only. kubeadm: no upgrades, etcd backups or
-  network policies; EL nodes run SELinux permissive; Alma 10 nodes need `kernel-modules-extra-$(uname -r)` on
-  the mirror. Stopping a group that hosts a cluster stops its nodes. `virt_qemu_ga_t` is permissive on EL nodes
-  and routers (lab VMs only).
-- SR-IOV: emulated igb only here (no RDMA/switchdev/offload); OpenShift's operator needs the unsupported-NIC
-  settings from docs/sriov.md (not yet run end to end on OpenShift).
-- OpenTofu manages groups' `dns_record` / `dhcp_host` lists wholesale: entries added in the UI show as drift.
-- SQLite reuses the highest deleted id when a table empties. `docker-compose.yml` / Dockerfiles are legacy.
+- **No authentication** (127.0.0.1 by default). The WireGuard relay listens on 0.0.0.0 (UDP 51820-51869).
+- OpenShift: one cluster per group (fixed router ports); no add/remove nodes, upgrades, OKD, disconnected,
+  `platform: baremetal` VIPs; the RAM budget check refuses overcommit (by design). Don't stop a cluster in its
+  first 24 h (certificate rotation). Operators can't be uninstalled from the app.
+- Dev backends on DB copies (how agents test) leave the :8000 DB stale for the objects they touched: the service
+  rebuilds clusters from libvirt metadata, but `sync_groups` doesn't refresh an existing group's spec — reload it
+  from the router's `<vmm:group>` metadata if a group looks out of date (done for `e2e-ocp` this session).
+- BGP: only on the "el" router; announce ranges are per group (/27); no BFD, no route export to the uplink.
+- Everything from the previous handoff still applies (no VM CPU/memory edit, groups without uplink, kubeadm
+  upgrades, OpenTofu wholesale `dns_record`/`dhcp_host` lists, …).
 
-## How this session worked (for the next one)
+## How this session worked
 
-Features were built by parallel agents in git worktrees (own port + DB copy + name prefix each, never
-touching the owner's VMs or the :8000 service), then merged one by one into `main`, rebuilt, and re-verified
-with the whole e2e suite against :8000. Bugs found while verifying merges were fixed on `main`: listing races
-(objects deleted mid-request → 404/500), VM create vs list race, keyboard layout never applied on EL (and
-cloud-init `error` on Debian), Python < 3.14 import failure, stale "missing" groups blocking names.
-Shared scratch dirs got clobbered by agents (`tofu.rc`, a `grp.py` shadowing the stdlib): give each agent
-its own scratch dir.
+Owner asked for agents; pattern from `parallel-agents-workflow` memory: research agent (kcli study) → plan in
+`future-features.md` §3.3 → coordinator wrote the OpenShift backend while a UI agent built the pages against the
+agreed schemas, and a BGP/topology agent worked in parallel; each in its own worktree, port, DB copy and scratch
+dir; one OpenShift install at a time (RAM). A real SNO install surfaced 4 bugs fixed on `main` (SR-IOV NIC on the
+group network → address overlap; no NTP for the installer; SR-IOV policy race; demo pods couldn't write their
+docroot). Usage limits interrupted agents twice; resuming them with SendMessage worked.
 
 ## Next steps (owner's priorities)
 
-1. Owner: `scripts/setup.sh --no-boot` on this rig (above).
-2. **OpenShift SNO** with the agent-based installer (future-features §3.3) in a lab group: reuse
-   `GroupClusterNetwork`, owned DNS records (incl. `*.apps`), router `load_balancers`, ISO + boot order.
-   Then compact 3-node, OKD, disconnected.
-3. Groups v2 (§2.5): no-uplink groups (needed for disconnected OpenShift), BGP/VLANs, site-to-site WireGuard, snapshots,
-   templates, export, PXE; NIC options (e.g. igb workers) in member/cluster specs for SR-IOV operator labs.
-4. Before sharing widely: authentication, a remote + CI (`scripts/check-python.py`, backend import, frontend
-   build, `go vet`, `e2e/smoke.js`), per-group resource budget.
+1. Owner: try the new UI on `test2` / `e2e-ocp` (laptop over WireGuard: group → Remote access → Add device,
+   then the Topology and MetalLB lab tabs), decide whether to keep `e2e-ocp`; run `scripts/setup.sh --no-boot`.
+2. Verify on a bigger host (RHEL lab machine): ODF on compact, HA install, BGP ECMP over 3 nodes, `tofu apply`
+   creating an OpenShift cluster from scratch, SR-IOV on a fresh install. Add `e2e/openshift.js` (SNO + LVMS +
+   MetalLB demo, long) to the suite.
+3. OpenShift next: add workers (`oc adm node-image create`), OKD (no pull secret), disconnected (mirror
+   registry; needs groups without uplink), `platform: baremetal` VIPs as an option, upgrades.
+4. Groups v2: no-uplink groups, VLANs, site-to-site WireGuard between hosts, snapshots/templates.
+5. Before sharing widely: authentication, a remote + CI, resource budget for every group/cluster type.
 
 ## How to verify after changes
 
 ```bash
 cd backend && venv/bin/python -c "import app.main" && cd .. && scripts/check-python.py
+cd frontend && node node_modules/.bin/tsc --noEmit -p . && CI=true node node_modules/.bin/react-scripts build   # npm isn't installed here
 sudo systemctl restart vm-manager
-cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
-cd e2e && node smoke.js   # then the suite listed in CLAUDE.md (KUBECTL=… for clusters.js / kubeadm.js)
-cd opentofu_provider && go vet ./... && make install
+cd e2e && node smoke.js && node groups.js     # + wireguard.js (needs CLIENT_SH, nested host), bgp.js, the rest in CLAUDE.md
+cd opentofu_provider && go vet ./... && make install   # then tofu init -upgrade in example dirs (provider checksum changes)
 ```
