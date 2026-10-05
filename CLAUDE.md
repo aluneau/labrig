@@ -137,6 +137,8 @@ e2e/                  Playwright browser tests against the real app (see below)
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 
 - Backend must run on **Python 3.9** (RHEL 9): no `X | None`, no `match`, no `platform.freedesktop_os_release`.
+  This rig runs Python 3.14, which evaluates annotations lazily: a class used in an annotation before its
+  definition imports fine here but is a NameError on 3.9-3.13. `scripts/check-python.py` catches both.
 - Use the distro libvirt bindings (venv with `--system-site-packages`); never require compiling libvirt-python.
 - SELinux: systemd can't access files in a home directory, so the unit runs `/bin/sh -c 'cd … && exec venv/bin/python -m uvicorn …'`.
 - `ufw`/`firewall-cmd` may be in `/usr/sbin` (not in a user's PATH): probe them through sudo.
@@ -171,6 +173,7 @@ e2e/                  Playwright browser tests against the real app (see below)
 
 ```bash
 cd backend && venv/bin/python -c "import app.main"            # backend imports
+scripts/check-python.py                                         # Python 3.9 grammar + annotations used before definition
 cd frontend && npx tsc --noEmit -p . && CI=true npx react-scripts build
 cd e2e && npm install && node smoke.js                          # every page: console errors, failed requests, screenshots
 node lifecycle.js | devices.js | nics.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
