@@ -107,6 +107,32 @@ export const LaptopCommands: React.FC<{ conn: string; setup?: boolean; cleanup?:
   );
 };
 
+/** UTF-8 safe base64: the one-liner must survive any shell (fish has no heredocs and its own quoting) */
+function b64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  bytes.forEach((b) => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+}
+
+/** Paste-and-go: writes the config and imports it (holds the private key: only while the config has it) */
+const OneLiners: React.FC<{ conn: string; config: string }> = ({ conn, config }) => {
+  const data = b64(config);
+  const file = `${conn}.conf`;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Title headingLevel="h4" size="md" style={{ margin: '12px 0 6px' }}>One command (no file to copy)</Title>
+      <p>Paste in a terminal on the laptop (bash, zsh or fish). NetworkManager keeps the config, the file is removed:</p>
+      <Cmd id="wg-cmd-oneliner">{`echo ${data} | base64 -d > ${file} && nmcli connection import type wireguard file ${file}; rm -f ${file}`}</Cmd>
+      <p>wg-quick:</p>
+      <Cmd>{`echo ${data} | base64 -d | sudo tee /etc/wireguard/${file} > /dev/null && sudo chmod 600 /etc/wireguard/${file} && sudo wg-quick up ${conn}`}</Cmd>
+      <p style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
+        wg-quick cleanup for this one: <code>sudo wg-quick down {conn}; sudo rm -f /etc/wireguard/{file}</code>
+      </p>
+    </div>
+  );
+};
+
 const ConfigView: React.FC<{ result: WireGuardPeerCreated }> = ({ result }) => (
   <>
     {result.warning && <Alert variant="warning" isInline title="Device saved, not applied on the router yet" style={{ marginBottom: 12 }}>{result.warning}</Alert>}
@@ -130,6 +156,7 @@ const ConfigView: React.FC<{ result: WireGuardPeerCreated }> = ({ result }) => (
         </div>
       </FlexItem>
     </Flex>
+    {result.has_private_key && <OneLiners conn={result.filename.replace(/\.conf$/, '')} config={result.config} />}
     <LaptopCommands conn={result.filename.replace(/\.conf$/, '')} />
     <ClipboardCopy isCode isReadOnly variant="expansion" hoverTip="Copy" clickTip="Copied" style={{ marginTop: 12 }}>{result.config}</ClipboardCopy>
   </>
