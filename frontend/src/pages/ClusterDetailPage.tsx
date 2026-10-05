@@ -41,7 +41,7 @@ const Kubectl: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
   const [output, setOutput] = useState<ClusterCommandOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const usable = cluster.status === 'ready' || cluster.status === 'provisioning';
+  const usable = cluster.status === 'ready';
 
   const load = useCallback(async () => {
     setBusy(true);

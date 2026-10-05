@@ -155,7 +155,13 @@ class LibvirtClient:
     def list_vms(self) -> List[Dict[str, Any]]:
         """List all VMs (running and defined)"""
         conn = self.connect()
-        return [self._domain_dict(d) for d in conn.listAllDomains(0)]
+        result = []
+        for domain in conn.listAllDomains(0):
+            try:
+                result.append(self._domain_dict(domain))
+            except libvirt.libvirtError:
+                pass  # undefined between the listing and the lookup
+        return result
 
     def get_vm(self, name: str) -> Optional[Dict[str, Any]]:
         """Get VM by name"""

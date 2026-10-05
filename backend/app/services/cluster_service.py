@@ -17,6 +17,7 @@ import random
 import secrets
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from xml.sax.saxutils import quoteattr
 
@@ -409,22 +410,27 @@ class ClusterService:
         return libvirt_client.guest_exec(vm_name, argv, timeout)
 
     def _wait_ready(self, db: Session, task: Task, cluster: Cluster, progress_from: int, progress_to: int,
-                    timeout: float = READY_TIMEOUT) -> Dict[str, Any]:
-        """Wait until every node of the cluster is Ready (asked to the first control plane)"""
+                    timeout: float = READY_TIMEOUT, fresh: bool = False) -> Dict[str, Any]:
+        """Wait until every node of the cluster is Ready (asked to the first control plane).
+        fresh: only count Ready reported since the first control plane booted (after a start)."""
         driver = get_driver(cluster.type)
         first = self._first_ctlplane(cluster)
         expected = {n.name for n in cluster.nodes}
         deadline = time.monotonic() + timeout
         last_error = "k3s is not installed yet"
+        since = None
+        if fresh:
+            boot = self._exec(first.name, ["/bin/sh", "-c", "echo $(( $(date +%s) - $(cut -d. -f1 /proc/uptime) ))"])
+            since = datetime.fromtimestamp(int(boot["stdout"].strip()), timezone.utc)
         while True:
             ready: Dict[str, bool] = {}
             try:
                 out = self._exec(first.name, driver.ready_nodes_command(), timeout=30)
                 if out["exitcode"] == 0:
-                    ready = driver.parse_ready(out["stdout"])
+                    ready = driver.parse_ready(out["stdout"], since)
                 else:
                     last_error = (out["stderr"] or out["stdout"]).strip()[-300:] or "API not ready"
-            except (libvirt.libvirtError, TimeoutError, KeyError) as e:
+            except (libvirt.libvirtError, TimeoutError, KeyError, ValueError) as e:
                 last_error = str(e)
             count = sum(1 for name in expected if ready.get(name))
             span = progress_to - progress_from
@@ -496,7 +502,7 @@ class ClusterService:
                         if node.role == role and live and live["state"] == "shutoff":
                             libvirt_client.start_vm(node.name)
                 self._wait_agent(task, self._first_ctlplane(cluster).name, timeout=5 * 60)
-                result = self._wait_ready(db, task, cluster, 20, 95, timeout=10 * 60)
+                result = self._wait_ready(db, task, cluster, 20, 95, timeout=10 * 60, fresh=True)
                 if not cluster.kubeconfig:
                     self._fetch_kubeconfig(db, cluster)
                 self._set_status(db, cluster, "ready", None)

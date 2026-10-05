@@ -166,6 +166,7 @@ func (r *networkResource) Create(ctx context.Context, req resource.CreateRequest
 
 type diags interface {
 	AddError(summary, detail string)
+	AddWarning(summary, detail string)
 }
 
 // readInto refreshes m from the API; returns false if the network no longer exists.

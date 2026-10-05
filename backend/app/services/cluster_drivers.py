@@ -6,7 +6,9 @@ fetch the admin kubeconfig. Only k3s exists for now; kubeadm and OpenShift
 (agent-based installer) slot in as other drivers.
 """
 import ipaddress
+import json
 import shlex
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -58,13 +60,23 @@ class ClusterDriver:
         raise NotImplementedError
 
     @staticmethod
-    def parse_ready(output: str) -> Dict[str, bool]:
-        """`kubectl get nodes --no-headers` -> {node: Ready?}"""
+    def parse_ready(output: str, since: Optional[datetime] = None) -> Dict[str, bool]:
+        """`kubectl get nodes -o json` -> {node: Ready?}. With `since` (UTC), a node only counts
+        once its kubelet reported Ready after that time: right after a restart the API still
+        shows the Ready status recorded before the shutdown."""
         result = {}
-        for line in output.splitlines():
-            parts = line.split()
-            if len(parts) >= 2:
-                result[parts[0]] = "Ready" in parts[1].split(",")
+        for item in json.loads(output).get("items", []):
+            name = item.get("metadata", {}).get("name")
+            cond = next((c for c in item.get("status", {}).get("conditions", []) if c.get("type") == "Ready"), {})
+            ready = cond.get("status") == "True"
+            if ready and since is not None:
+                beat = cond.get("lastHeartbeatTime") or ""
+                try:
+                    ready = datetime.strptime(beat, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) >= since
+                except ValueError:
+                    ready = False
+            if name:
+                result[name] = ready
         return result
 
 
@@ -121,7 +133,7 @@ class K3sDriver(ClusterDriver):
         return extra
 
     def ready_nodes_command(self) -> List[str]:
-        return [K3S_BIN, "kubectl", "get", "nodes", "--no-headers"]
+        return [K3S_BIN, "kubectl", "get", "nodes", "-o", "json"]
 
     def kubectl_command(self, args: List[str]) -> List[str]:
         return [K3S_BIN, "kubectl"] + args
