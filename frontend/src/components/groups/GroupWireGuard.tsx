@@ -67,6 +67,46 @@ function handshake(epoch?: number | null): { text: string; fresh: boolean } {
   return { text, fresh: ago < HANDSHAKE_FRESH };
 }
 
+/** Config file name = interface / NetworkManager connection name (<= 15 chars), as wireguard_service.config_filename */
+export function wgConnectionName(groupName: string): string {
+  return `wg-${groupName}`.slice(0, 15).replace(/-+$/, '');
+}
+
+const Cmd: React.FC<{ id?: string; children: string }> = ({ id, children }) => (
+  <ClipboardCopy id={id} isCode isReadOnly hoverTip="Copy" clickTip="Copied" style={{ marginBottom: 6 }}>{children}</ClipboardCopy>
+);
+
+/** What to run on the laptop: connect / disconnect, and the cleanup once the device or the lab is gone */
+export const LaptopCommands: React.FC<{ conn: string; setup?: boolean; cleanup?: boolean }> = ({ conn, setup = true, cleanup = true }) => {
+  const file = `${conn}.conf`;
+  return (
+    <div className="wg-laptop-commands">
+      {setup && (
+        <>
+          <Title headingLevel="h4" size="md" style={{ margin: '12px 0 6px' }}>Fedora / RHEL (NetworkManager)</Title>
+          <p>Import the downloaded config (connects at once), then connect / disconnect:</p>
+          <Cmd id="wg-cmd-import">{`nmcli connection import type wireguard file ${file}`}</Cmd>
+          <Cmd>{`nmcli connection up ${conn}`}</Cmd>
+          <Cmd>{`nmcli connection down ${conn}`}</Cmd>
+          <Title headingLevel="h4" size="md" style={{ margin: '12px 0 6px' }}>Other Linux (wg-quick)</Title>
+          <Cmd>{`sudo wg-quick up ./${file}`}</Cmd>
+          <Cmd>{`sudo wg-quick down ./${file}`}</Cmd>
+        </>
+      )}
+      {cleanup && (
+        <>
+          <Title headingLevel="h4" size="md" style={{ margin: '12px 0 6px' }}>Clean up (device removed or lab deleted)</Title>
+          <p>NetworkManager:</p>
+          <Cmd id="wg-cmd-cleanup">{`nmcli connection delete ${conn}; rm -f ${file}`}</Cmd>
+          <p>wg-quick:</p>
+          <Cmd>{`sudo wg-quick down ./${file}; rm -f ${file}`}</Cmd>
+          <p style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>Windows / macOS / phones: delete the "{conn}" tunnel in the WireGuard app.</p>
+        </>
+      )}
+    </div>
+  );
+};
+
 const ConfigView: React.FC<{ result: WireGuardPeerCreated }> = ({ result }) => (
   <>
     {result.warning && <Alert variant="warning" isInline title="Device saved, not applied on the router yet" style={{ marginBottom: 12 }}>{result.warning}</Alert>}
@@ -86,12 +126,11 @@ const ConfigView: React.FC<{ result: WireGuardPeerCreated }> = ({ result }) => (
           Download {result.filename}
         </Button>
         <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
-          Fedora / RHEL (NetworkManager): <code>nmcli connection import type wireguard file {result.filename}</code><br />
-          Other Linux: <code>sudo wg-quick up ./{result.filename}</code><br />
           Windows / macOS / phones: WireGuard app, "Import tunnel from file" or scan the QR code.
         </div>
       </FlexItem>
     </Flex>
+    <LaptopCommands conn={result.filename.replace(/\.conf$/, '')} />
     <ClipboardCopy isCode isReadOnly variant="expansion" hoverTip="Copy" clickTip="Copied" style={{ marginTop: 12 }}>{result.config}</ClipboardCopy>
   </>
 );
@@ -293,6 +332,10 @@ export const GroupWireGuard: React.FC<{ group: GroupDetail; onDone: (msg: string
         </Tbody>
       </Table>
       {!status.router_running && <p style={{ marginTop: 8 }}>The router is stopped: start the group to connect.</p>}
+
+      <ExpandableSection toggleText="Commands on the laptop (connect, disconnect, clean up)" style={{ marginTop: 16 }} isIndented>
+        <LaptopCommands conn={wgConnectionName(group.name)} />
+      </ExpandableSection>
 
       <AddDeviceModal group={group} status={status} isOpen={adding} onClose={() => setAdding(false)} onAdded={load} />
       <Modal variant={ModalVariant.medium} title={`Device ${shown?.peer.name || ''}`} isOpen={!!shown} onClose={() => setShown(null)}

@@ -40,7 +40,7 @@ import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
-import { GroupWireGuard } from '../components/groups/GroupWireGuard';
+import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
 import { groupStatus } from './GroupsPage';
 
@@ -535,6 +535,15 @@ export const GroupDetailPage: React.FC = () => {
         onClose={() => setConfirmDelete(false)}>
         <p>Deletes the router, the {group.member_count} member VM(s) and the network {group.network_name}. VMs outside the group are never touched.</p>
         <Checkbox id="g-delete-disks" label="Also delete their disks" isChecked={deleteDisks} onChange={(_e, v) => setDeleteDisks(v)} style={{ marginTop: 12 }} />
+        {!!group.spec.router?.wireguard?.peers?.length && (
+          <div id="g-delete-wg" style={{ marginTop: 16 }}>
+            <p>
+              Remote access devices ({group.spec.router.wireguard.peers.map((p) => p.name).join(', ')}) keep their tunnel
+              config: remove it on each of them.
+            </p>
+            <LaptopCommands conn={wgConnectionName(group.name)} setup={false} />
+          </div>
+        )}
       </ConfirmModal>
       <CreateVMModal isOpen={customOpen} group={group} onClose={() => setCustomOpen(false)}
         onCreated={(msg) => onDone(msg || 'Member added')} />
