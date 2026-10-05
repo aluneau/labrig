@@ -26,6 +26,7 @@ from xml.sax.saxutils import quoteattr
 import libvirt
 import yaml
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from app.database import serialized
 from app.events import event_bus
@@ -179,7 +180,13 @@ class ClusterService:
         self.sync_clusters(db)
         vm_service.sync_vms(db)
         states = {vm["name"]: vm["state"] for vm in libvirt_client.list_vms()}
-        return [self.to_dict(db, c, states) for c in db.query(Cluster).order_by(Cluster.name).all()]
+        result = []
+        for c in db.query(Cluster).order_by(Cluster.name).all():
+            try:
+                result.append(self.to_dict(db, c, states))
+            except ObjectDeletedError:
+                continue  # deleted by another request meanwhile
+        return result
 
     def get_cluster(self, db: Session, cluster_id: int) -> Optional[Cluster]:
         return db.query(Cluster).filter(Cluster.id == cluster_id).first()

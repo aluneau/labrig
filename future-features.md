@@ -9,6 +9,22 @@
 Each section gives the design, the API / UI / OpenTofu impact and a rough effort (S ≤ 1 day,
 M ≈ 2–4 days, L ≈ 1–2 weeks).
 
+## Status at a glance (2026-10-05)
+
+| Area | State |
+|---|---|
+| §1.1–1.6 small features (lease release, ISO/boot/disks, libvirt on demand, NICs + SR-IOV) | ✅ done, OpenTofu included |
+| Console fidelity (VNC looked dark) | ✅ done: sharp scaling, 1:1/Fit toggle (§1.7) |
+| §2 Lab groups v1 + static reservations + custom (ISO/empty) members | ✅ done; v2 items open (§2.5) |
+| §3.2 k3s (standalone network) and kubeadm (in a lab group, router haproxy) | ✅ done |
+| §3.3 OpenShift SNO (agent-based installer) | **next** |
+| Authentication, CI, per-group resource budget | open (§4) |
+
+OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
+`_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
+`source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`), `_cluster` (k3s, kubeadm,
+`group_id`). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
+
 ---
 
 ## 1. Smaller features
@@ -134,11 +150,23 @@ Design:
   virtual IOMMU (intel, intremap, caching mode) + guest kernel args via cloud-init; igb = emulated SR-IOV
   (7 VFs, igbvf, vfio-pci bind + DPDK testpmd verified in Debian 13 / AlmaLinux 10); host SR-IOV view + VF
   count (helper `sriov-set-numvfs`); "SR-IOV VF pool" networks (`forward mode='hostdev'`), VF hot-plug, verified
-  nested (L2 on a VF of L1's igb). `vmmanager_nic`, `iommu` / `guest_kernel_args` on `vmmanager_vm`.
+  nested (L2 on a VF of L1's igb). `vmmanager_nic`, `iommu` / `guest_kernel_args` on `vmmanager_vm`,
+  `vmmanager_network` `mode = "hostdev"` (verified nested: VF pool on L1's igb + VM with a VF NIC, clean plan).
   docs/sriov.md has the OpenShift operator settings (82576 is not in OpenShift's supported list).
 - **Not yet**: macvtap / bridge-type NICs (only libvirt networks), VLAN trunks on NICs, NIC options in group /
   cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs), persisting VF counts from the UI,
   `<driver queues>` (multiqueue) and NIC MTU.
+
+### 1.7 Console fidelity (S) — ✅ done
+
+The owner found the VNC console "dark". Measured (guest framebuffer from `virsh screenshot` vs noVNC canvas vs
+page screenshot): nothing dims the canvas and it is bit-identical to the framebuffer. The cause was noVNC's
+fit-to-window scaling by fractional factors with smoothing, which smears 1-px console glyph strokes (glyph
+brightness 114 instead of 170 at 1920x1080). Now: no smoothing when not downscaling, snap to an integer
+device-pixel scale when it costs ≤ 15 %, smoothing only when really shrinking; toolbar "1:1 / Fit" toggle
+(remembered per browser). Depends on noVNC 1.4 internals (pinned `~1.4.0`). The rest of the "darkness" is the
+guest's own grey-on-black text console (not changed: it would alter reproduced customer guests).
+`e2e/console.js` checks framebuffer vs canvas vs page at several viewports / DPRs.
 
 ## 2. Lab groups
 
@@ -166,10 +194,16 @@ Design:
 > **Custom members** (done): the full Create VM form adds members too ("Custom VM…" on the Members tab,
 > "Lab group" select on the VMs page). `MemberSpec.source` = `cloud_image` | `iso` | `empty` (+ `iso`), so
 > ISO installs live in the spec like the rest (router metadata, rebuild, export). ISO/empty members get no
-> cloud-init: only the MAC reservation + DNS name, the installed OS must use DHCP. Next: the OpenTofu
-> `vmmanager_group` `member` block should gain `source`, `iso`, `cloud_init` and `user_data` (it only has
-> name/image/memory/vcpu/disk_size/role/ip today); PXE boot from the router (dnsmasq `dhcp-boot`) would
-> make empty-disk members useful (they boot nothing until an ISO is inserted on the VM's Devices tab).
+> cloud-init: only the MAC reservation + DNS name, the installed OS must use DHCP. The OpenTofu `member` block
+> has `source`, `iso`, `cloud_init` and `user_data` (verified: ISO member got its reserved IP, per-member login
+> in the guest, changing one member recreates only that member). Next: PXE boot from the router (dnsmasq
+> `dhcp-boot`) would make empty-disk members useful (they boot nothing until an ISO is inserted).
+>
+> **Router memory** (measured 2026-10-05): default **512 MiB** with a 1 GiB swap file created by cloud-init
+> before the first-boot dnf run. Alma 9 / 10: first boot 31–36 s, lowest free 117–120 MiB, swap 57–77 MiB;
+> steady state (dnsmasq + nftables + haproxy) ~140–150 MiB used. 384 MiB also boots but swaps ~230 MiB with
+> 41 MiB free, so 512 is the reliable value. haproxy is installed on every router (enabled only with load
+> balancers), so adding one later needs no dnf run on a live router.
 
 ### 2.1 Concept and data model (L)
 
@@ -393,17 +427,23 @@ version, pull_secret = file(...) }` with computed `kubeconfig` (sensitive) and `
 
 ## 4. Suggested order
 
-1. **§1.5 Start/stop libvirt + no idle keepalive** (it's a gaming rig: this matters every day), then
-   **§1.2 ISO attach/eject + §1.3 boot once + §1.4 disks** (these unblock ISO-based installs, including
-   the OpenShift agent ISO later), then **§1.1 DHCP release** (reuses the §1.5 helper).
-2. **Groups v1**: isolated network + EL router (dnsmasq + nftables) + members + DNS records; UI page;
-   `vmmanager_group`. Then v2: FRR/BGP, WireGuard, VLANs, snapshots, templates, export.
-3. **Clusters**: k3s → kubeadm (HA behind router haproxy) → OpenShift SNO (agent-based) →
-   compact/HA → disconnected. Offer "deploy with kcli" early as an escape hatch if a case needs a
-   topology we don't support natively yet.
+Done so far (2026-10): all of §1, groups v1 (+ reservations, custom members), k3s and kubeadm clusters.
+Next, in order:
+
+1. **OpenShift SNO with the agent-based installer (§3.3)** on a lab group: everything it needs exists
+   (router DNS incl. wildcards, generic `load_balancers`, ISO + boot order, fixed MACs/reservations,
+   pinned uplink for host access). Pull secret stored encrypted, `openshift-install` cached per version.
+   Then compact (3 nodes, haproxy for api/api-int/22623/ingress), then **OKD** for people without a
+   subscription, then **disconnected** (mirror registry; needs groups without uplink, see 2).
+2. **Groups v2 (§2.5)**: groups without uplink (prebuilt router image or a local package mirror —
+   required for disconnected OpenShift), FRR/BGP, WireGuard (incl. between hosts), VLANs, snapshots,
+   templates, export with disks, PXE (`dhcp-boot`) for empty-disk members, NIC options in member specs.
+3. SR-IOV on OpenShift: run the SR-IOV Network Operator on these VMs (igb, `docs/sriov.md`) and turn the
+   steps into a group/cluster option; real VF pools on RHEL lab hosts with SR-IOV NICs.
 4. Cross-cutting, before sharing widely: **authentication** (at least a local user + token; the API
-   can create VMs on the host), and a per-group **resource budget** check (CPU/RAM/disk) before
-   creating, so a lab doesn't starve the host.
+   can create VMs on the host), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
+   `go vet`, `e2e/smoke.js`), and a per-group **resource budget** check (CPU/RAM/disk) before creating,
+   so a lab doesn't starve the host.
 
 ### Sources
 - kcli: https://github.com/karmab/kcli, https://kcli.readthedocs.io/en/latest/

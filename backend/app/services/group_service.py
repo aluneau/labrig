@@ -24,6 +24,7 @@ import libvirt
 import yaml
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import ObjectDeletedError
 
 from app.database import serialized
 from app.events import event_bus
@@ -1005,11 +1006,17 @@ class GroupService:
         return None
 
     def list_api(self, db: Session) -> List[Dict[str, Any]]:
-        groups = self.list_groups(db)
         from app.services.network_service import network_service
-        network_service.sync_networks(db)
+        network_service.sync_networks(db)  # first: its commit would expire the group rows listed below
+        groups = self.list_groups(db)
         states = {vm["name"]: vm for vm in libvirt_client.list_vms()}
-        return [self.to_api(db, g, states) for g in groups]
+        result = []
+        for g in groups:
+            try:
+                result.append(self.to_api(db, g, states))
+            except ObjectDeletedError:
+                continue  # deleted by another request meanwhile (e.g. a group delete task finishing)
+        return result
 
     def detail_api(self, db: Session, group: Group) -> Dict[str, Any]:
         data = self.to_api(db, group)
