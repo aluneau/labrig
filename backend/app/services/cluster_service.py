@@ -991,7 +991,13 @@ class ClusterService:
     def get_kubeconfig(self, db: Session, cluster: Cluster) -> str:
         if cluster.type == "openshift":
             if not cluster.kubeconfig:
-                raise ValueError("The cluster has no kubeconfig yet (it is written when the install starts)")
+                # rebuilt from libvirt metadata: the install dir still has it
+                from app.services.openshift_service import openshift_service
+                path = openshift_service.root / "clusters" / cluster.name / "host-kubeconfig"
+                if not path.exists():
+                    raise ValueError("The cluster has no kubeconfig yet (it is written when the install starts)")
+                cluster.kubeconfig = path.read_text()
+                db.commit()
             return cluster.kubeconfig
         if not cluster.kubeconfig:
             if not cluster.api_ip:
