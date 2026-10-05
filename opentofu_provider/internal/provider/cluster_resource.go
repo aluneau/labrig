@@ -13,9 +13,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -29,37 +29,59 @@ var (
 
 const clusterTimeout = 30 * time.Minute
 
+// OpenShift: image build + install + operators (agent-based installer)
+const openshiftTimeout = 4 * time.Hour
+
 type clusterResource struct{ client *Client }
 
 type clusterModel struct {
-	ID             types.String `tfsdk:"id"`
-	Name           types.String `tfsdk:"name"`
-	Type           types.String `tfsdk:"type"`
-	Version        types.String `tfsdk:"version"`
-	Ctlplanes      types.Int64  `tfsdk:"ctlplanes"`
-	Workers        types.Int64  `tfsdk:"workers"`
-	CtlplaneMemory types.Int64  `tfsdk:"ctlplane_memory"`
-	CtlplaneVCPU   types.Int64  `tfsdk:"ctlplane_vcpu"`
-	CtlplaneDisk   types.Int64  `tfsdk:"ctlplane_disk_size"`
-	WorkerMemory   types.Int64  `tfsdk:"worker_memory"`
-	WorkerVCPU     types.Int64  `tfsdk:"worker_vcpu"`
-	WorkerDisk     types.Int64  `tfsdk:"worker_disk_size"`
-	CloudImageID   types.String `tfsdk:"cloud_image_id"`
-	Domain         types.String `tfsdk:"domain"`
-	Network        types.String `tfsdk:"network"`
-	GroupID        types.String `tfsdk:"group_id"`
-	RouterMemory   types.Int64  `tfsdk:"router_memory"`
-	CIDR           types.String `tfsdk:"cidr"`
-	ExtraArgs      types.String `tfsdk:"extra_args"`
-	Username       types.String `tfsdk:"username"`
-	Password       types.String `tfsdk:"password"`
-	SSHKeys        types.List   `tfsdk:"ssh_keys"`
-	Running        types.Bool   `tfsdk:"running"`
-	Status         types.String `tfsdk:"status"`
-	APIHostname    types.String `tfsdk:"api_hostname"`
-	APIEndpoint    types.String `tfsdk:"api_endpoint"`
-	NodeIPs        types.Map    `tfsdk:"node_ips"`
-	Kubeconfig     types.String `tfsdk:"kubeconfig"`
+	ID             types.String    `tfsdk:"id"`
+	Name           types.String    `tfsdk:"name"`
+	Type           types.String    `tfsdk:"type"`
+	Version        types.String    `tfsdk:"version"`
+	Ctlplanes      types.Int64     `tfsdk:"ctlplanes"`
+	Workers        types.Int64     `tfsdk:"workers"`
+	CtlplaneMemory types.Int64     `tfsdk:"ctlplane_memory"`
+	CtlplaneVCPU   types.Int64     `tfsdk:"ctlplane_vcpu"`
+	CtlplaneDisk   types.Int64     `tfsdk:"ctlplane_disk_size"`
+	WorkerMemory   types.Int64     `tfsdk:"worker_memory"`
+	WorkerVCPU     types.Int64     `tfsdk:"worker_vcpu"`
+	WorkerDisk     types.Int64     `tfsdk:"worker_disk_size"`
+	CloudImageID   types.String    `tfsdk:"cloud_image_id"`
+	Domain         types.String    `tfsdk:"domain"`
+	Network        types.String    `tfsdk:"network"`
+	GroupID        types.String    `tfsdk:"group_id"`
+	RouterMemory   types.Int64     `tfsdk:"router_memory"`
+	CIDR           types.String    `tfsdk:"cidr"`
+	ExtraArgs      types.String    `tfsdk:"extra_args"`
+	Username       types.String    `tfsdk:"username"`
+	Password       types.String    `tfsdk:"password"`
+	SSHKeys        types.List      `tfsdk:"ssh_keys"`
+	Running        types.Bool      `tfsdk:"running"`
+	Status         types.String    `tfsdk:"status"`
+	APIHostname    types.String    `tfsdk:"api_hostname"`
+	APIEndpoint    types.String    `tfsdk:"api_endpoint"`
+	NodeIPs        types.Map       `tfsdk:"node_ips"`
+	Kubeconfig     types.String    `tfsdk:"kubeconfig"`
+	OpenShift      *openshiftModel `tfsdk:"openshift"`
+	ConsoleURL     types.String    `tfsdk:"console_url"`
+	KubeadminPass  types.String    `tfsdk:"kubeadmin_password"`
+}
+
+type openshiftModel struct {
+	Channel         types.String `tfsdk:"channel"`
+	Topology        types.String `tfsdk:"topology"`
+	Storage         types.String `tfsdk:"storage"`
+	StorageDiskSize types.Int64  `tfsdk:"storage_disk_size"`
+	Operators       types.List   `tfsdk:"operators"`
+	SRIOV           types.Bool   `tfsdk:"sriov"`
+	SRIOVNics       types.Int64  `tfsdk:"sriov_nics"`
+	SRIOVVFs        types.Int64  `tfsdk:"sriov_vfs"`
+	SRIOVDeviceType types.String `tfsdk:"sriov_device_type"`
+	MetalLB         types.Bool   `tfsdk:"metallb"`
+	MetalLBAddrs    types.Int64  `tfsdk:"metallb_addresses"`
+	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
+	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
 }
 
 type apiClusterNode struct {
@@ -87,6 +109,7 @@ type apiCluster struct {
 	Ctlplanes     int64            `json:"ctlplanes"`
 	Workers       int64            `json:"workers"`
 	Spec          map[string]any   `json:"spec"`
+	ConsoleURL    *string          `json:"console_url"`
 	Nodes         []apiClusterNode `json:"nodes"`
 }
 
@@ -101,10 +124,18 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	replaceInt := []planmodifier.Int64{int64planmodifier.RequiresReplace()}
 	keepStr := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	replaceKeepStr := []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()}
-	intAttr := func(def int64, desc string) schema.Int64Attribute {
-		return schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(def),
-			PlanModifiers: replaceInt, Description: desc}
+	keepReplaceInt := []planmodifier.Int64{int64planmodifier.RequiresReplace(), int64planmodifier.UseStateForUnknown()}
+	// Server-side defaults (k3s / kubeadm: 2048 MiB, 2 vCPU, 20 GiB; OpenShift: per topology), read back
+	intAttr := func(desc string) schema.Int64Attribute {
+		return schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt, Description: desc}
 	}
+	osStr := func(desc string) schema.StringAttribute {
+		return schema.StringAttribute{Optional: true, Description: desc}
+	}
+	osInt := func(desc string) schema.Int64Attribute {
+		return schema.Int64Attribute{Optional: true, Description: desc}
+	}
+	osBool := func(desc string) schema.BoolAttribute { return schema.BoolAttribute{Optional: true, Description: desc} }
 	resp.Schema = schema.Schema{
 		Description: "A Kubernetes cluster made of VMs. k3s: on its own NAT network (no router) or an existing one. " +
 			"kubeadm: inside a lab group (an existing one, group_id, or one created for the cluster and deleted with it) " +
@@ -113,17 +144,18 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		Attributes: map[string]schema.Attribute{
 			"id":      schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
 			"name":    schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "DNS label; nodes are <name>-ctlplane-N / <name>-worker-N."},
-			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (standalone network) or kubeadm (in a lab group with a router; openshift: not supported yet)."},
-			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). The installed version is read back."},
-			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(1), PlanModifiers: replaceInt,
-				Description: "Control planes: 1, or 3/5 with embedded etcd."},
-			"workers":            schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(2), Description: "Workers; changed in place (added / drained and removed)."},
-			"ctlplane_memory":    intAttr(2048, "MiB."),
-			"ctlplane_vcpu":      intAttr(2, ""),
-			"ctlplane_disk_size": intAttr(20, "GiB."),
-			"worker_memory":      intAttr(2048, "MiB."),
-			"worker_vcpu":        intAttr(2, ""),
-			"worker_disk_size":   intAttr(20, "GiB."),
+			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (standalone network), kubeadm or openshift (in a lab group with a router)."},
+			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 (default: latest of openshift.channel). The installed version is read back."},
+			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt,
+				Description: "Control planes: 1, or 3/5 with embedded etcd (default 1). openshift: set by openshift.topology."},
+			"workers": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+				Description: "Workers (default 2; openshift: HA topology only); changed in place for k3s / kubeadm (added / drained and removed)."},
+			"ctlplane_memory":    intAttr("MiB."),
+			"ctlplane_vcpu":      intAttr(""),
+			"ctlplane_disk_size": intAttr("GiB."),
+			"worker_memory":      intAttr("MiB."),
+			"worker_vcpu":        intAttr(""),
+			"worker_disk_size":   intAttr("GiB."),
 			"cloud_image_id":     schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "vmmanager_cloud_image id. Default: Debian 13, else AlmaLinux 9."},
 			"domain":             schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Base domain: the API is api.<name>.<domain>. Default: lab; kubeadm in an existing group: the group's domain."},
 			"network":            schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: existing network for the nodes. Default: a new NAT network vmm-k-<name>, deleted with the cluster. kubeadm: the group's network (computed)."},
@@ -137,12 +169,34 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"password":   schema.StringAttribute{Optional: true, Sensitive: true, PlanModifiers: replaceStr},
 			"ssh_keys": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()}},
-			"running":      schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Desired power state of all nodes."},
-			"status":       schema.StringAttribute{Computed: true},
-			"api_hostname": schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
-			"api_endpoint": schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "Reachable from the host: k3s https://<first control plane IP>:6443, kubeadm https://<group router uplink IP>:<port> (haproxy in front of every control plane)."},
-			"node_ips":     schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Node name -> IP."},
-			"kubeconfig":   schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "Admin kubeconfig pointing at api_endpoint."},
+			"running":            schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Desired power state of all nodes."},
+			"status":             schema.StringAttribute{Computed: true},
+			"api_hostname":       schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
+			"api_endpoint":       schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "Reachable from the host: k3s https://<first control plane IP>:6443, kubeadm https://<group router uplink IP>:<port> (haproxy in front of every control plane)."},
+			"node_ips":           schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Node name -> IP."},
+			"kubeconfig":         schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "Admin kubeconfig pointing at api_endpoint (openshift: with tls-server-name = api_hostname)."},
+			"console_url":        schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "openshift: web console (resolvable through the group router's DNS, e.g. over WireGuard)."},
+			"kubeadmin_password": schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "openshift: kubeadmin password."},
+			"openshift": schema.SingleNestedAttribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
+				Description:   "type = openshift (agent-based installer, needs the pull secret stored on the server). Unset fields take the server defaults.",
+				Attributes: map[string]schema.Attribute{
+					"channel":           osStr("e.g. stable-4.20 (default)."),
+					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
+					"storage":           osStr("none (default), lvms or odf (>= 3 nodes); adds a disk per storage node."),
+					"storage_disk_size": osInt("GiB (default 100)."),
+					"operators":         schema.ListAttribute{Optional: true, ElementType: types.StringType, Description: "OLM package names (default channel, redhat-operators)."},
+					"sriov":             osBool("Emulated SR-IOV: vIOMMU + igb NICs, SR-IOV Network Operator, sample policy."),
+					"sriov_nics":        osInt("igb NICs per node (default 1)."),
+					"sriov_vfs":         osInt("VFs per NIC (default 4, max 7)."),
+					"sriov_device_type": osStr("netdevice (default) or vfio-pci."),
+					"metallb":           osBool("MetalLB L2 with a pool kept free in the group network."),
+					"metallb_addresses": osInt("Pool size (default 16)."),
+					"metallb_demo":      osBool("Deploy the MetalLB L2 lab demo (hello.<group domain>), default true."),
+					"disable_updates":   osBool("Clear the update channel (default true)."),
+				},
+			},
 		},
 	}
 }
@@ -161,7 +215,11 @@ func (r *clusterResource) get(ctx context.Context, id string) (*apiCluster, erro
 
 // waitIdle polls until no task runs on the cluster; fails if it ends in "error".
 func (r *clusterResource) waitIdle(ctx context.Context, id string) error {
-	return Poll(ctx, 5*time.Second, clusterTimeout, func() (bool, error) {
+	timeout := clusterTimeout
+	if c, err := r.get(ctx, id); err == nil && c.Type == "openshift" {
+		timeout = openshiftTimeout
+	}
+	return Poll(ctx, 10*time.Second, timeout, func() (bool, error) {
 		c, err := r.get(ctx, id)
 		if err != nil {
 			return false, err
@@ -212,14 +270,10 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 	body := map[string]any{
-		"name":      plan.Name.ValueString(),
-		"type":      plan.Type.ValueString(),
-		"version":   strPtr(plan.Version),
-		"ctlplanes": plan.Ctlplanes.ValueInt64(),
-		"workers":   plan.Workers.ValueInt64(),
-		"ctlplane":  map[string]any{"memory": plan.CtlplaneMemory.ValueInt64(), "vcpu": plan.CtlplaneVCPU.ValueInt64(), "disk_size": plan.CtlplaneDisk.ValueInt64()},
-		"worker":    map[string]any{"memory": plan.WorkerMemory.ValueInt64(), "vcpu": plan.WorkerVCPU.ValueInt64(), "disk_size": plan.WorkerDisk.ValueInt64()},
-		"network":   strPtr(plan.Network),
+		"name":    plan.Name.ValueString(),
+		"type":    plan.Type.ValueString(),
+		"version": strPtr(plan.Version),
+		"network": strPtr(plan.Network),
 		"router_memory": func() any {
 			if plan.RouterMemory.IsNull() || plan.RouterMemory.IsUnknown() {
 				return nil
@@ -230,6 +284,89 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		"extra_args": strPtr(plan.ExtraArgs),
 		"username":   strPtr(plan.Username),
 		"password":   strPtr(plan.Password),
+	}
+	if v := intPtr(plan.Ctlplanes); v != nil {
+		body["ctlplanes"] = *v
+	}
+	if v := intPtr(plan.Workers); v != nil {
+		body["workers"] = *v
+	}
+	for key, attrs := range map[string][3]types.Int64{
+		"ctlplane": {plan.CtlplaneMemory, plan.CtlplaneVCPU, plan.CtlplaneDisk},
+		"worker":   {plan.WorkerMemory, plan.WorkerVCPU, plan.WorkerDisk},
+	} {
+		res := map[string]any{}
+		for i, field := range []string{"memory", "vcpu", "disk_size"} {
+			if v := intPtr(attrs[i]); v != nil {
+				res[field] = *v
+			}
+		}
+		if len(res) > 0 {
+			body[key] = res
+		}
+	}
+	if os := plan.OpenShift; os != nil || plan.Type.ValueString() == "openshift" {
+		opts := map[string]any{}
+		if os != nil {
+			if v := strPtr(os.Channel); v != nil {
+				opts["channel"] = *v
+			}
+			if v := strPtr(os.Topology); v != nil {
+				opts["topology"] = *v
+			}
+			if v := strPtr(os.Storage); v != nil {
+				opts["storage"] = *v
+			}
+			if v := intPtr(os.StorageDiskSize); v != nil {
+				opts["storage_disk_size"] = *v
+			}
+			if !os.Operators.IsNull() && !os.Operators.IsUnknown() {
+				var names []string
+				resp.Diagnostics.Append(os.Operators.ElementsAs(ctx, &names, false)...)
+				ops := []map[string]any{}
+				for _, n := range names {
+					ops = append(ops, map[string]any{"name": n})
+				}
+				opts["operators"] = ops
+			}
+			sriov := map[string]any{}
+			if !os.SRIOV.IsNull() {
+				sriov["enabled"] = os.SRIOV.ValueBool()
+			}
+			if v := intPtr(os.SRIOVNics); v != nil {
+				sriov["nics"] = *v
+			}
+			if v := intPtr(os.SRIOVVFs); v != nil {
+				sriov["vfs"] = *v
+			}
+			if v := strPtr(os.SRIOVDeviceType); v != nil {
+				sriov["device_type"] = *v
+			}
+			if len(sriov) > 0 {
+				opts["sriov"] = sriov
+			}
+			mlb := map[string]any{}
+			if !os.MetalLB.IsNull() {
+				mlb["enabled"] = os.MetalLB.ValueBool()
+			}
+			if v := intPtr(os.MetalLBAddrs); v != nil {
+				mlb["addresses"] = *v
+			}
+			if !os.MetalLBDemo.IsNull() {
+				mlb["demo"] = os.MetalLBDemo.ValueBool()
+			}
+			if len(mlb) > 0 {
+				opts["metallb"] = mlb
+			}
+			if !os.DisableUpdates.IsNull() {
+				opts["disable_updates"] = os.DisableUpdates.ValueBool()
+			}
+		}
+		if v := strPtr(plan.Version); v != nil {
+			opts["version"] = *v
+		}
+		delete(body, "version")
+		body["openshift"] = opts
 	}
 	if d := strPtr(plan.Domain); d != nil {
 		body["domain"] = *d
@@ -277,6 +414,7 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		}
 	}
 	plan.Kubeconfig = types.StringNull()
+	plan.KubeadminPass = types.StringNull()
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
@@ -315,6 +453,32 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 	}
 	if img, ok := c.Spec["cloud_image_id"].(float64); ok {
 		m.CloudImageID = types.StringValue(strconv.FormatInt(int64(img), 10))
+	}
+	for key, attrs := range map[string][3]*types.Int64{
+		"ctlplane": {&m.CtlplaneMemory, &m.CtlplaneVCPU, &m.CtlplaneDisk},
+		"worker":   {&m.WorkerMemory, &m.WorkerVCPU, &m.WorkerDisk},
+	} {
+		res, _ := c.Spec[key].(map[string]any)
+		for i, field := range []string{"memory", "vcpu", "disk_size"} {
+			if v, ok := res[field].(float64); ok {
+				*attrs[i] = types.Int64Value(int64(v))
+			} else if attrs[i].IsUnknown() {
+				*attrs[i] = types.Int64Null()
+			}
+		}
+	}
+	m.ConsoleURL = strOrNull(c.ConsoleURL)
+	if c.Type == "openshift" && (m.KubeadminPass.IsNull() || m.KubeadminPass.IsUnknown()) {
+		var creds struct {
+			Password *string `json:"password"`
+		}
+		if err := r.client.Do(ctx, "GET", "/clusters/"+m.ID.ValueString()+"/openshift/credentials", nil, &creds); err == nil {
+			m.KubeadminPass = strOrNull(creds.Password)
+		} else {
+			m.KubeadminPass = types.StringNull()
+		}
+	} else if m.KubeadminPass.IsUnknown() {
+		m.KubeadminPass = types.StringNull()
 	}
 	m.Status = types.StringValue(c.Status)
 	m.Running = types.BoolValue(c.Status != "stopped" && c.Status != "stopping")
@@ -364,6 +528,7 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 	id := state.ID.ValueString()
 	plan.ID = state.ID
 	plan.Kubeconfig = state.Kubeconfig
+	plan.KubeadminPass = state.KubeadminPass
 
 	if plan.Running.ValueBool() && !state.Running.ValueBool() {
 		if err := r.power(ctx, id, "start"); err != nil {

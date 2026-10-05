@@ -1,0 +1,112 @@
+# OpenShift clusters (agent-based installer)
+
+The app installs OpenShift Container Platform with Red Hat's **agent-based installer** inside a lab
+group. The group's router plays the customer's datacenter: DNS, DHCP reservations, and the external
+load balancer (haproxy). Topologies:
+
+| Topology | Nodes | Default size | Notes |
+|---|---|---|---|
+| `sno` | 1 master | 8 vCPU, 24 GiB, 120 GiB | Single-node OpenShift. Storage: LVMS. |
+| `compact` | 3 masters (schedulable) | 8 vCPU, 20 GiB, 120 GiB each | ODF possible on the masters. |
+| `ha` | 3 masters + N workers (≥ 2) | workers 4 vCPU, 12 GiB | Ingress on the workers. ODF needs ≥ 3 workers. |
+
+ODF adds 8 vCPU and 24 GiB to each storage node (resource profile `lean`). The app refuses a
+cluster whose RAM doesn't fit next to the running VMs (no overcommit: an OOM-killed master corrupts etcd).
+
+## Before the first cluster
+
+1. **Pull secret** (console.redhat.com/openshift/install/pull-secret): in the *Create cluster* dialog
+   (paste it, or give a host path such as `~/pull-secret.json`), or
+   `curl -X PUT http://127.0.0.1:8000/api/v1/openshift/pull-secret -H 'Content-Type: application/json' -d '{"path":"~/pull-secret.json"}'`.
+   It is stored in `backend/data/openshift/pull-secret.json` (mode 0600), never in the database and never
+   returned by the API. Keep your own copy private too (`chmod 600 ~/pull-secret.json`).
+2. **Disk space**: per release ~1 GB of binaries (`openshift-install`, `oc`) and ~1.4 GB of base ISO cache
+   in `backend/data/openshift/`; per cluster 120 GiB thin disks (+ storage disks).
+
+## What happens
+
+1. The lab group (created for the cluster unless you pick one) gets the node reservations and records:
+   `api` / `api-int.<cluster>.<domain>` and `*.apps.<cluster>.<domain>` -> router LAN IP; haproxy on
+   **6443, 22623** (masters) and **80, 443** (ingress nodes). These ports are fixed: **one OpenShift
+   cluster per group**, and no kubeadm cluster in the same group.
+2. `openshift-install` and `oc` for the chosen release are downloaded (checksums verified) and cached.
+3. `install-config.yaml` (platform `none`, OVN-Kubernetes, machine network = group CIDR) and
+   `agent-config.yaml` (rendezvous IP = master-0, hosts with MAC / role / root disk `/dev/vda`) are
+   rendered into `backend/data/openshift/clusters/<name>/` (kept: copies `*.orig`, `auth/`, logs);
+   `openshift-install agent create image` builds the ISO, uploaded to the default pool.
+4. The node VMs boot it (boot order disk, then CD: the empty disk falls through to the ISO, the
+   installed disk wins afterwards). Progress comes from the Assisted Service on master-0 (polled from the
+   router, the host has no route to the group), then from the API (cluster operators). Pending node CSRs
+   are approved.
+5. The ISO is ejected and deleted, updates are disabled (channel cleared), add-ons are installed.
+
+Typical times on a desktop: ISO 3–5 min (first time per release: + base ISO extraction), SNO install
+40–60 min, add-ons 5–15 min.
+
+## Reaching the cluster
+
+- **kubeconfig** (cluster page): `server: https://<router uplink IP>:6443` with
+  `tls-server-name: api.<cluster>.<domain>`, so it works from the host and over WireGuard without DNS.
+- **Console**: `https://console-openshift-console.apps.<cluster>.<domain>`, user `kubeadmin` (password on
+  the cluster page). The name must resolve:
+  - from a laptop: enable **Remote access** on the group (docs/wireguard.md); the tunnel's DNS is the router;
+  - from the host: `/etc/hosts` lines for the router's uplink IP (the cluster page prints them):
+    `console-openshift-console.apps.<c>.<d>`, `oauth-openshift.apps.<c>.<d>` (+ any route you use).
+- **SSH** to the nodes as `core` with the key from the cluster page (from the router, or over WireGuard).
+
+## Add-ons
+
+Chosen at creation, or later from the cluster's *Operators* tab:
+
+- **Operators**: any OLM package (curated list at creation, the live catalog afterwards). The app creates
+  the Namespace (the package's suggested one), the OperatorGroup and the Subscription (default channel),
+  waits for the CSV, then the operator's CR when one is required (NMState, HyperConverged, NFD).
+- **LVMS** (`storage: lvms`): an extra disk per node (serial `vmm-storage`, `/dev/disk/by-id/virtio-vmm-storage`),
+  `LVMCluster` -> default StorageClass `lvms-vg1`.
+- **ODF** (`storage: odf`): Local Storage Operator (`LocalVolumeSet` `localblock`) + ODF `StorageCluster`
+  (3 replicas, `lean`), default StorageClass `ocs-storagecluster-ceph-rbd`.
+- **SR-IOV** (`sriov.enabled`): every node gets a vIOMMU and igb NICs (emulated 82576, up to 7 VFs) on the
+  group network. The SR-IOV Network Operator runs in dev mode (`DEV_MODE=TRUE`: igb is not in its
+  supported NIC list), `SriovOperatorConfig` with `disableDrain` on SNO / compact, a policy
+  `igb-<device type>` (resource `openshift.io/igbnetdev`) and a `SriovNetwork` `igb-net` (whereabouts,
+  `192.168.50.0/24`) for namespace `sriov-demo`. `vfio-pci` adds `intel_iommu=on iommu=pt` at install.
+  See docs/sriov.md for the nested-virtualization details.
+- **MetalLB** (`metallb.enabled`): a pool of addresses after the group's DHCP range is kept free in the
+  group (`address_pools`), MetalLB in L2 mode (`IPAddressPool lab-pool` + `L2Advertisement`).
+
+## Scenario: MetalLB L2 lab
+
+`metallb.demo` deploys `hello` (2 httpd pods answering with their pod and node names) behind a
+`Service type=LoadBalancer`; the router serves `hello.<group domain>` -> its external IP. The cluster's
+*MetalLB lab* tab draws the path and runs the checks:
+
+```
+laptop ──WireGuard──► host relay ──► router (DNS hello.<domain>) ──► group L2 segment
+                                                                    │  ARP "who has <service IP>?"
+                                                                    ▼
+                                                     announcing node (speaker) ──► kube-proxy / OVN ──► hello pods
+```
+
+Things to try:
+- `curl http://hello.<domain>` from the laptop (WireGuard) or `curl http://<ip>` from the router.
+- Which node announces: the tab, or `oc get servicel2statuses -n metallb-system`, or the speaker logs
+  `oc -n metallb-system logs ds/speaker -c speaker | grep -i announc`.
+- **Failover** (multi-node): stop the announcing node from the nodes table; another speaker sends a
+  gratuitous ARP and the IP moves (seconds, longer for the dead node's endpoints).
+- `externalTrafficPolicy: Local` vs `Cluster`: `oc -n metallb-demo patch svc hello -p '{"spec":{"externalTrafficPolicy":"Local"}}'`;
+  only nodes with a hello pod announce, and the source IP is preserved.
+
+Not yet: BGP mode (needs FRR on the router), OKD, disconnected installs, `platform: baremetal` with VIPs,
+adding workers after install, upgrades from the app.
+
+## Troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| ISO build fails | `backend/data/openshift/clusters/<name>/create-image.log` and `.openshift_install.log` |
+| Stuck at "Booting the nodes" | node console: the agent ISO's login banner lists failed validations; `curl http://<master-0>:8090/...` from the router |
+| Install stuck in cluster operators | cluster page (operator messages); `oc --kubeconfig <downloaded> get co` |
+| Nodes NotReady after a restart | pending CSRs: the start task approves them; `oc get csr` |
+| Console doesn't open | name resolution of `*.apps.<cluster>.<domain>` (WireGuard DNS or `/etc/hosts`) |
+
+Don't stop a cluster during its first 24 hours: the first certificate rotation happens then.

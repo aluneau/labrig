@@ -376,6 +376,30 @@ class GroupClusterNetwork(ClusterNetwork):
             raise ValueError(f"The router of group {spec.name} has no uplink address: the host can't reach the API")
         return spec.router.uplink_ip
 
+    def publish_lb(self, name: str, port: int, backends: List[str]) -> None:
+        """A TCP load balancer on every router address (OpenShift: api, machine config, ingress)"""
+        from app.schemas.group import LoadBalancerSpec
+
+        def op(spec):
+            clash = next((lb for lb in spec.load_balancers if lb.port == port
+                          and not (lb.owner == self.owner and lb.name == name)), None)
+            if clash:
+                raise ValueError(f"Port {port} of group {spec.name}'s router is already used by "
+                                 f"load balancer {clash.name}")
+            spec.load_balancers = [lb for lb in spec.load_balancers
+                                   if not (lb.owner == self.owner and lb.name == name)]
+            spec.load_balancers.append(LoadBalancerSpec(name=name, port=port, backends=backends, owner=self.owner))
+        self._ops.append(op)
+
+    def set_address_pool(self, name: str, start: str, end: str) -> None:
+        """Keep a range of the group network free (MetalLB pool)"""
+        from app.schemas.group import AddressPoolSpec
+
+        def op(spec):
+            spec.address_pools = [p for p in spec.address_pools if not (p.owner == self.owner and p.name == name)]
+            spec.address_pools.append(AddressPoolSpec(name=name, start=start, end=end, owner=self.owner))
+        self._ops.append(op)
+
     def free_lb_port(self, start: int = 6443) -> int:
         from app.schemas.group import RESERVED_ROUTER_PORTS
         used = {lb.port for lb in self.spec().load_balancers} | RESERVED_ROUTER_PORTS
@@ -405,6 +429,7 @@ class GroupClusterNetwork(ClusterNetwork):
             spec.reservations = [r for r in spec.reservations if r.owner != self.owner]
             spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != self.owner]
             spec.load_balancers = [lb for lb in spec.load_balancers if lb.owner != self.owner]
+            spec.address_pools = [p for p in spec.address_pools if p.owner != self.owner]
         self._ops.append(op)
         self.commit()
 

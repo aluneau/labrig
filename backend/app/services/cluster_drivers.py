@@ -468,7 +468,16 @@ class KubeadmDriver(ClusterDriver):
         return ["/usr/bin/kubeadm", "token", "create", "--ttl", "24h"]
 
 
-DRIVERS: Dict[str, ClusterDriver] = {"k3s": K3sDriver(), "kubeadm": KubeadmDriver()}
+class OpenShiftDriver(ClusterDriver):
+    """OpenShift (agent-based installer): installed and driven from the host (openshift_installer,
+    `oc` through the router's load balancer), not through cloud-init / the guest agent"""
+
+    type = "openshift"
+    needs_group = True
+    orchestrated = True
+
+
+DRIVERS: Dict[str, ClusterDriver] = {"k3s": K3sDriver(), "kubeadm": KubeadmDriver(), "openshift": OpenShiftDriver()}
 
 
 def get_driver(cluster_type: str) -> ClusterDriver:

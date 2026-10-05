@@ -192,7 +192,14 @@ class GroupService:
                 raise ValueError(f"Reserved host {r.name} IP {r.ip} is inside the dynamic DHCP range")
         used_ips = {router.ip} | {m.ip for m in spec.members if m.ip} | {r.ip for r in spec.reservations}
         used_ips |= {h.ip for h in spec.dhcp_hosts}
-        static_pool = [h for h in hosts[9 if len(hosts) >= 64 else 1:] if not dhcp_start <= h <= dhcp_end]
+        static_pool = [h for h in hosts[9 if len(hosts) >= 64 else 1:] if not dhcp_start <= h <= dhcp_end
+                       and not any(p.contains(str(h)) for p in spec.address_pools)]
+        for pool in spec.address_pools:
+            for bound in (pool.start, pool.end):
+                if ipaddress.IPv4Address(bound) not in net:
+                    raise ValueError(f"Address pool {pool.name}: {bound} is outside {net}")
+            if not (ipaddress.IPv4Address(pool.end) < dhcp_start or ipaddress.IPv4Address(pool.start) > dhcp_end):
+                raise ValueError(f"Address pool {pool.name} overlaps the DHCP range")
         for m in spec.members:
             prev = old_members.get(m.name)
             if not m.mac:
@@ -595,6 +602,8 @@ class GroupService:
                             + [r for r in old.reservations if r.owner])
         new.load_balancers = ([lb for lb in new.load_balancers if not lb.owner]
                               + [lb for lb in old.load_balancers if lb.owner])
+        new.address_pools = ([p for p in new.address_pools if not p.owner]
+                             + [p for p in old.address_pools if p.owner])
         new.owner = old.owner
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
         # WireGuard peers are added / removed through /wireguard/peers (devices hold their configs):
@@ -636,7 +645,7 @@ class GroupService:
         used |= {r.ip for r in spec.reservations} | {r.a for r in spec.router.dns.records if r.a}
         used |= {h.ip for h in spec.dhcp_hosts}
         for h in hosts[9 if len(hosts) >= 64 else 1:]:
-            if not start <= h <= end and str(h) not in used:
+            if not start <= h <= end and str(h) not in used and not any(p.contains(str(h)) for p in spec.address_pools):
                 return str(h)
         raise ValueError(f"No free static address left in {net} (outside the DHCP range)")
 
@@ -1315,6 +1324,7 @@ class GroupService:
         model.router.dns.records = [r for r in model.router.dns.records if not r.owner]
         model.reservations = [r for r in model.reservations if not r.owner]
         model.load_balancers = [lb for lb in model.load_balancers if not lb.owner]
+        model.address_pools = [p for p in model.address_pools if not p.owner]
         model.router.uplink_ip = None
         model.owner = None
         if model.router.wireguard is not None:  # assigned on this host / by this router
