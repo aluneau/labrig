@@ -421,6 +421,23 @@ class LeaseRelease(BaseModel):
     released: bool
 
 
+class GroupHostInfo(BaseModel):
+    """A reserved host (not a member), e.g. a cluster node"""
+    name: str
+    ip: str
+    mac: str
+    owner: Optional[str] = None
+    fqdn: Optional[str] = None
+    vm_id: Optional[int] = None
+    state: str = "missing"
+
+
+class GroupClusterRef(BaseModel):
+    id: int
+    name: str
+    type: str
+
+
 class Group(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -445,23 +462,6 @@ class Group(BaseModel):
     spec: GroupSpec
     created_at: datetime
     updated_at: datetime
-
-
-class GroupHostInfo(BaseModel):
-    """A reserved host (not a member), e.g. a cluster node"""
-    name: str
-    ip: str
-    mac: str
-    owner: Optional[str] = None
-    fqdn: Optional[str] = None
-    vm_id: Optional[int] = None
-    state: str = "missing"
-
-
-class GroupClusterRef(BaseModel):
-    id: int
-    name: str
-    type: str
 
 
 class GroupDetail(Group):
