@@ -22,6 +22,7 @@ import { PageHeader } from '../components/common/PageHeader';
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { CreateClusterModal } from '../components/clusters/CreateClusterModal';
+import { clusterDeleteText } from './ClusterDetailPage';
 
 /** Status label, plus the task's progress bar while something is running */
 export const ClusterStatus: React.FC<{ cluster: Cluster }> = ({ cluster }) => (
@@ -60,7 +61,7 @@ export const ClustersPage: React.FC = () => {
 
   return (
     <>
-      <PageHeader title="Clusters" description="Kubernetes clusters built from cloud-image VMs (k3s)."
+      <PageHeader title="Clusters" description="Kubernetes clusters built from cloud-image VMs: k3s on a standalone network, kubeadm inside a lab group (router DNS + haproxy)."
         actions={<Button onClick={() => setIsCreateOpen(true)}>Create cluster</Button>} />
       <PageSection>
         {(error || loadError) && (
@@ -76,7 +77,7 @@ export const ClustersPage: React.FC = () => {
           <Table aria-label="Clusters" variant="compact">
             <Thead>
               <Tr>
-                <Th>Name</Th><Th>Type</Th><Th>Status</Th><Th>Nodes</Th><Th>API</Th><Th>Network</Th>
+                <Th>Name</Th><Th>Type</Th><Th>Status</Th><Th>Nodes</Th><Th>API</Th><Th>Network / group</Th>
                 <Th screenReaderText="Actions" />
               </Tr>
             </Thead>
@@ -94,7 +95,9 @@ export const ClustersPage: React.FC = () => {
                     <div>{c.api_hostname}</div>
                     {c.api_endpoint && <code>{c.api_endpoint}</code>}
                   </Td>
-                  <Td dataLabel="Network">{c.network}</Td>
+                  <Td dataLabel="Network / group">
+                    {c.group_id ? <>group <Link to={`/groups/${c.group_id}`}>{c.group_name}</Link></> : c.network}
+                  </Td>
                   <Td isActionCell>
                     <ActionsColumn items={[
                       { title: 'Details', onClick: () => navigate(`/clusters/${c.id}`) },
@@ -120,8 +123,7 @@ export const ClustersPage: React.FC = () => {
         onCreated={(id) => navigate(`/clusters/${id}`)} />
       <ConfirmModal title={`Delete cluster ${toDelete?.name}?`} isOpen={!!toDelete} confirmLabel="Delete"
         onConfirm={() => run(() => clusterApi.delete(toDelete!.id))} onClose={() => setToDelete(null)}>
-        Deletes the {toDelete?.nodes.length} node VMs and their disks
-        {toDelete?.network_owned ? `, and the network ${toDelete?.network}` : ''}.
+        Deletes the {toDelete?.nodes.length} node VMs and their disks{toDelete ? clusterDeleteText(toDelete) : ''}.
       </ConfirmModal>
     </>
   );

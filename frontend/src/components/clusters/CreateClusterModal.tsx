@@ -18,8 +18,8 @@ import {
   TextInput,
   Title,
 } from '@patternfly/react-core';
-import { CloudImage, ClusterCreate, Network } from '../../types';
-import { clusterApi, networkApi, storageApi } from '../../services/api';
+import { CloudImage, ClusterCreate, Group, Network } from '../../types';
+import { clusterApi, groupApi, networkApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 
@@ -31,6 +31,16 @@ interface Props {
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 const OWN_NETWORK = '';
+const AUTO_GROUP = '';
+
+/** What each cluster type runs on: shown in the modal and on the cluster page */
+export const CLUSTER_TYPE_HELP: Record<string, string> = {
+  k3s: 'Standalone cluster network (no router): the nodes get their own libvirt NAT network; '
+    + 'its dnsmasq serves their addresses and api.<name>.<domain> (first control plane).',
+  kubeadm: 'Runs inside a lab group with a router (DNS + haproxy load balancer): '
+    + 'api.<name>.<domain> is the router\'s haproxy in front of every control plane, '
+    + 'reachable from this host on the router\'s uplink address.',
+};
 
 interface Role { memory: string; vcpu: string; disk: string }
 
@@ -67,6 +77,8 @@ const toResources = (r: Role) => ({
 export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) => {
   const [images, setImages] = useState<CloudImage[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [groupId, setGroupId] = useState(AUTO_GROUP);
   const [name, setName] = useState('');
   const [type, setType] = useState('k3s');
   const [version, setVersion] = useState('');
@@ -88,11 +100,12 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
-    Promise.all([storageApi.listCloudImages(), networkApi.list()])
-      .then(([imgs, nets]) => {
+    Promise.all([storageApi.listCloudImages(), networkApi.list(), groupApi.list()])
+      .then(([imgs, nets, grps]) => {
         const ready = imgs.filter((i) => i.status === 'ready');
         setImages(ready);
         setNetworks(nets);
+        setGroups(grps.filter((g) => g.status === 'ready' && g.uplink));
         // Same preference as the backend: Debian 13, then AlmaLinux 9
         const preferred = ready.find((i) => i.distribution === 'debian' && i.version === '13')
           || ready.find((i) => i.distribution === 'almalinux' && i.version === '9') || ready[0];
@@ -101,7 +114,10 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       .catch((err) => setError(errorText(err)));
   }, [isOpen]);
 
-  const nameValid = NAME_RE.test(name) && name.length <= 40;
+  const inGroup = type === 'kubeadm';
+  const autoGroup = inGroup && groupId === AUTO_GROUP;
+  const nameValid = NAME_RE.test(name) && name.length <= (autoGroup ? 32 : 40);
+  const pickedGroup = groups.find((g) => String(g.id) === groupId);
   const canSubmit = nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
 
   const submit = async () => {
@@ -114,10 +130,11 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       ctlplane: toResources(ctl),
       worker: toResources(wrk),
       cloud_image_id: Number(imageId),
-      domain,
-      network: network || null,
-      cidr: network ? null : cidr.trim() || null,
-      extra_args: extraArgs.trim() || null,
+      domain: pickedGroup ? pickedGroup.domain : domain,
+      network: inGroup ? null : network || null,
+      group_id: inGroup && groupId ? Number(groupId) : null,
+      cidr: (inGroup ? !autoGroup : !!network) ? null : cidr.trim() || null,
+      extra_args: inGroup ? null : extraArgs.trim() || null,
       username: username || null,
       password: password || null,
       ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
@@ -159,17 +176,20 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
           <GridItem>
             <FormGroup label="Type" fieldId="cl-type">
               <FormSelect id="cl-type" value={type} onChange={(_e, v) => setType(v)}>
-                <FormSelectOption value="k3s" label="k3s" />
-                <FormSelectOption value="kubeadm" label="kubeadm (not supported yet)" isDisabled />
+                <FormSelectOption value="k3s" label="k3s (standalone network)" />
+                <FormSelectOption value="kubeadm" label="kubeadm (in a lab group)" />
                 <FormSelectOption value="openshift" label="OpenShift (not supported yet)" isDisabled />
               </FormSelect>
+              <FormHelperText><HelperText><HelperTextItem id="cl-type-help">
+                {CLUSTER_TYPE_HELP[type]}
+              </HelperTextItem></HelperText></FormHelperText>
             </FormGroup>
           </GridItem>
           <GridItem>
             <FormGroup label="Control planes" fieldId="cl-ctlplanes">
               <FormSelect id="cl-ctlplanes" value={ctlplanes} onChange={(_e, v) => setCtlplanes(v)}>
                 <FormSelectOption value="1" label="1" />
-                <FormSelectOption value="3" label="3 (embedded etcd)" />
+                <FormSelectOption value="3" label={inGroup ? '3 (stacked etcd, behind the router\'s haproxy)' : '3 (embedded etcd)'} />
               </FormSelect>
             </FormGroup>
           </GridItem>
@@ -187,8 +207,9 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
             </FormGroup>
           </GridItem>
           <GridItem>
-            <FormGroup label="k3s version" fieldId="cl-version">
-              <TextInput id="cl-version" value={version} placeholder="stable channel (e.g. v1.33.5+k3s1)"
+            <FormGroup label={inGroup ? 'Kubernetes version' : 'k3s version'} fieldId="cl-version">
+              <TextInput id="cl-version" value={version}
+                placeholder={inGroup ? 'v1.37 (default; or v1.36, v1.37.1…)' : 'stable channel (e.g. v1.33.5+k3s1)'}
                 onChange={(_e, v) => setVersion(v)} />
             </FormGroup>
           </GridItem>
@@ -199,20 +220,39 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
         <Grid hasGutter md={6}>
           <GridItem>
-            <FormGroup label="Network" fieldId="cl-network">
-              <FormSelect id="cl-network" value={network} onChange={(_e, v) => setNetwork(v)}>
-                <FormSelectOption value={OWN_NETWORK} label={`New NAT network vmm-k-${name || '<name>'}`} />
-                {networks.filter((n) => n.dhcp_enabled).map((n) => (
-                  <FormSelectOption key={n.id} value={n.name} label={`${n.name} (${n.ip_address}/${n.prefix})`} />
-                ))}
-              </FormSelect>
-            </FormGroup>
+            {inGroup ? (
+              <FormGroup label="Lab group" fieldId="cl-group">
+                <FormSelect id="cl-group" value={groupId} onChange={(_e, v) => setGroupId(v)}>
+                  <FormSelectOption value={AUTO_GROUP} label={`New lab group ${name || '<name>'} (deleted with the cluster)`} />
+                  {groups.map((g) => (
+                    <FormSelectOption key={g.id} value={String(g.id)} label={`${g.name} (${g.cidr}, ${g.domain})`} />
+                  ))}
+                </FormSelect>
+                <FormHelperText><HelperText><HelperTextItem>
+                  {autoGroup
+                    ? 'An AlmaLinux router VM (512 MiB) is created first: its first boot takes a few minutes.'
+                    : 'The nodes, their DNS records and the API load balancer are added to this group; '
+                      + 'deleting the cluster removes only them.'}
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            ) : (
+              <FormGroup label="Network" fieldId="cl-network">
+                <FormSelect id="cl-network" value={network} onChange={(_e, v) => setNetwork(v)}>
+                  <FormSelectOption value={OWN_NETWORK} label={`New NAT network vmm-k-${name || '<name>'}`} />
+                  {networks.filter((n) => n.dhcp_enabled).map((n) => (
+                    <FormSelectOption key={n.id} value={n.name} label={`${n.name} (${n.ip_address}/${n.prefix})`} />
+                  ))}
+                </FormSelect>
+              </FormGroup>
+            )}
           </GridItem>
           <GridItem>
             <FormGroup label="Base domain" fieldId="cl-domain">
-              <TextInput id="cl-domain" value={domain} onChange={(_e, v) => setDomain(v)} />
+              <TextInput id="cl-domain" value={pickedGroup ? pickedGroup.domain : domain} isDisabled={!!pickedGroup}
+                onChange={(_e, v) => setDomain(v)} />
               <FormHelperText><HelperText><HelperTextItem>
-                API name: api.{name || '<name>'}.{domain}
+                API name: api.{name || '<name>'}.{pickedGroup ? pickedGroup.domain : domain}
+                {pickedGroup ? ' (the group\'s domain)' : ''}
               </HelperTextItem></HelperText></FormHelperText>
             </FormGroup>
           </GridItem>
@@ -230,7 +270,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
         <ExpandableSection toggleText="Advanced">
           <Grid hasGutter md={6}>
-            {!network && (
+            {(inGroup ? autoGroup : !network) && (
               <GridItem>
                 <FormGroup label="Node subnet" fieldId="cl-cidr">
                   <TextInput id="cl-cidr" value={cidr} placeholder="first free /24 (e.g. 10.43.1.0/24)"
@@ -238,12 +278,14 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 </FormGroup>
               </GridItem>
             )}
-            <GridItem span={12}>
-              <FormGroup label="Extra k3s server flags" fieldId="cl-extra">
-                <TextInput id="cl-extra" value={extraArgs} placeholder="--disable traefik"
-                  onChange={(_e, v) => setExtraArgs(v)} />
-              </FormGroup>
-            </GridItem>
+            {!inGroup && (
+              <GridItem span={12}>
+                <FormGroup label="Extra k3s server flags" fieldId="cl-extra">
+                  <TextInput id="cl-extra" value={extraArgs} placeholder="--disable traefik"
+                    onChange={(_e, v) => setExtraArgs(v)} />
+                </FormGroup>
+              </GridItem>
+            )}
             <GridItem span={12}>
               <FormGroup label="SSH public keys (one per line)" fieldId="cl-keys">
                 <TextArea id="cl-keys" rows={2} value={sshKeys} onChange={(_e, v) => setSshKeys(v)} resizeOrientation="vertical" />
