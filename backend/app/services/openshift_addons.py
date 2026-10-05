@@ -247,6 +247,19 @@ class AddonRunner:
             "spec": {"enableInjector": True, "enableOperatorWebhook": False,
                      "disableDrain": bool(single_or_compact), "logLevel": 2},
         }], "SriovOperatorConfig")
+        # The policy controller ignores nodes whose state has no interfaces yet and doesn't look again
+        # when they appear: wait for the config daemons' discovery first
+        self.log("Waiting for the SR-IOV config daemon to discover the igb NICs")
+        deadline = time.monotonic() + 10 * 60
+        while True:
+            states = self.oc_json(["get", "sriovnetworknodestates", "-n", SRIOV_NAMESPACE], 30).get("items", []) \
+                if self.oc(["get", "crd", "sriovnetworknodestates.sriovnetwork.openshift.io"], 30)["exitcode"] == 0 else []
+            if states and all(any(i.get("deviceID") == "10c9" for i in (st.get("status") or {}).get("interfaces") or [])
+                              for st in states):
+                break
+            if time.monotonic() > deadline:
+                raise TimeoutError("The SR-IOV config daemon found no igb NIC on the nodes")
+            self.sleep(10)
         device_type = options.get("device_type") or "netdevice"
         resource = "igbnetdev" if device_type == "netdevice" else "igbvfio"
         demo_ns = "sriov-demo"
@@ -264,6 +277,22 @@ class AddonRunner:
              "spec": {"resourceName": resource, "networkNamespace": demo_ns,
                       "ipam": json.dumps({"type": "whereabouts", "range": options.get("ipam_range") or "192.168.50.0/24"})}},
         ], "SR-IOV policy")
+        self.log("Waiting for the VFs (SriovNetworkNodeState in sync, device plugin resource allocatable)")
+        deadline = time.monotonic() + 20 * 60  # vfio-pci / drains can reboot nodes
+        want = int(options.get("vfs", 4))
+        while True:
+            states = self.oc_json(["get", "sriovnetworknodestates", "-n", SRIOV_NAMESPACE], 30).get("items", [])
+            synced = [st for st in states if (st.get("status") or {}).get("syncStatus") == "Succeeded"
+                      and any(i.get("numVfs") == want for i in (st.get("status") or {}).get("interfaces") or [])]
+            nodes = self.oc_json(["get", "nodes"], 30).get("items", [])
+            allocatable = [n for n in nodes
+                           if int(((n.get("status") or {}).get("allocatable") or {}).get(f"openshift.io/{resource}", "0") or 0) > 0]
+            if states and len(synced) == len(states) and allocatable:
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"VFs not ready after 20 min ({len(synced)}/{len(states)} nodes in sync, "
+                                   f"{len(allocatable)} with openshift.io/{resource} allocatable)")
+            self.sleep(15)
 
     # -------------------------------------------------------------- MetalLB
 
@@ -285,7 +314,8 @@ class AddonRunner:
         """hello Deployment (2 replicas, answers with its pod and node) + LoadBalancer Service.
         Returns the service's external IP."""
         self.log("Deploying the MetalLB demo (hello)")
-        script = ('echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB L2 lab)" > /var/www/html/index.html; '
+        # the image's docroot isn't writable by OpenShift's random UID: serve the page from an emptyDir
+        script = ('echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB lab)" > /var/www/html/index.html; '
                   "exec run-httpd")
         self.apply([
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": DEMO_NAMESPACE}},
@@ -300,7 +330,9 @@ class AddonRunner:
                               "env": [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
                                       {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
                               "readinessProbe": {"httpGet": {"path": "/", "port": 8080}, "periodSeconds": 5},
-                          }]}}}},
+                              "volumeMounts": [{"name": "docroot", "mountPath": "/var/www/html"}],
+                          }],
+                          "volumes": [{"name": "docroot", "emptyDir": {}}]}}}},
             {"apiVersion": "v1", "kind": "Service",
              "metadata": {"name": DEMO_NAME, "namespace": DEMO_NAMESPACE,
                           "annotations": {"metallb.io/address-pool": "lab-pool"}},

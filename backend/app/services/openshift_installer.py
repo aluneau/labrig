@@ -601,10 +601,12 @@ class OpenShiftInstaller:
         svc = self.svc
         deadline = time.monotonic() + INSTALL_TIMEOUT
         api_seen = False
+        assisted_seen = False
         last_csr = 0.0
         while True:
             info = self.assisted(cluster)
             if info is not None:
+                assisted_seen = True
                 hosts = info.get("hosts") or []
                 pct = info.get("progress") or 0
                 self._set_live(cluster.id, phase="installing" if info.get("status") not in ("waiting", "insufficient",
@@ -632,7 +634,9 @@ class OpenShiftInstaller:
                            f"Cluster operators: {done}/{len(ops)} available"
                            + (f" — {cv['message'][:150]}" if cv.get("message") else ""))
             elif info is None and not api_seen:
-                svc._check(task, cluster, db, None, "Booting the nodes from the agent ISO")
+                svc._check(task, cluster, db, None,
+                           "Rebooted into the installed system: waiting for the API" if assisted_seen
+                           else "Booting the nodes from the agent ISO")
             if time.monotonic() > deadline:
                 raise TimeoutError(f"OpenShift was not installed after {INSTALL_TIMEOUT // 60} min")
             svc._sleep(task, 20)
