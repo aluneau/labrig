@@ -5,7 +5,7 @@ import {
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
-  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig,
+  Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -140,6 +140,14 @@ export const groupApi = {
   routerConfig: (id: number) => request<RouterConfig>(`/groups/${id}/router/config`),
   applyRouterConfig: (id: number) => post<GroupDetail>(`/groups/${id}/router/apply`),
   exportSpec: (id: number) => request<{ yaml: string; spec: GroupSpec }>(`/groups/${id}/export`),
+  addDhcpHost: (id: number, host: GroupDHCPHost) => post<GroupDetail>(`/groups/${id}/dhcp-hosts`, host),
+  updateDhcpHost: (id: number, mac: string, host: GroupDHCPHost) =>
+    request<GroupDetail>(`/groups/${id}/dhcp-hosts/${encodeURIComponent(mac)}`, { method: 'PUT', body: JSON.stringify(host) }),
+  deleteDhcpHost: (id: number, mac: string, releaseLease = false) =>
+    del<GroupDetail>(`/groups/${id}/dhcp-hosts/${encodeURIComponent(mac)}?release_lease=${releaseLease}`),
+  leases: (id: number) => request<GroupLease[]>(`/groups/${id}/leases`),
+  releaseLease: (id: number, mac: string, force = false) =>
+    del<LeaseRelease>(`/groups/${id}/leases/${encodeURIComponent(mac)}?force=${force}`),
 };
 
 export const taskApi = {

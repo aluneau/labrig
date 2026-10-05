@@ -39,6 +39,7 @@ import { errorText, formatMiB } from '../utils/format';
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
+import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { groupStatus } from './GroupsPage';
 
 const STATE_COLORS: Record<string, string> = {
@@ -425,19 +426,7 @@ export const GroupDetailPage: React.FC = () => {
               </Table>
               <div style={{ marginTop: 16 }}><AddRecordForm groupId={group.id} domain={group.domain} onDone={onDone} onError={onError} /></div>
 
-              <Title headingLevel="h2" size="lg" style={{ marginTop: 24 }}>DHCP leases (from the router)</Title>
-              <Table aria-label="Router leases" variant="compact">
-                <Thead><Tr><Th>IP</Th><Th>MAC</Th><Th>Hostname</Th><Th>Member</Th></Tr></Thead>
-                <Tbody>
-                  {group.leases.map((l) => (
-                    <Tr key={l.mac + l.ip}>
-                      <Td>{l.ip}</Td><Td>{l.mac}</Td><Td>{l.hostname || '—'}</Td>
-                      <Td>{group.members.find((m) => m.mac === l.mac)?.name || '—'}</Td>
-                    </Tr>
-                  ))}
-                  {!group.leases.length && <Tr><Td colSpan={4}>{group.router.state === 'running' ? 'No leases yet.' : 'Router is not running.'}</Td></Tr>}
-                </Tbody>
-              </Table>
+              <GroupDhcp group={group} onDone={onDone} onError={onError} />
             </PageSection>
           </Tab>
 
