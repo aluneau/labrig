@@ -110,6 +110,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   guest-file-write + guest-exec (EL qemu-ga is unrestricted by a systemd drop-in, its SELinux domain made
   permissive). Router readiness = `/var/lib/vmm-router/ready` + dnsmasq active. v2 blocks (bgp, wireguard,
   vlans) and flavour `vyos` are in the schema but rejected by the backends ("not supported yet").
+  `spec.dhcp_hosts` = static reservations of non-member machines (`dhcp-host=` + `host-record=` lines,
+  validated against router/member IPs/MACs/names in `GroupSpec`). Leases are read from the router's
+  `/var/lib/dnsmasq/dnsmasq.leases` via guest-exec; releasing one = stop dnsmasq, delete the line, start it.
   Members (`MemberSpec`) have `source`: `cloud_image` (default, `image` + cloud-init) | `iso` (`iso` = volume
   path or name) | `empty`; the last two get no seed, only the MAC reservation + DNS name. Both the quick
   "Add member" form and CreateVMModal in group mode (`group` prop, or its "Lab group" select) POST a
@@ -157,6 +160,7 @@ node console.js                                                 # console fideli
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
 KUBECTL=… node clusters.js                                      # k3s: create, host kubectl, copy-paste kubectl commands in bash + fish, stop/start, delete
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
+node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

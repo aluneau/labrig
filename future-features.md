@@ -150,6 +150,19 @@ Design:
 > flavour, groups without uplink (the EL router installs its packages at first boot), snapshots, templates,
 > export with disks, per-group autostart, `group_id` on `vmmanager_vm`.
 >
+> **Static reservations for non-members — ✅ done** (2026-10): `spec.dhcp_hosts: [{mac, ip, hostname?}]`
+> for machines attached to `vmm-g-<name>` that aren't members (a VM created from the VMs page, an appliance
+> booted from an ISO…). Rendered as `dhcp-host=` (+ `host-record=<hostname>.<domain>`), pushed live like any
+> spec change, kept in the router metadata and the export. IPs may sit inside the dynamic range (dnsmasq
+> never hands a reserved address to another client); router/member IPs, MACs and names, other reservations
+> and DNS record names are refused. API `…/groups/{id}/dhcp-hosts[/{mac}]`, `GET …/leases` (each lease marked
+> member / reservation / dynamic, with the VM that owns the MAC), `DELETE …/leases/{mac}` (409 while a VM
+> with that MAC runs). UI: Network & DNS tab mirrors the Networks DHCP tab ("Make static" on dynamic leases,
+> keep the IP or pick another; edit/remove with "release the current lease too"; "Release" on leases of
+> stopped VMs). Release = stop dnsmasq, delete the line from its lease file, start it (no `dhcp_release`:
+> it needs `dnsmasq-utils` on the router, absent on existing routers, and the push already restarts dnsmasq).
+> `vmmanager_group` `dhcp_host` blocks. Note: systemd-networkd ignores the NAK on a plain `networkctl renew`;
+> `networkctl reconfigure <if>` or a reboot picks up a changed reservation. `e2e/group-dhcp.js`.
 > **Custom members** (done): the full Create VM form adds members too ("Custom VM…" on the Members tab,
 > "Lab group" select on the VMs page). `MemberSpec.source` = `cloud_image` | `iso` | `empty` (+ `iso`), so
 > ISO installs live in the spec like the rest (router metadata, rebuild, export). ISO/empty members get no

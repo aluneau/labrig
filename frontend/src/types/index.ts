@@ -522,6 +522,14 @@ export interface GroupSpec {
   router?: RouterSpec;
   cloud_init?: GroupCloudInit;
   members: MemberSpec[];
+  dhcp_hosts?: GroupDHCPHost[];
+}
+
+/** Static DHCP reservation of a non-member machine on the group network */
+export interface GroupDHCPHost {
+  mac: string;
+  ip: string;
+  hostname?: string | null; // also served as <hostname>.<domain>
 }
 
 export interface GroupMemberInfo {
@@ -567,6 +575,10 @@ export interface GroupLease {
   mac: string;
   hostname?: string | null;
   expiry?: number | null;
+  kind?: 'member' | 'reservation' | 'dynamic';
+  member?: string | null;
+  vm_name?: string | null; // VM with this MAC on the group network
+  vm_running?: boolean;
 }
 
 export interface GroupDetail extends Group {
