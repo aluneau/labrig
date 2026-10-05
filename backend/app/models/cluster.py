@@ -17,11 +17,16 @@ class Cluster(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(64), unique=True, index=True, nullable=False)
-    type = Column(String(20), nullable=False, default="k3s")  # k3s (kubeadm, openshift later)
+    type = Column(String(20), nullable=False, default="k3s")  # k3s | kubeadm (openshift later)
     version = Column(String(64), nullable=True)  # requested, then the installed one
     network = Column(String(255), nullable=False)  # libvirt network the nodes are on
     network_owned = Column(Boolean, default=True)  # created for this cluster (deleted with it)
     domain = Column(String(255), nullable=False)  # base domain: api.<name>.<domain>
+    # Lab group the nodes live in (kubeadm): its router serves their leases / DNS and the API load
+    # balancer. Not a foreign key (groups are rebuilt from libvirt too); group_owned = auto-created
+    # for this cluster and deleted with it
+    group_id = Column(Integer, nullable=True, index=True)
+    group_owned = Column(Boolean, nullable=True)
     api_ip = Column(String(64), nullable=True)
     spec = Column(JSON, nullable=True)  # creation request (without secrets)
     token = Column(String(255), nullable=True)  # join token: never returned by the API

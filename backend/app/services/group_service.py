@@ -174,13 +174,19 @@ class GroupService:
         taken_macs = set(libvirt_client.all_macs())
         old_members = {m.name: m for m in (existing.members if existing else [])}
         own_macs = {m.mac for m in old_members.values() if m.mac} | {router.lan_mac, router.uplink_mac}
+        # reserved hosts are VMs created by someone else (cluster nodes): their MACs are theirs
+        own_macs |= {r.mac for r in spec.reservations}
         taken_macs -= own_macs  # our own VMs' MACs are fine to keep
         router.lan_mac = router.lan_mac or self._new_mac(taken_macs)
         router.uplink_mac = router.uplink_mac or self._new_mac(taken_macs)
-        taken_macs |= {router.lan_mac, router.uplink_mac}
+        taken_macs |= {router.lan_mac, router.uplink_mac} | {r.mac for r in spec.reservations}
 
         dhcp_start, dhcp_end = ipaddress.IPv4Address(spec.dhcp.start), ipaddress.IPv4Address(spec.dhcp.end)
-        used_ips = {router.ip} | {m.ip for m in spec.members if m.ip} | {h.ip for h in spec.dhcp_hosts}
+        for r in spec.reservations:
+            if dhcp_start <= ipaddress.IPv4Address(r.ip) <= dhcp_end:
+                raise ValueError(f"Reserved host {r.name} IP {r.ip} is inside the dynamic DHCP range")
+        used_ips = {router.ip} | {m.ip for m in spec.members if m.ip} | {r.ip for r in spec.reservations}
+        used_ips |= {h.ip for h in spec.dhcp_hosts}
         static_pool = [h for h in hosts[9 if len(hosts) >= 64 else 1:] if not dhcp_start <= h <= dhcp_end]
         for m in spec.members:
             prev = old_members.get(m.name)
@@ -306,6 +312,7 @@ class GroupService:
             self._wait_router(router_vm_name(spec.name), ROUTER_READY_TIMEOUT, waiting)
             group.config_applied, group.config_applied_at, group.config_error = True, _now(), None
             db.commit()
+            self.pin_uplink(db, group)
             progress(60)
 
             for i, member in enumerate(spec.members):
@@ -459,7 +466,7 @@ class GroupService:
             return
         except libvirt.libvirtError as e:
             logger.info(f"guest-file-write {path} on {vm_name} failed ({e}), using guest-exec")
-        result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", 'cat > "$0"', path], input_data=data)
+        result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", 'mkdir -p "$(dirname "$0")" && cat > "$0"', path], input_data=data)
         if result["exitcode"] != 0:
             raise RuntimeError(f"cannot write {path}: {result['stderr'].strip()}")
 
@@ -478,6 +485,7 @@ class GroupService:
         if group.status in ("creating", "deleting"):
             raise ValueError(f"Group is {group.status}: wait for it to finish")
         old = GroupSpec.model_validate(group.spec)
+        new = self._keep_owned(old, new)
         for attr in ("name", "cidr", "uplink"):
             if getattr(new, attr) != getattr(old, attr):
                 raise ValueError(f"'{attr}' can't be changed after creation (recreate the group)")
@@ -541,6 +549,160 @@ class GroupService:
             self._sync_member_rows(db, group, spec)
             self._publish(group, "updated")
         return group
+
+    @staticmethod
+    def _keep_owned(old: GroupSpec, new: GroupSpec) -> GroupSpec:
+        """A spec sent by a user (UI, API, OpenTofu) can't add, change or drop what the app manages
+        (entries with an owner, e.g. a cluster's nodes, API load balancer and records): those are
+        taken from the stored spec; the rest comes from the new one."""
+        new = new.model_copy(deep=True)
+        owned_names = {r.name for r in old.router.dns.records if r.owner}
+        new.router.dns.records = ([r for r in new.router.dns.records if not r.owner and r.name not in owned_names]
+                                  + [r for r in old.router.dns.records if r.owner])
+        new.reservations = ([r for r in new.reservations if not r.owner]
+                            + [r for r in old.reservations if r.owner])
+        new.load_balancers = ([lb for lb in new.load_balancers if not lb.owner]
+                              + [lb for lb in old.load_balancers if lb.owner])
+        new.owner = old.owner
+        new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
+        return new
+
+    # Hosts / records / load balancers managed by the app (cluster nodes in a group, §3.2)
+
+    def update_owned(self, db: Session, group_id: int, mutate: Callable[[GroupSpec], None]) -> Group:
+        """Apply `mutate` to the stored spec (it changes reservations / owned records / load
+        balancers, never members), validate, save and push the router config live."""
+        group = self.get_group(db, group_id)
+        if group is None:
+            raise ValueError("The cluster's lab group no longer exists")
+        with self._lock(group.name):
+            db.refresh(group)
+            if group.status == "deleting":
+                raise ValueError(f"Group {group.name} is being deleted")
+            old = GroupSpec.model_validate(group.spec)
+            spec = old.model_copy(deep=True)
+            mutate(spec)
+            spec = GroupSpec.model_validate(spec.model_dump())
+            spec = self.normalize(db, spec, existing=old, group_id=group.id)
+            group.spec = spec.model_dump(mode="json")
+            db.commit()
+            self.push_router_config(db, group)
+            self._publish(group, "updated")
+            return group
+
+    def free_ip(self, spec: GroupSpec, taken: Any = ()) -> str:
+        """A static address (outside the DHCP range) used by nothing in the spec nor in `taken`"""
+        net = ipaddress.IPv4Network(spec.cidr)
+        hosts = list(net.hosts())
+        start, end = ipaddress.IPv4Address(spec.dhcp.start), ipaddress.IPv4Address(spec.dhcp.end)
+        used = set(taken) | {spec.router.ip} | {m.ip for m in spec.members if m.ip}
+        used |= {r.ip for r in spec.reservations} | {r.a for r in spec.router.dns.records if r.a}
+        used |= {h.ip for h in spec.dhcp_hosts}
+        for h in hosts[9 if len(hosts) >= 64 else 1:]:
+            if not start <= h <= end and str(h) not in used:
+                return str(h)
+        raise ValueError(f"No free static address left in {net} (outside the DHCP range)")
+
+    def ensure_running(self, db: Session, group_id: int, timeout: float = ROUTER_RESTART_TIMEOUT) -> Group:
+        """Network up, router running with its config applied and its uplink address pinned.
+        Used by clusters living in the group before they start / add nodes."""
+        group = self.get_group(db, group_id)
+        if group is None:
+            raise ValueError("The cluster's lab group no longer exists")
+        if group.status in ("deleting", "missing", "error"):
+            raise ValueError(f"Lab group {group.name} is {group.status}"
+                             + (f": {group.error_message}" if group.error_message else ""))
+        spec = GroupSpec.model_validate(group.spec)
+        self._ensure_network(spec)
+        if spec.uplink and not self._network_active(spec.uplink):
+            libvirt_client.start_network(spec.uplink)
+        rtr = router_vm_name(spec.name)
+        live = libvirt_client.get_vm(rtr)
+        if live is None:
+            raise ValueError(f"The router {rtr} of group {group.name} is missing")
+        was_running = live["state"] == "running"
+        if live["state"] == "paused":
+            libvirt_client.resume_vm(rtr)
+        elif not was_running:
+            libvirt_client.start_vm(rtr)
+        self._wait_router(rtr, timeout)
+        if not was_running or not group.config_applied:
+            with self._lock(group.name):
+                self.push_router_config(db, group)
+        self.pin_uplink(db, group)
+        return group
+
+    def pin_uplink(self, db: Session, group: Group, timeout: float = 120) -> Optional[str]:
+        """Give the router's uplink NIC a fixed address: its current lease on the uplink network
+        becomes a DHCP reservation (so it never changes). Stored as spec.router.uplink_ip. The host
+        reaches the router's load balancers (e.g. a cluster API) on that address."""
+        spec = GroupSpec.model_validate(group.spec)
+        if not spec.uplink or not spec.router.uplink_mac:
+            return None
+        mac = spec.router.uplink_mac
+        rtr = router_vm_name(spec.name)
+        ip = spec.router.uplink_ip
+        try:
+            uplink_xml = libvirt_client.get_network_xml(spec.uplink)
+        except libvirt.libvirtError:
+            return ip
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(uplink_xml)
+        has_dhcp = root.find("./ip/dhcp") is not None
+        reserved = next((h for h in root.findall("./ip/dhcp/host") if (h.get("mac") or "").lower() == mac), None)
+        if reserved is not None and reserved.get("ip"):
+            ip = reserved.get("ip")
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                leases = []
+                try:
+                    leases = libvirt_client.get_network_leases(spec.uplink) if has_dhcp else []
+                except libvirt.libvirtError:
+                    pass
+                lease = next((le for le in leases if (le.get("mac") or "").lower() == mac
+                              and le.get("type", "ipv4") in ("ipv4", 0)), None)
+                if lease:
+                    ip = lease["ipaddr"]
+                    break
+                # uplink without libvirt DHCP (host bridge): whatever address the router has
+                addrs = [a.split("/")[0] for i in libvirt_client.get_vm_interfaces(rtr)
+                         if (i.get("mac") or "").lower() == mac for a in i.get("addresses", [])
+                         if ":" not in a]
+                if addrs and not has_dhcp:
+                    ip = addrs[0]
+                    break
+                if time.monotonic() > deadline:
+                    logger.warning(f"No uplink address for {rtr} after {timeout:.0f}s")
+                    return spec.router.uplink_ip
+                time.sleep(3)
+            if has_dhcp:
+                libvirt_client.update_dhcp_host(spec.uplink, "add", mac, ip, rtr)
+                logger.info(f"Reserved {ip} for {rtr} on {spec.uplink}")
+        if ip != spec.router.uplink_ip:
+            spec.router.uplink_ip = ip
+            group.spec = spec.model_dump(mode="json")
+            db.commit()
+            try:
+                libvirt_client.set_domain_group_metadata(rtr, spec.name, "router", spec=group.spec)
+            except libvirt.libvirtError as e:
+                logger.warning(f"Could not update {rtr} metadata: {e}")
+            self._publish(group, "updated")
+        return ip
+
+    @staticmethod
+    def _unpin_uplink(spec: GroupSpec) -> None:
+        """Remove the router's reservation from the uplink network (only ours: matching MAC)"""
+        if not spec.uplink or not spec.router.uplink_mac:
+            return
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(libvirt_client.get_network_xml(spec.uplink))
+            for h in root.findall("./ip/dhcp/host"):
+                if (h.get("mac") or "").lower() == spec.router.uplink_mac:
+                    libvirt_client.update_dhcp_host(spec.uplink, "delete", h.get("mac"), h.get("ip"), h.get("name"))
+        except libvirt.libvirtError as e:
+            logger.warning(f"Could not remove the uplink reservation of group {spec.name}: {e}")
 
     def _drop_member(self, db: Session, group: Group, spec: GroupSpec, name: str) -> None:
         """Undo adding a member whose VM could not be created (spec + router config)"""
@@ -637,8 +799,10 @@ class GroupService:
         with self._lock(group.name):
             self.push_router_config(db, group)
         task_service.update_progress(db, task.id, 60)
-        for m in spec.members:
-            name = member_vm_name(spec.name, m.name)
+        self.pin_uplink(db, group)
+        # members, then reserved hosts (cluster nodes: control planes sort before workers)
+        for name in ([member_vm_name(spec.name, m.name) for m in spec.members]
+                     + sorted((r.name for r in spec.reservations), key=lambda n: "-worker-" in n)):
             live = libvirt_client.get_vm(name)
             if live and live["state"] == "shutoff":
                 libvirt_client.start_vm(name)
@@ -666,7 +830,9 @@ class GroupService:
     def _stop_task(self, db: Session, task: Task, group_id: int, force: bool) -> Dict[str, Any]:
         group = self.get_group(db, group_id)
         spec = GroupSpec.model_validate(group.spec)
-        members = [member_vm_name(spec.name, m.name) for m in spec.members]
+        # members and reserved hosts (cluster nodes) together, router last
+        members = ([member_vm_name(spec.name, m.name) for m in spec.members]
+                   + [r.name for r in spec.reservations])
         # members together, router last
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(lambda n: self._shutdown(n, force), members))
@@ -698,11 +864,18 @@ class GroupService:
 
     # Delete
 
-    def delete_group(self, db: Session, group_id: int, delete_disks: bool = True) -> bool:
+    def delete_group(self, db: Session, group_id: int, delete_disks: bool = True,
+                     for_cluster: Optional[str] = None) -> bool:
         group = self.get_group(db, group_id)
         if not group:
             return False
+        from app.models import Cluster  # clusters live in groups, not the other way round
+        clusters = [c.name for c in db.query(Cluster).filter(Cluster.group_id == group.id).all()
+                    if c.name != for_cluster]
+        if clusters:
+            raise ValueError(f"Group {group.name} hosts cluster {', '.join(clusters)}: delete the cluster first")
         name = group.name
+        self._unpin_uplink(GroupSpec.model_validate(group.spec))
         group.status = "deleting"
         db.commit()
         self._publish(group, "updated")
@@ -812,6 +985,11 @@ class GroupService:
             "status": group.status, "state": state, "error_message": group.error_message,
             "network_name": network_name(spec.name), "network_id": network.id if network else None,
             "router": router, "members": members, "member_count": len(members),
+            "hosts": [{"name": r.name, "ip": r.ip, "mac": r.mac, "owner": r.owner, "fqdn": f"{r.name}.{spec.domain}",
+                       "vm_id": vms[r.name].id if r.name in vms else None,
+                       "state": states[r.name]["state"] if r.name in states else "missing"}
+                      for r in spec.reservations],
+            "clusters": self._clusters_of(db, group),
             "config_applied": bool(group.config_applied), "config_applied_at": group.config_applied_at,
             "config_error": group.config_error, "spec": spec, "created_at": group.created_at,
             "updated_at": group.updated_at,
@@ -840,6 +1018,12 @@ class GroupService:
         data["router_uplink_ips"] = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]]
         data["leases"] = self.leases(group, running=data["router"]["state"] == "running")
         return data
+
+    @staticmethod
+    def _clusters_of(db: Session, group: Group) -> List[Dict[str, Any]]:
+        from app.models import Cluster
+        return [{"id": c.id, "name": c.name, "type": c.type}
+                for c in db.query(Cluster).filter(Cluster.group_id == group.id).order_by(Cluster.name).all()]
 
     # Static DHCP reservations (non-member machines) and the router's leases
 
@@ -910,7 +1094,7 @@ class GroupService:
         except (libvirt.libvirtError, TimeoutError, KeyError, ValueError):
             return []  # agent not ready / no lease file yet
         members = {m.mac: m.name for m in spec.members if m.mac}
-        reserved = {h.mac for h in spec.dhcp_hosts}
+        reserved = {h.mac for h in spec.dhcp_hosts} | {r.mac for r in spec.reservations}
         vms = self._network_vms(network_name(spec.name))
         for lease in leases:
             mac = lease["mac"]
@@ -966,7 +1150,15 @@ class GroupService:
         return {"mac": mac, "ip": lease["ip"], "released": released}
 
     def export_yaml(self, group: Group) -> Dict[str, Any]:
-        spec = GroupSpec.model_validate(group.spec).model_dump(mode="json", exclude_none=True)
+        """The user's part of the spec: what the app manages (cluster nodes, their records and
+        load balancers, assigned uplink address) belongs to the cluster, not to the lab"""
+        model = GroupSpec.model_validate(group.spec)
+        model.router.dns.records = [r for r in model.router.dns.records if not r.owner]
+        model.reservations = [r for r in model.reservations if not r.owner]
+        model.load_balancers = [lb for lb in model.load_balancers if not lb.owner]
+        model.router.uplink_ip = None
+        model.owner = None
+        spec = model.model_dump(mode="json", exclude_none=True)
         return {"yaml": yaml.safe_dump(spec, sort_keys=False), "spec": spec}
 
 

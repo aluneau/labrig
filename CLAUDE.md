@@ -38,7 +38,7 @@ backend/app/
   events.py           thread-safe EventBus -> asyncio queues (SSE)
   services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
-                      cluster (k3s; + cluster_drivers per type, cluster_network = pluggable node network)
+                      cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
@@ -48,7 +48,7 @@ frontend/src/
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _cluster
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s (cluster)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -119,6 +119,21 @@ e2e/                  Playwright browser tests against the real app (see below)
   MemberSpec to `/groups/{id}/members`; new members are pre-checked (VM name free, <= 64 chars) and dropped
   from the spec again if their VM can't be created.
 
+- **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
+  (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
+  nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry
+  owned by `cluster:<name>` in the group spec; changes are batched and applied by `commit()`
+  (`group_service.update_owned` = save + one router push). User spec edits (`_update`) keep owned entries
+  (`_keep_owned`); export and the provider ignore them. Auto-created groups have `spec.owner` and are deleted
+  with the cluster (`clusters.group_owned`); a group hosting a cluster can't be deleted. The router's uplink
+  lease is pinned as a reservation on the uplink network (`pin_uplink`, `spec.router.uplink_ip`, removed on
+  group delete): haproxy listens on every router address, so the kubeconfig points at
+  `https://<uplink_ip>:<api_port>` (6443, next free port for a 2nd cluster in a group). kubeadm is
+  orchestrated by the app (`driver.bootstrap`): cloud-init only runs `/usr/local/sbin/vmm-k8s-prereqs.sh`
+  (containerd.io from Docker's repo, kube* from pkgs.k8s.io, EL SELinux permissive), then guest-exec runs
+  `kubeadm init` (v1beta4 config, app token + certificate key, SANs = uplink/router IP + api names),
+  Flannel, `kubeadm join` (`--node-name`: EL hostnames are FQDNs; control planes one at a time).
+
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 
 - Backend must run on **Python 3.9** (RHEL 9): no `X | None`, no `match`, no `platform.freedesktop_os_release`.
@@ -133,6 +148,9 @@ e2e/                  Playwright browser tests against the real app (see below)
 
 ## Gotchas
 
+- kubeadm ≥ 1.36 needs containerd 2 (Debian 13 ships 1.7: use Docker's `containerd.io`); EL 10 doesn't
+  load `nf_conntrack` early enough for kube-proxy (`modprobe` it). Router memory: 512 MiB holds with the
+  cloud-init swap file (dnf at first boot swaps ~60–80 MiB; 384 MiB also boots but swaps ~230 MiB).
 - Clusters talk to nodes only through the QEMU guest agent (guest-exec): no SSH key, no route needed.
   EL's qemu-ga forbids guest-exec and is SELinux-confined: cluster nodes get `/etc/sysconfig/qemu-ga`
   with empty filters + a CIL module making `virt_qemu_ga_t` permissive. Right after a restart the
@@ -158,6 +176,7 @@ cd e2e && npm install && node smoke.js                          # every page: co
 node lifecycle.js | devices.js | nics.js | full.js | netedit.js | iso.js | kbd.js      # create/console/power/delete, networks, DHCP, downloads, AZERTY
 node console.js                                                 # console fidelity: virsh screenshot vs canvas vs page, several viewports/DPRs
 node devices.js                                                 # disks hot-add/resize/detach (checked over SSH), ISO, boot once
+KUBECTL=… node kubeadm.js                                       # kubeadm in an auto-created group: LB endpoint, kubectl commands, service, stop/start, delete (IMAGE, CTLPLANES=3 HA=1)
 KUBECTL=… node clusters.js                                      # k3s: create, host kubectl, copy-paste kubectl commands in bash + fish, stop/start, delete
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release

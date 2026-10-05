@@ -50,6 +50,59 @@ const STATE_COLORS: Record<string, string> = {
   missing: 'var(--pf-v5-global--danger-color--100)',
 };
 
+/** Hosts, DNS records and load balancers that clusters manage in this group (read-only here) */
+const ClusterEntries: React.FC<{ group: GroupDetail }> = ({ group }) => {
+  const lbs = group.spec.load_balancers || [];
+  if (!group.hosts.length && !lbs.length && !group.clusters.length) return null;
+  const owner = (o?: string | null) => {
+    const name = o?.startsWith('cluster:') ? o.slice(8) : null;
+    const c = group.clusters.find((x) => x.name === name);
+    return c ? <Link to={`/clusters/${c.id}`}>cluster {c.name}</Link> : (o || 'user');
+  };
+  return (
+    <div id="group-cluster-entries" style={{ marginTop: 24 }}>
+      <Title headingLevel="h3" size="md" style={{ marginBottom: 8 }}>
+        Cluster nodes {group.clusters.length > 0 && <>({group.clusters.map((c, i) => (
+          <React.Fragment key={c.id}>{i > 0 && ', '}<Link to={`/clusters/${c.id}`}>{c.name}</Link> ({c.type})</React.Fragment>
+        ))})</>}
+      </Title>
+      <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)', marginBottom: 8 }}>
+        Created and managed by the cluster (static lease + DNS name from the router): change them on the cluster page.
+      </div>
+      <Table aria-label="Cluster nodes" variant="compact">
+        <Thead><Tr><Th>Name</Th><Th>FQDN</Th><Th>IP</Th><Th>MAC</Th><Th>Managed by</Th><Th>State</Th><Th screenReaderText="Actions" /></Tr></Thead>
+        <Tbody>
+          {group.hosts.map((h) => (
+            <Tr key={h.name}>
+              <Td>{h.name}</Td><Td>{h.fqdn}</Td><Td>{h.ip}</Td><Td>{h.mac}</Td><Td>{owner(h.owner)}</Td>
+              <Td><StatusLabel status={h.state} /></Td>
+              <Td isActionCell>{h.vm_id && <Link to={`/vms/${h.vm_id}/console`}>Console</Link>}</Td>
+            </Tr>
+          ))}
+          {!group.hosts.length && <Tr><Td colSpan={7}>No cluster nodes.</Td></Tr>}
+        </Tbody>
+      </Table>
+      {lbs.length > 0 && (
+        <>
+          <Title headingLevel="h3" size="md" style={{ margin: '24px 0 8px' }}>Load balancers (haproxy on the router)</Title>
+          <Table aria-label="Load balancers" variant="compact">
+            <Thead><Tr><Th>Name</Th><Th>Listens on</Th><Th>Backends</Th><Th>Managed by</Th></Tr></Thead>
+            <Tbody>
+              {lbs.map((lb) => (
+                <Tr key={lb.name}>
+                  <Td>{lb.name}</Td>
+                  <Td>{group.spec.router?.ip}:{lb.port}{group.spec.router?.uplink_ip ? `, ${group.spec.router.uplink_ip}:${lb.port} (from the host)` : ''}</Td>
+                  <Td>{lb.backends.join(', ')}</Td><Td>{owner(lb.owner)}</Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+        </>
+      )}
+    </div>
+  );
+};
+
 // Topology tab: uplink -> router -> group network bus -> members
 
 const Topology: React.FC<{ group: GroupDetail; onOpen: (m: GroupMemberInfo) => void }> = ({ group, onOpen }) => {
@@ -399,6 +452,7 @@ export const GroupDetailPage: React.FC = () => {
                   ))}
                 </Tbody>
               </Table>
+              <ClusterEntries group={group} />
               <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ margin: '24px 0 8px' }}>
                 <FlexItem><Title headingLevel="h3" size="md">Add a member</Title></FlexItem>
                 <FlexItem>
@@ -417,7 +471,7 @@ export const GroupDetailPage: React.FC = () => {
                     {group.network_id ? <Link to={`/networks/${group.network_id}`}>{group.network_name}</Link> : group.network_name} (isolated, no libvirt DHCP)
                   </DescriptionListDescription></DescriptionListGroup>
                 <DescriptionListGroup><DescriptionListTerm>Router</DescriptionListTerm>
-                  <DescriptionListDescription>{spec.router?.ip} · uplink {group.router_uplink_ips.join(', ') || '—'}</DescriptionListDescription></DescriptionListGroup>
+                  <DescriptionListDescription>{spec.router?.ip} · uplink {spec.router?.uplink_ip ? `${spec.router.uplink_ip} (reserved)` : (group.router_uplink_ips.join(', ') || '—')}</DescriptionListDescription></DescriptionListGroup>
                 <DescriptionListGroup><DescriptionListTerm>DHCP range</DescriptionListTerm>
                   <DescriptionListDescription>{spec.dhcp ? `${spec.dhcp.start} – ${spec.dhcp.end}` : '—'}</DescriptionListDescription></DescriptionListGroup>
                 <DescriptionListGroup><DescriptionListTerm>DNS forwarders</DescriptionListTerm>
@@ -436,9 +490,11 @@ export const GroupDetailPage: React.FC = () => {
                     <Tr key={r.name}>
                       <Td>{r.name.endsWith('.') ? r.name : `${r.name}.${group.domain}`}</Td><Td>{r.a ? 'A' : 'CNAME'}</Td><Td>{r.a || r.cname}</Td>
                       <Td isActionCell>
-                        <Button variant="link" isDanger isInline onClick={async () => {
-                          try { await groupApi.removeRecord(group.id, r.name); onDone(`Record ${r.name} removed`); } catch (err) { onError(errorText(err)); }
-                        }}>Remove</Button>
+                        {r.owner ? <>managed by {r.owner.replace('cluster:', 'cluster ')}</> : (
+                          <Button variant="link" isDanger isInline onClick={async () => {
+                            try { await groupApi.removeRecord(group.id, r.name); onDone(`Record ${r.name} removed`); } catch (err) { onError(errorText(err)); }
+                          }}>Remove</Button>
+                        )}
                       </Td>
                     </Tr>
                   ))}

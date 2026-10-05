@@ -47,6 +47,8 @@ type clusterModel struct {
 	CloudImageID   types.String `tfsdk:"cloud_image_id"`
 	Domain         types.String `tfsdk:"domain"`
 	Network        types.String `tfsdk:"network"`
+	GroupID        types.String `tfsdk:"group_id"`
+	RouterMemory   types.Int64  `tfsdk:"router_memory"`
 	CIDR           types.String `tfsdk:"cidr"`
 	ExtraArgs      types.String `tfsdk:"extra_args"`
 	Username       types.String `tfsdk:"username"`
@@ -73,6 +75,7 @@ type apiCluster struct {
 	Type          string           `json:"type"`
 	Version       *string          `json:"version"`
 	Network       string           `json:"network"`
+	GroupID       *int64           `json:"group_id"`
 	Domain        string           `json:"domain"`
 	APIHostname   string           `json:"api_hostname"`
 	APIEndpoint   *string          `json:"api_endpoint"`
@@ -103,13 +106,15 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			PlanModifiers: replaceInt, Description: desc}
 	}
 	resp.Schema = schema.Schema{
-		Description: "A Kubernetes cluster (k3s for now) made of VMs on its own NAT network (or an existing one). " +
+		Description: "A Kubernetes cluster made of VMs. k3s: on its own NAT network (no router) or an existing one. " +
+			"kubeadm: inside a lab group (an existing one, group_id, or one created for the cluster and deleted with it) " +
+			"whose router serves the DNS records and load-balances the API (haproxy) on its uplink address. " +
 			"Creation waits until every node is Ready. `workers` and `running` change in place; anything else recreates the cluster.",
 		Attributes: map[string]schema.Attribute{
 			"id":      schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
 			"name":    schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "DNS label; nodes are <name>-ctlplane-N / <name>-worker-N."},
-			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (kubeadm and openshift: not supported yet)."},
-			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s release, e.g. v1.33.5+k3s1. Default: stable channel (the installed version is read back)."},
+			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (standalone network) or kubeadm (in a lab group with a router; openshift: not supported yet)."},
+			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). The installed version is read back."},
 			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(1), PlanModifiers: replaceInt,
 				Description: "Control planes: 1, or 3/5 with embedded etcd."},
 			"workers":            schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(2), Description: "Workers; changed in place (added / drained and removed)."},
@@ -120,18 +125,22 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"worker_vcpu":        intAttr(2, ""),
 			"worker_disk_size":   intAttr(20, "GiB."),
 			"cloud_image_id":     schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "vmmanager_cloud_image id. Default: Debian 13, else AlmaLinux 9."},
-			"domain":             schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("lab"), PlanModifiers: replaceStr, Description: "Base domain: the API is api.<name>.<domain>."},
-			"network":            schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Existing network for the nodes. Default: a new NAT network vmm-k-<name>, deleted with the cluster."},
-			"cidr":               schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Subnet of the new network. Default: first free /24 of the server's CLUSTER_SUBNET_POOL."},
-			"extra_args":         schema.StringAttribute{Optional: true, PlanModifiers: replaceStr, Description: "Extra k3s server flags, e.g. \"--disable traefik\"."},
-			"username":           schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("admin"), PlanModifiers: replaceStr},
-			"password":           schema.StringAttribute{Optional: true, Sensitive: true, PlanModifiers: replaceStr},
+			"domain":             schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Base domain: the API is api.<name>.<domain>. Default: lab; kubeadm in an existing group: the group's domain."},
+			"network":            schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: existing network for the nodes. Default: a new NAT network vmm-k-<name>, deleted with the cluster. kubeadm: the group's network (computed)."},
+			"group_id": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr,
+				Description: "kubeadm: id of an existing vmmanager_group to put the nodes in (deleting the cluster leaves the group and its members). Default: a group named after the cluster, deleted with it."},
+			"router_memory": schema.Int64Attribute{Optional: true, PlanModifiers: replaceInt,
+				Description: "kubeadm with an auto-created group: router memory in MiB (default: the server's group default, 512)."},
+			"cidr":       schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Subnet of the new network. Default: first free /24 of the server's CLUSTER_SUBNET_POOL."},
+			"extra_args": schema.StringAttribute{Optional: true, PlanModifiers: replaceStr, Description: "Extra k3s server flags, e.g. \"--disable traefik\"."},
+			"username":   schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("admin"), PlanModifiers: replaceStr},
+			"password":   schema.StringAttribute{Optional: true, Sensitive: true, PlanModifiers: replaceStr},
 			"ssh_keys": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()}},
 			"running":      schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Desired power state of all nodes."},
 			"status":       schema.StringAttribute{Computed: true},
 			"api_hostname": schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
-			"api_endpoint": schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "https://<first control plane IP>:6443, reachable from the host."},
+			"api_endpoint": schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "Reachable from the host: k3s https://<first control plane IP>:6443, kubeadm https://<group router uplink IP>:<port> (haproxy in front of every control plane)."},
 			"node_ips":     schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Node name -> IP."},
 			"kubeconfig":   schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "Admin kubeconfig pointing at api_endpoint."},
 		},
@@ -203,19 +212,36 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 	body := map[string]any{
-		"name":       plan.Name.ValueString(),
-		"type":       plan.Type.ValueString(),
-		"version":    strPtr(plan.Version),
-		"ctlplanes":  plan.Ctlplanes.ValueInt64(),
-		"workers":    plan.Workers.ValueInt64(),
-		"ctlplane":   map[string]any{"memory": plan.CtlplaneMemory.ValueInt64(), "vcpu": plan.CtlplaneVCPU.ValueInt64(), "disk_size": plan.CtlplaneDisk.ValueInt64()},
-		"worker":     map[string]any{"memory": plan.WorkerMemory.ValueInt64(), "vcpu": plan.WorkerVCPU.ValueInt64(), "disk_size": plan.WorkerDisk.ValueInt64()},
-		"domain":     plan.Domain.ValueString(),
-		"network":    strPtr(plan.Network),
+		"name":      plan.Name.ValueString(),
+		"type":      plan.Type.ValueString(),
+		"version":   strPtr(plan.Version),
+		"ctlplanes": plan.Ctlplanes.ValueInt64(),
+		"workers":   plan.Workers.ValueInt64(),
+		"ctlplane":  map[string]any{"memory": plan.CtlplaneMemory.ValueInt64(), "vcpu": plan.CtlplaneVCPU.ValueInt64(), "disk_size": plan.CtlplaneDisk.ValueInt64()},
+		"worker":    map[string]any{"memory": plan.WorkerMemory.ValueInt64(), "vcpu": plan.WorkerVCPU.ValueInt64(), "disk_size": plan.WorkerDisk.ValueInt64()},
+		"network":   strPtr(plan.Network),
+		"router_memory": func() any {
+			if plan.RouterMemory.IsNull() || plan.RouterMemory.IsUnknown() {
+				return nil
+			}
+			return plan.RouterMemory.ValueInt64()
+		}(),
 		"cidr":       strPtr(plan.CIDR),
 		"extra_args": strPtr(plan.ExtraArgs),
 		"username":   strPtr(plan.Username),
 		"password":   strPtr(plan.Password),
+	}
+	if d := strPtr(plan.Domain); d != nil {
+		body["domain"] = *d
+	}
+	if gid := strPtr(plan.GroupID); gid != nil {
+		n, err := strconv.ParseInt(*gid, 10, 64)
+		if err != nil {
+			resp.Diagnostics.AddError("Invalid group_id", err.Error())
+			return
+		}
+		body["group_id"] = n
+		delete(body, "network")
 	}
 	if id := strPtr(plan.CloudImageID); id != nil {
 		n, err := strconv.ParseInt(*id, 10, 64)
@@ -279,6 +305,11 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 	m.Workers = types.Int64Value(c.Workers)
 	m.Domain = types.StringValue(c.Domain)
 	m.Network = types.StringValue(c.Network)
+	if c.GroupID != nil {
+		m.GroupID = types.StringValue(strconv.FormatInt(*c.GroupID, 10))
+	} else {
+		m.GroupID = types.StringNull()
+	}
 	if cidr, ok := c.Spec["cidr"].(string); ok && cidr != "" {
 		m.CIDR = types.StringValue(cidr)
 	}

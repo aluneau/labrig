@@ -91,6 +91,7 @@ type apiDNSRecord struct {
 	Name  string  `json:"name"`
 	A     *string `json:"a,omitempty"`
 	CNAME *string `json:"cname,omitempty"`
+	Owner *string `json:"owner,omitempty"`
 }
 
 type apiGroupDHCPHost struct {
@@ -176,8 +177,9 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"router_image": schema.StringAttribute{Optional: true, Computed: true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace(), stringplanmodifier.UseStateForUnknown()},
 				Description:   "EL cloud image of the router, e.g. almalinux-9 (default: first ready EL image)."},
-			"router_memory": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(1024),
-				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}, Description: "MiB."},
+			"router_memory": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(512),
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				Description:   "MiB (512 holds on AlmaLinux 9/10: cloud-init adds a 1 GiB swap file for the first-boot dnf run)."},
 			"dns_forwarders": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 				Description: "Upstream DNS servers of the router (default: the uplink's)."},
 			"cloud_init": schema.SingleNestedAttribute{
@@ -413,6 +415,9 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 	m.Members = members
 	var records []dnsRecordModel
 	for _, rec := range g.Spec.Router.DNS.Records {
+		if rec.Owner != nil && *rec.Owner != "" {
+			continue // managed by the server (e.g. a kubeadm cluster's api / node records)
+		}
 		records = append(records, dnsRecordModel{Name: types.StringValue(rec.Name), A: strOrNull(rec.A), CNAME: strOrNull(rec.CNAME)})
 	}
 	m.DNSRecords = records

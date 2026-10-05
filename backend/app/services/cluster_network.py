@@ -3,9 +3,9 @@
 `ClusterNetwork` is the seam between clusters and the network layer. v1 is
 `LibvirtClusterNetwork`: a libvirt network (one created per cluster, NAT, or an
 existing one chosen by the user) whose dnsmasq hands out the reservations and
-serves the records. When lab groups land, a `GroupClusterNetwork` will implement
-the same interface by adding members / DNS records to the group spec and letting
-the group's router VM serve them (see future-features.md §3.2).
+serves the records. `GroupClusterNetwork` implements the same interface on a lab
+group: reservations / DNS records / an API load balancer owned by the cluster are
+added to the group spec and served by the group's router VM (future-features §3.2).
 """
 import ipaddress
 import logging
@@ -67,6 +67,26 @@ class ClusterNetwork(ABC):
     @abstractmethod
     def destroy(self) -> None:
         """Delete the network if it is ours (otherwise only our records are removed by the caller)"""
+
+    # Optional parts (defaults fit a plain libvirt network)
+
+    #: the network has a router that can front the API with a load balancer (lab groups)
+    fronts_api: bool = False
+
+    def commit(self) -> None:
+        """Apply the reservations / records changed since the last commit (no-op when they apply
+        immediately, as on a libvirt network)"""
+
+    def publish_api(self, hostnames: List[str], ctlplane_ips: List[str], port: int) -> str:
+        """Make hostnames resolve to a load balancer listening on `port` in front of the control
+        planes (:6443); returns the address the host uses to reach it"""
+        raise NotImplementedError
+
+    def free_lb_port(self, start: int = 6443) -> int:
+        return start
+
+    def stop(self) -> None:
+        """Called after the cluster's nodes are shut down"""
 
 
 class LibvirtClusterNetwork(ClusterNetwork):
@@ -240,3 +260,172 @@ def free_subnet(avoid: Iterable[str] = ()) -> ipaddress.IPv4Network:
         if not any(candidate.overlaps(t) for t in taken):
             return candidate
     raise ValueError(f"No free /24 left in CLUSTER_SUBNET_POOL ({pool}): give a cidr")
+
+
+class GroupClusterNetwork(ClusterNetwork):
+    """Nodes inside a lab group. Reservations, DNS records and the API load balancer go into the
+    group spec as entries owned by "cluster:<name>"; commit() saves them and pushes the router
+    config live (dnsmasq + haproxy). The group (network + router) belongs to the group, so
+    destroy() only removes the cluster's entries; an auto-created group is deleted by the cluster."""
+
+    fronts_api = True
+
+    def __init__(self, group_id: int, cluster_name: str, owned: bool):
+        self.group_id = group_id
+        self.cluster_name = cluster_name
+        self.owner = f"cluster:{cluster_name}"
+        self.owned = owned  # auto-created for the cluster: deleted with it
+        self._ops: List = []
+        group = self._group()
+        self.group_name = group.name if group else None
+        self.name = f"vmm-g-{self.group_name}" if group else ""
+
+    # helpers
+
+    @staticmethod
+    def _db():
+        from app.database import SessionLocal
+        return SessionLocal()
+
+    def _group(self):
+        from app.models import Group
+        db = self._db()
+        try:
+            group = db.query(Group).filter(Group.id == self.group_id).first()
+            if group is not None:
+                db.expunge(group)
+            return group
+        finally:
+            db.close()
+
+    def spec(self):
+        from app.schemas.group import GroupSpec
+        group = self._group()
+        if group is None:
+            raise ValueError("The cluster's lab group no longer exists")
+        return GroupSpec.model_validate(group.spec)
+
+    def _relative(self, hostname: str, domain: str) -> Optional[str]:
+        """DNS record name for the group's zone: relative to its domain, absolute otherwise"""
+        if "." not in hostname:
+            return None  # short names: the reservation already gives <name>.<domain>
+        if hostname.endswith("." + domain):
+            return hostname[: -len(domain) - 1]
+        return hostname + "."
+
+    # ClusterNetwork
+
+    def ensure(self) -> None:
+        from app.services.group_service import group_service
+        db = self._db()
+        try:
+            group_service.ensure_running(db, self.group_id)
+        finally:
+            db.close()
+
+    def allocate_ip(self, taken: Iterable[str] = ()) -> str:
+        from app.services.group_service import group_service
+        return group_service.free_ip(self.spec(), taken)
+
+    def reserve(self, hostname: str, mac: str, ip: str) -> None:
+        from app.schemas.group import ReservationSpec
+
+        def op(spec):
+            spec.reservations = [r for r in spec.reservations
+                                 if not (r.owner == self.owner and (r.mac == mac.lower() or r.name == hostname))]
+            spec.reservations.append(ReservationSpec(name=hostname, mac=mac, ip=ip, owner=self.owner))
+        self._ops.append(op)
+
+    def release(self, mac: str) -> None:
+        def op(spec):
+            spec.reservations = [r for r in spec.reservations if not (r.owner == self.owner and r.mac == mac.lower())]
+        self._ops.append(op)
+
+    def publish(self, ip: str, hostnames: List[str]) -> None:
+        from app.schemas.group import DNSRecord
+
+        def op(spec):
+            names = [n for n in (self._relative(h, spec.domain) for h in hostnames) if n]
+            records = [r for r in spec.router.dns.records
+                       if not (r.owner == self.owner and (r.a == ip or r.name in names))]
+            if any(r.name in names for r in records):
+                clash = next(r.name for r in records if r.name in names)
+                raise ValueError(f"DNS record '{clash}' already exists in group {spec.name}")
+            spec.router.dns.records = records + [DNSRecord(name=n, a=ip, owner=self.owner) for n in names]
+        self._ops.append(op)
+
+    def unpublish(self, ip: str) -> None:
+        def op(spec):
+            spec.router.dns.records = [r for r in spec.router.dns.records
+                                       if not (r.owner == self.owner and r.a == ip)]
+        self._ops.append(op)
+
+    def publish_api(self, hostnames: List[str], ctlplane_ips: List[str], port: int) -> str:
+        from app.schemas.group import LoadBalancerSpec
+        spec = self.spec()
+        self.publish(spec.router.ip, hostnames)
+        lb_name = f"{self.cluster_name}-api"
+
+        def op(spec):
+            spec.load_balancers = [lb for lb in spec.load_balancers
+                                   if not (lb.owner == self.owner and lb.name == lb_name)]
+            spec.load_balancers.append(LoadBalancerSpec(
+                name=lb_name, port=port, backends=[f"{ip}:6443" for ip in ctlplane_ips], owner=self.owner))
+        self._ops.append(op)
+        if not spec.router.uplink_ip:
+            raise ValueError(f"The router of group {spec.name} has no uplink address: the host can't reach the API")
+        return spec.router.uplink_ip
+
+    def free_lb_port(self, start: int = 6443) -> int:
+        from app.schemas.group import RESERVED_ROUTER_PORTS
+        used = {lb.port for lb in self.spec().load_balancers} | RESERVED_ROUTER_PORTS
+        port = start
+        while port in used:
+            port += 1
+        return port
+
+    def commit(self) -> None:
+        if not self._ops:
+            return
+        from app.services.group_service import group_service
+        ops, self._ops = self._ops, []
+
+        def mutate(spec):
+            for op in ops:
+                op(spec)
+        db = self._db()
+        try:
+            group_service.update_owned(db, self.group_id, mutate)
+        finally:
+            db.close()
+
+    def remove_all(self) -> None:
+        """Drop every entry the cluster owns in the group"""
+        def op(spec):
+            spec.reservations = [r for r in spec.reservations if r.owner != self.owner]
+            spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != self.owner]
+            spec.load_balancers = [lb for lb in spec.load_balancers if lb.owner != self.owner]
+        self._ops.append(op)
+        self.commit()
+
+    def gateway(self) -> Optional[str]:
+        return self.spec().router.ip
+
+    def subnet(self) -> ipaddress.IPv4Network:
+        return ipaddress.IPv4Network(self.spec().cidr)
+
+    def uplink_ip(self) -> Optional[str]:
+        return self.spec().router.uplink_ip
+
+    def stop(self) -> None:
+        """An auto-created group only serves its cluster: shut its router down with it"""
+        if not self.owned or self._group() is None:
+            return
+        from app.services.group_service import group_service, router_vm_name
+        group_service._shutdown(router_vm_name(self.group_name), False)
+
+    def destroy(self) -> None:
+        if self._group() is None:
+            return
+        if not self.owned:
+            self.remove_all()

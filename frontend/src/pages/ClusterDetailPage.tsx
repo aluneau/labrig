@@ -37,6 +37,18 @@ import { errorText, formatDate } from '../utils/format';
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { ClusterStatus } from './ClustersPage';
+import { CLUSTER_TYPE_HELP } from '../components/clusters/CreateClusterModal';
+
+/** Where the nodes live, for the delete confirmation */
+export const clusterDeleteText = (c: Cluster) => {
+  if (c.group_id) {
+    return c.group_owned
+      ? `, and its lab group ${c.group_name} (router + network)`
+      : `; their reservations, DNS records and API load balancer are removed from lab group ${c.group_name}`
+        + ' (the group and its other members stay)';
+  }
+  return c.network_owned ? `, and the network ${c.network}` : '';
+};
 
 /** Shell one-liners that fetch the kubeconfig (admin credentials: mode 600) and point kubectl at it.
  * POSIX sh/bash/zsh and fish 3 all accept `export X=…` and `&&`. */
@@ -205,7 +217,12 @@ export const ClusterDetailPage: React.FC = () => {
                 <DescriptionList columnModifier={{ default: '3Col' }}>
                   <DescriptionListGroup>
                     <DescriptionListTerm>Type</DescriptionListTerm>
-                    <DescriptionListDescription>{cluster.type} {cluster.version || '(stable channel)'}</DescriptionListDescription>
+                    <DescriptionListDescription>
+                      {cluster.type} {cluster.version || '(stable channel)'}
+                      <div id="cluster-type-help" style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
+                        {CLUSTER_TYPE_HELP[cluster.type]}
+                      </div>
+                    </DescriptionListDescription>
                   </DescriptionListGroup>
                   <DescriptionListGroup>
                     <DescriptionListTerm>API</DescriptionListTerm>
@@ -213,13 +230,34 @@ export const ClusterDetailPage: React.FC = () => {
                       {cluster.api_hostname}{cluster.api_endpoint && <><br /><code>{cluster.api_endpoint}</code></>}
                     </DescriptionListDescription>
                   </DescriptionListGroup>
-                  <DescriptionListGroup>
-                    <DescriptionListTerm>Network</DescriptionListTerm>
-                    <DescriptionListDescription>
-                      {cluster.network} {cluster.spec?.cidr ? `(${cluster.spec.cidr})` : ''}
-                      {cluster.network_owned ? ', deleted with the cluster' : ''}
-                    </DescriptionListDescription>
-                  </DescriptionListGroup>
+                  {cluster.group_id ? (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>Lab group</DescriptionListTerm>
+                      <DescriptionListDescription id="cluster-group">
+                        <Link to={`/groups/${cluster.group_id}`}>{cluster.group_name || `#${cluster.group_id}`}</Link>
+                        {cluster.spec?.cidr ? ` (${cluster.spec.cidr})` : ''}
+                        {cluster.group_owned ? ', created for this cluster and deleted with it' : ', shared (kept when the cluster is deleted)'}
+                      </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  ) : (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>Network</DescriptionListTerm>
+                      <DescriptionListDescription>
+                        {cluster.network} {cluster.spec?.cidr ? `(${cluster.spec.cidr})` : ''}
+                        {cluster.network_owned ? ', deleted with the cluster' : ''}
+                      </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
+                  {cluster.load_balancer && (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>API load balancer (router haproxy)</DescriptionListTerm>
+                      <DescriptionListDescription id="cluster-lb">
+                        <code>{cluster.load_balancer.uplink_ip}:{cluster.load_balancer.port}</code> (host),{' '}
+                        <code>{cluster.load_balancer.router_ip}:{cluster.load_balancer.port}</code> (nodes)
+                        <br />→ {cluster.load_balancer.backends.join(', ')}
+                      </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
                   <DescriptionListGroup>
                     <DescriptionListTerm>Node image</DescriptionListTerm>
                     <DescriptionListDescription>{cluster.spec?.image || '—'}</DescriptionListDescription>
@@ -286,8 +324,7 @@ export const ClusterDetailPage: React.FC = () => {
       <ConfirmModal title={`Delete cluster ${cluster.name}?`} isOpen={confirmDelete} confirmLabel="Delete"
         onConfirm={() => run(async () => { await clusterApi.delete(cluster.id); navigate('/clusters'); })}
         onClose={() => setConfirmDelete(false)}>
-        Deletes the {cluster.nodes.length} node VMs and their disks
-        {cluster.network_owned ? `, and the network ${cluster.network}` : ''}.
+        Deletes the {cluster.nodes.length} node VMs and their disks{clusterDeleteText(cluster)}.
       </ConfirmModal>
       <ConfirmModal title={`Remove ${toRemove}?`} isOpen={!!toRemove} confirmLabel="Remove"
         onConfirm={() => run(() => clusterApi.removeNode(cluster.id, toRemove!))} onClose={() => setToRemove(null)}>

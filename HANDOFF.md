@@ -18,8 +18,9 @@ netedit iso kbd devices groups clusters`) passed against the merged `main` on th
 | Storage | pools, volumes, ISO upload / download from URL (progress, cancel), cloud images (Ubuntu 22/24/26, Debian 12/13, Alma 9/10, Rocky 9, CentOS Stream 9/10, custom URL) |
 | Networks | create/start/stop/autostart/delete; edit subnet, DHCP range, domain, forward mode (restart); static DHCP reservations applied live, "make static" from a lease; release a lease (helper); raw XML editor |
 | libvirt daemon | connect on demand, closed after 5 min idle with no browser; 503 "libvirt is stopped" + Start button everywhere; start/stop from header/Host page (polkit, no sudo); stop modes refuse / shut down VMs first / force |
-| Lab groups v1 | isolated network + AlmaLinux router VM (dnsmasq DHCP/DNS, nftables NAT) + members with reserved IPs + DNS records; live updates pushed through the guest agent; start/stop ordering; rebuild from libvirt metadata; `vmmanager_group` |
+| Lab groups v1 | isolated network + AlmaLinux router VM (512 MiB + first-boot swap file; dnsmasq DHCP/DNS, nftables NAT, haproxy TCP load balancers on its LAN + reserved uplink address) + members with reserved IPs + DNS records; live updates pushed through the guest agent; start/stop ordering; rebuild from libvirt metadata; `vmmanager_group` |
 | Clusters (k3s) | 1 or 3 control planes + workers (Debian 13 / AlmaLinux 9, SELinux enforcing) on an own NAT network `vmm-k-<name>` with reservations + DNS (`api.<name>.<domain>`); ready in ~1–2 min; kubeconfig usable from the host; kubectl views, stop/start, add/remove workers, rebuild from `<vmmc:cluster>` metadata; `vmmanager_cluster` |
+| Clusters (kubeadm) | in a lab group (existing, or auto-created and deleted with the cluster): nodes = group reservations owned by the cluster, `api`/`api-int` records → router haproxy over every control plane, kubeconfig server = router uplink address; Debian 13 (1+1 ready in ~3 min) and AlmaLinux 10 (3+1 in ~4.5 min, API keeps answering with ctlplane-0 off); Kubernetes v1.37 (pkgs.k8s.io), containerd.io 2.x, Flannel; add/remove workers, stop/start (router with an auto group), `vmmanager_cluster.group_id`, example `kubeadm`, `e2e/kubeadm.js` |
 | OpenTofu | `vmmanager_cloud_image`, `_network` (`dhcp_hosts`), `_vm` (`cloud_init`, `running`, `wait_for_ip`, `mac_address`, `boot_order`, `cdrom`), `_disk`, `_group`, `_cluster`; examples `basic`, `lab`, `devices`, `group`, `k3s` |
 | Install / ship | `scripts/setup.sh` (idempotent, `--no-boot`, `--no-service`, `--listen/--port`; installs the privileged helper + polkit rules), `scripts/package.sh`. Verified from the tarball on **AlmaLinux 9** (Py 3.9, SELinux enforcing, modular daemons), **AlmaLinux 10**, **Debian 13** (monolithic libvirtd), and this CachyOS rig |
 
@@ -56,20 +57,22 @@ netedit iso kbd devices groups clusters`) passed against the merged `main` on th
 - Groups: no FRR/BGP, WireGuard, VLANs, VyOS flavour, snapshots, templates or export with disks yet;
   groups without an uplink are rejected (the router installs packages at first boot). The router's first
   boot depends on dnf mirror speed (the e2e test took 106–215 s).
-- Clusters live on their own `vmm-k-*` network, not in a group yet; with 3 control planes `api` points at
-  ctlplane-0 only (no LB). On EL nodes and group routers, `virt_qemu_ga_t` is permissive (lab VMs only).
+- k3s clusters stay on their own `vmm-k-*` network (owner's decision); with 3 control planes their `api`
+  points at ctlplane-0 only. kubeadm: no upgrades, etcd backups or network policies (Flannel); EL nodes run
+  SELinux permissive (kubeadm docs) and AlmaLinux 10 nodes install `kernel-modules-extra-$(uname -r)`
+  (br_netfilter / xt_conntrack), which needs that exact kernel version on the mirror. Stopping a group that
+  hosts a cluster also stops the cluster's nodes. On EL nodes and group routers, `virt_qemu_ga_t` is
+  permissive (lab VMs only).
 - SQLite reuses the highest deleted id when a table empties (VM ids can restart at 1).
 - `docker-compose.yml` / Dockerfiles are legacy and untested with the current code.
 
 ## Next steps (owner's priorities)
 
 1. Run `setup.sh --no-boot` on this rig (above), then `e2e/libvirtctl.js`.
-2. **Clusters inside groups**: `GroupClusterNetwork` behind `cluster_service.network_for()` (design in
-   future-features §3.2), router haproxy in front of 3 control planes.
-3. **kubeadm**, then **OpenShift SNO** with the agent-based installer (§3.3); it needs the ISO/boot-order
-   work that is now done.
-4. Groups v2 (§2.5): FRR/BGP, WireGuard, VLANs, snapshots, templates, export; VyOS flavour.
-5. Before sharing widely: authentication, a remote + CI job running `e2e/smoke.js` + `go vet`.
+2. **OpenShift SNO** with the agent-based installer (§3.3): reuse the group plumbing built for kubeadm
+   (`GroupClusterNetwork`, owned records incl. `*.apps`, router `load_balancers` for api/ingress).
+3. Groups v2 (§2.5): FRR/BGP, WireGuard, VLANs, snapshots, templates, export; VyOS flavour.
+4. Before sharing widely: authentication, a remote + CI job running `e2e/smoke.js` + `go vet`.
 
 ## How to verify after changes
 

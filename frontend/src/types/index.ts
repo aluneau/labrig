@@ -340,6 +340,8 @@ export interface ClusterCreate {
   cloud_image_id?: number | null;
   domain?: string;
   network?: string | null;
+  group_id?: number | null; // kubeadm: existing lab group; null = a group created for the cluster
+  router_memory?: number | null;
   cidr?: string | null;
   pod_cidr?: string;
   service_cidr?: string;
@@ -367,6 +369,12 @@ export interface Cluster {
   version?: string | null;
   network: string;
   network_owned: boolean;
+  group_id?: number | null;
+  group_name?: string | null;
+  group_owned: boolean;
+  load_balancer?: {
+    name: string; port: number; backends: string[]; router_ip?: string | null; uplink_ip?: string | null;
+  } | null;
   domain: string;
   api_hostname: string;
   api_ip?: string | null;
@@ -472,6 +480,24 @@ export interface DNSRecord {
   name: string; // relative to the group domain ("api.ocp", "*.apps.ocp"), absolute if it ends with '.'
   a?: string | null;
   cname?: string | null;
+  owner?: string | null; // managed by the app (e.g. "cluster:k1"): read-only
+}
+
+/** Host on the group network that is not a member (e.g. a cluster node), owned by the app */
+export interface ReservationSpec {
+  name: string;
+  mac: string;
+  ip: string;
+  owner?: string | null;
+}
+
+/** TCP load balancer on the router (haproxy), reachable on the router's LAN and uplink addresses */
+export interface LoadBalancerSpec {
+  name: string;
+  port: number;
+  backends: string[]; // ip:port
+  mode?: 'tcp';
+  owner?: string | null;
 }
 
 export interface GroupCloudInit {
@@ -511,6 +537,7 @@ export interface RouterSpec {
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
+  uplink_ip?: string | null; // fixed (reserved) address on the uplink network
 }
 
 export interface GroupSpec {
@@ -522,7 +549,20 @@ export interface GroupSpec {
   router?: RouterSpec;
   cloud_init?: GroupCloudInit;
   members: MemberSpec[];
+  reservations?: ReservationSpec[];
+  load_balancers?: LoadBalancerSpec[];
+  owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
   dhcp_hosts?: GroupDHCPHost[];
+}
+
+export interface GroupHostInfo {
+  name: string;
+  ip: string;
+  mac: string;
+  owner?: string | null;
+  fqdn?: string | null;
+  vm_id?: number | null;
+  state: string;
 }
 
 /** Static DHCP reservation of a non-member machine on the group network */
@@ -562,6 +602,8 @@ export interface Group {
   router: GroupMemberInfo;
   members: GroupMemberInfo[];
   member_count: number;
+  hosts: GroupHostInfo[]; // reserved hosts (cluster nodes)
+  clusters: { id: number; name: string; type: string }[];
   config_applied: boolean;
   config_applied_at?: string | null;
   config_error?: string | null;

@@ -330,9 +330,9 @@ Integration options:
   `virt_qemu_ga_t` permissive and re-enables guest-exec in `/etc/sysconfig/qemu-ga`), 1+2 in ~1–2 min,
   3 control planes, add/remove workers, stop/start (start waits for Ready reported after the boot),
   rebuild of the `clusters` table from `<vmm:cluster>` node metadata (token and kubeconfig re-read from
-  the first control plane). Not done: an API load balancer for 3 control planes (the `api` record points at
-  ctlplane-0 only), kubeadm.
-- **Network seam for groups.** Clusters only talk to `ClusterNetwork` (`ensure`, `allocate_ip`,
+  the first control plane). k3s stays on its own network (no router, owner's decision); its `api` record
+  points at ctlplane-0 only.
+- **Network seam for groups — ✅ done.** Clusters only talk to `ClusterNetwork` (`ensure`, `allocate_ip`,
   `reserve(host, mac, ip)`, `release(mac)`, `publish(ip, names)`, `unpublish(ip)`, `subnet`, `destroy`),
   chosen in one place: `cluster_service.network_for(cluster)`. v1 is `LibvirtClusterNetwork`: an owned NAT
   network `vmm-k-<cluster>` (or an existing one) whose dnsmasq serves the reservations (`net.update`
@@ -342,9 +342,21 @@ Integration options:
   DNS records, and re-render + push the router config (`router_service`); `destroy` = nothing (the group
   owns the network). Then `ClusterCreate` gets `group_id`, `network_for` returns the group variant when
   `cluster.group_id` is set, and the router's haproxy can front `api` for 3 control planes (kubeadm/OCP).
-- **kubeadm** (closer to vanilla / customer setups): cloud-init installs containerd + kubeadm from
-  pkgs.k8s.io, `kubeadm init --control-plane-endpoint api.<domain>:6443` with a pre-generated token +
-  certificate key; other nodes `kubeadm join`. The router's haproxy fronts the API for 3 control planes.
+  *As built*: cluster nodes are not group members but spec `reservations` (static lease + DNS name; the
+  driver creates the VMs) owned by `cluster:<name>`, like their DNS records and the generic
+  `load_balancers` entry (`{name, port, backends: [ip:port], mode: tcp}` -> haproxy `listen` section,
+  roundrobin, TCP checks; haproxy is installed on every router at first boot but only enabled when the spec
+  has load balancers; `haproxy_connect_any` set once). Changes are batched per operation (`commit()` = one
+  router push). The router's uplink lease is pinned as a DHCP reservation on the uplink network so the host
+  reaches the load balancers on a fixed address. `ClusterCreate.group_id`, or an auto-created group named
+  after the cluster (`spec.owner`, deleted with it); a group hosting a cluster can't be deleted.
+- **kubeadm — ✅ done** (`KubeadmDriver`, always in a lab group): cloud-init installs containerd.io
+  (Docker repo, SystemdCgroup) + kubeadm/kubelet/kubectl from pkgs.k8s.io (pinned minor, default v1.37),
+  then the app runs through the guest agent `kubeadm init` (controlPlaneEndpoint `api.<cluster>.<domain>`
+  = router haproxy, app-generated token + certificate key, SANs incl. the router uplink IP), Flannel
+  (pod CIDR patched in), control-plane joins one at a time, worker joins (token re-created each time).
+  Debian 13 1+1 ready in ~3 min; AlmaLinux 10 3+1 with ctlplane-0 off still serves the API through haproxy.
+  EL nodes: SELinux permissive (kubeadm docs). Not done: Calico / network policies, upgrades, etcd backups.
 - The app fetches the kubeconfig (via the guest agent or SSH) and exposes it as a download.
 - Cluster = a **group with a role layout** (`ctlplanes`, `workers`, `type`) + a `clusters` table
   (`kubeconfig`, `version`, `status`). UI: *Clusters* page, kubeconfig download, console of each node.

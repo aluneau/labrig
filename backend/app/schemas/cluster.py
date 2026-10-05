@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Accepted by the API; only "k3s" is implemented for now (cluster_service.DRIVERS)
+# Accepted by the API; k3s and kubeadm are implemented (cluster_drivers.DRIVERS)
 CLUSTER_TYPES = ["k3s", "kubeadm", "openshift"]
 
 
@@ -18,8 +18,9 @@ class ClusterCreate(BaseModel):
     # A DNS label: also the prefix of node names and of the api.<name>.<domain> record
     name: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     type: str = "k3s"
-    # k3s release (INSTALL_K3S_VERSION, e.g. v1.33.5+k3s1); empty = stable channel
-    version: Optional[str] = Field(None, pattern=r"^v\d+\.\d+\.\d+(\+k3s\d+)?$")
+    # k3s: release (INSTALL_K3S_VERSION, e.g. v1.33.5+k3s1), empty = stable channel.
+    # kubeadm: Kubernetes minor (v1.37) or patch (v1.37.1), empty = KUBEADM_DEFAULT_VERSION
+    version: Optional[str] = Field(None, pattern=r"^v?\d+\.\d+(\.\d+)?(\+k3s\d+)?$")
     ctlplanes: int = Field(1, ge=1, le=5)  # 1, or 3/5 with embedded etcd
     workers: int = Field(2, ge=0, le=20)
     ctlplane: NodeResources = NodeResources()
@@ -27,10 +28,15 @@ class ClusterCreate(BaseModel):
     # Ready cloud image for the nodes (Debian 13 / AlmaLinux 9...); default: the first suitable one
     cloud_image_id: Optional[int] = None
     domain: str = Field("lab", min_length=1, max_length=200, pattern=r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
-    # Existing libvirt network to put the nodes on; None = create vmm-k-<name> (NAT)
+    # k3s: existing libvirt network to put the nodes on; None = create vmm-k-<name> (NAT)
     network: Optional[str] = None
-    # Subnet of the created network (e.g. 10.43.5.0/24); None = first free /24 of CLUSTER_SUBNET_POOL
+    # kubeadm: existing lab group to put the nodes in; None = create a group named after the cluster
+    # (router with DNS + haproxy), deleted with it
+    group_id: Optional[int] = None
+    # Subnet of the created network / group (e.g. 10.43.5.0/24); None = first free /24 of CLUSTER_SUBNET_POOL
     cidr: Optional[str] = None
+    # Router memory of an auto-created group (MiB); None = the group default
+    router_memory: Optional[int] = Field(None, ge=256)
     # Kubernetes pod / service networks: must not overlap the node network
     pod_cidr: str = "10.244.0.0/16"
     service_cidr: str = "10.96.0.0/16"
@@ -66,10 +72,15 @@ class Cluster(BaseModel):
     version: Optional[str] = None
     network: str
     network_owned: bool
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    group_owned: bool = False
     domain: str
     api_hostname: str
     api_ip: Optional[str] = None
     api_endpoint: Optional[str] = None
+    # API load balancer on the group router (kubeadm): "<router uplink ip>:<port> -> ctlplanes:6443"
+    load_balancer: Optional[Dict[str, Any]] = None
     status: str
     status_message: Optional[str] = None
     task_id: Optional[int] = None
