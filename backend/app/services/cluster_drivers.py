@@ -204,6 +204,7 @@ swapoff -a
 sed -i -E '/^[^#].*\sswap\s/ s/^/#/' /etc/fstab
 modprobe overlay
 modprobe br_netfilter
+modprobe nf_conntrack  # EL 10 doesn't load it before kube-proxy needs nf_conntrack_max
 sysctl --system >/dev/null
 
 . /etc/os-release
@@ -310,7 +311,7 @@ class KubeadmDriver(ClusterDriver):
         script = (_PREREQS.replace("@STATE@", K8S_STATE).replace("@MINOR@", ver["minor"])
                   .replace("@PKGVER@", ver["patch"] or "").replace("@ROLE@", node["role"]))
         files = [
-            {"path": "/etc/modules-load.d/k8s.conf", "permissions": "0644", "content": "overlay\nbr_netfilter\n"},
+            {"path": "/etc/modules-load.d/k8s.conf", "permissions": "0644", "content": "overlay\nbr_netfilter\nnf_conntrack\n"},
             {"path": "/etc/sysctl.d/99-kubernetes.conf", "permissions": "0644",
              "content": "net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\n"
                         "net.ipv4.ip_forward = 1\n"},
@@ -386,9 +387,10 @@ class KubeadmDriver(ClusterDriver):
                                f"{ctx['certificate_key']} >/dev/null", 120, "upload-certs")
         for i, node in enumerate(joining):
             ops.progress(66 + 14 * i // len(joining), f"Joining {node['name']}")
-            extra = ""
+            # EL hostnames are the FQDN: name the node like the VM
+            extra = f" --node-name {node['name']}"
             if node["role"] == "ctlplane":
-                extra = (f" --control-plane --certificate-key {ctx['certificate_key']}"
+                extra += (f" --control-plane --certificate-key {ctx['certificate_key']}"
                          f" --apiserver-advertise-address {node['ip']}")
             self._sh(ops, node["name"], (
                 "test -f /etc/kubernetes/kubelet.conf && exit 0; "
