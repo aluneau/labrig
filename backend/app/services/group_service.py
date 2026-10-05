@@ -860,7 +860,7 @@ class GroupService:
             lease = next((le for le in self.leases(group) if le["mac"] == mac), None)
             if lease is None:
                 raise LookupError(f"No DHCP lease for {mac} on the router of group '{spec.name}'")
-            logger.info(f"Release {mac} on {rtr}: lease {lease}, force={force}")
+            logger.debug(f"Release {mac} on {rtr}: lease {lease}, force={force}")
             if lease.pop("vm_unknown") and not force:
                 raise RuntimeError("Could not list the VMs on the group network: try again")
             if lease["vm_running"] and not force:
