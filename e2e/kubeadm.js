@@ -199,7 +199,7 @@ const countReady = (t) => (t.match(/\sReady\s/g) || []).length;
       await page.getByRole('button', { name: 'Stop', exact: true }).click();
       await page.getByText('stopped', { exact: true }).first().waitFor({ timeout: 6 * 60000 });
       const rtr = (await api('/vms')).find((v) => v.name === `${NAME}-rtr`);
-      log('cluster stopped (live), router', rtr?.state);
+      log('cluster stopped (live), router', rtr?.status);
       await page.getByRole('button', { name: 'Start', exact: true }).click();
       await page.getByText('ready', { exact: true }).first().waitFor({ timeout: 15 * 60000 });
       await page.getByRole('button', { name: 'Nodes', exact: true }).click();

@@ -230,7 +230,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 </FormSelect>
                 <FormHelperText><HelperText><HelperTextItem>
                   {autoGroup
-                    ? 'An AlmaLinux router VM (512 MiB) is created first: its first boot takes a few minutes.'
+                    ? 'An AlmaLinux router VM (512 MiB) is created first (its first boot installs packages: about a minute).'
                     : 'The nodes, their DNS records and the API load balancer are added to this group; '
                       + 'deleting the cluster removes only them.'}
                 </HelperTextItem></HelperText></FormHelperText>
