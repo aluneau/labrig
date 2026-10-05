@@ -71,11 +71,14 @@ const flag = (value: boolean | null | undefined, on: string, color: LabelProps['
   return value ? <Label isCompact color={color}>{on}</Label> : <span style={muted}>—</span>;
 };
 
+/** Problems first: degraded, unavailable, progressing, then the healthy ones */
+const rank = (o: ClusterOperatorStatus) => (o.degraded ? 0 : o.available === false ? 1 : o.progressing ? 2 : 3);
+
 const OperatorsTable: React.FC<{ operators: ClusterOperatorStatus[] }> = ({ operators }) => (
   <Table aria-label="Cluster operators" variant="compact" id="os-cluster-operators">
     <Thead><Tr><Th>Name</Th><Th>Version</Th><Th>Available</Th><Th>Progressing</Th><Th>Degraded</Th><Th>Message</Th></Tr></Thead>
     <Tbody>
-      {operators.map((o) => (
+      {[...operators].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name)).map((o) => (
         <Tr key={o.name}>
           <Td dataLabel="Name">{o.name}</Td>
           <Td dataLabel="Version">{o.version || '—'}</Td>
@@ -117,7 +120,9 @@ export const InstallPanel: React.FC<{ cluster: Cluster; status: InstallStatus | 
   const ready = status.phase === 'ready';
   const cos = status.cluster_operators;
   const available = cos.filter((o) => o.available && !o.degraded).length;
-  const showAssisted = !ready && (status.progress != null || status.hosts.length > 0);
+  // The Assisted view is frozen once the node rebooted into the installed system: hide it from finalizing on
+  const showAssisted = ['booting', 'installing', 'error'].includes(status.phase)
+    && (status.progress != null || status.hosts.length > 0);
 
   return (
     <Card id="os-install">
