@@ -1141,14 +1141,22 @@ class GroupService:
                 continue
             group = Group(name=spec.name, cidr=spec.cidr, domain=spec.domain, uplink=spec.uplink,
                           router_vm_name=router["name"], spec=spec.model_dump(mode="json"), status="ready",
-                          config_applied=True)
+                          config_applied=True, adopted=True)
             db.add(group)
             db.flush()
             groups[name] = group
             logger.info(f"Rebuilt group {name} from libvirt metadata")
 
+        gone = []
         for name, group in groups.items():
             objs = by_group.get(name, [])
+            if group.adopted and not objs and group.status in ("ready", "missing"):
+                # adopted from libvirt and now entirely gone from it (deleted by whoever created it):
+                # nothing of the user's is lost by forgetting it
+                gone.append((group.id, name))
+                db.delete(group)
+                logger.info(f"Forgot group {name}: adopted from libvirt metadata, no longer in libvirt")
+                continue
             has_network = any(o["kind"] == "network" for o in objs)
             if group.status == "ready" and not has_network:
                 group.status = "missing"
@@ -1158,6 +1166,8 @@ class GroupService:
             if group.status not in ("creating", "deleting"):
                 self._sync_member_rows(db, group, GroupSpec.model_validate(group.spec), commit=False)
         db.commit()
+        for group_id, name in gone:
+            event_bus.publish({"kind": "group", "event": "deleted", "id": group_id, "name": name, "status": "deleted"})
 
     def _sync_member_rows(self, db: Session, group: Group, spec: GroupSpec, commit: bool = True) -> None:
         rows = {m.name: m for m in group.members}

@@ -62,7 +62,9 @@ e2e/                  Playwright browser tests against the real app (see below)
 - **libvirt is the source of truth.** The DB mirrors VMs/pools/volumes/networks only to give them stable
   integer IDs + metadata. Mirroring (`sync_*`, `list_volumes`) runs under `@serialized`, since parallel
   requests would otherwise insert duplicates. Never delete user-visible data automatically (cloud images
-  whose volume vanished become `missing`, they are not deleted).
+  whose volume vanished become `missing`, they are not deleted). Exception: groups / clusters **adopted** from
+  libvirt metadata (`adopted` = rebuilt, e.g. created by another instance such as an agent's dev backend) are
+  forgotten once nothing of them is left in libvirt: their spec lived there, nothing is lost.
 - **Live updates**: libvirt events (domain lifecycle/reboot, network, pool) and task progress →
   `event_bus.publish` → `GET /api/v1/events` (SSE). Frontend subscribes with `useLiveEvents([...kinds])`;
   polling is only a slow safety net. DHCP leases have no events (NetworkDetail polls every 10 s).

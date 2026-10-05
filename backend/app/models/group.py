@@ -26,6 +26,9 @@ class Group(Base):
     spec = Column(JSON, nullable=False)
     # creating | ready | updating | error | deleting | missing (network gone from libvirt)
     status = Column(String(20), default="creating")
+    # Rebuilt from libvirt metadata (created by another instance / before a DB loss): its spec lives in
+    # libvirt, so the row is forgotten once nothing of it is left there (no "missing" record)
+    adopted = Column(Boolean, nullable=True)
     error_message = Column(Text, nullable=True)
     # Router config pushed through the guest agent since the last spec change?
     config_applied = Column(Boolean, default=False)

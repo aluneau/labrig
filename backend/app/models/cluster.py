@@ -33,6 +33,8 @@ class Cluster(Base):
     kubeconfig = Column(Text, nullable=True)
     # provisioning | ready | starting | stopping | stopped | error
     status = Column(String(20), default="provisioning")
+    # Rebuilt from libvirt metadata: forgotten once none of its node VMs is left (see Group.adopted)
+    adopted = Column(Boolean, nullable=True)
     status_message = Column(Text, nullable=True)
     task_id = Column(Integer, nullable=True)  # last background task (create / start / scale)
     created_at = Column(DateTime, default=datetime.utcnow)

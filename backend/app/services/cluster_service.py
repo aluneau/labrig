@@ -128,7 +128,7 @@ class ClusterService:
                 cluster = Cluster(
                     group_id=group.id if group else None,
                     group_owned=entry["attrs"].get("group_owned") == "yes" if group else None,
-                    name=name, type=ctype, status="ready",
+                    name=name, type=ctype, status="ready", adopted=True,
                     version=entry["attrs"].get("version") or None,
                     network=entry["attrs"].get("network", "default"),
                     network_owned=entry["attrs"].get("owned") == "yes",
@@ -159,6 +159,13 @@ class ClusterService:
                 elif first is not None:
                     cluster.api_ip = first.ip
                 changed = changed or bool(cluster.api_ip)
+        # adopted clusters (rebuilt from metadata) whose node VMs are all gone: forget them
+        for cluster in db.query(Cluster).filter(Cluster.adopted.is_(True)).all():
+            if cluster.name not in found and not task_service.is_running(cluster.task_id):
+                logger.info(f"Forgot cluster {cluster.name}: adopted from libvirt metadata, no node left")
+                event_bus.publish({"kind": "cluster", "id": cluster.id, "name": cluster.name, "status": "deleted"})
+                db.delete(cluster)
+                changed = True
         if changed:
             db.commit()
 
