@@ -80,10 +80,12 @@ export const nodeCounts = (d: OsDraft) => ({
   workers: d.topology === 'ha' ? Math.max(0, Number(d.workers) || 0) : 0,
 });
 
-/** Nodes that carry the storage disk (and ODF's extra resources): workers on HA, masters otherwise */
+/** Storage nodes carry the extra disk (and ODF's extra resources): the workers on HA with >= 3 workers,
+ * the control planes otherwise (same rule as the backend) */
+export const storageOnWorkers = (d: OsDraft) => d.topology === 'ha' && nodeCounts(d).workers >= 3;
 export const storageNodes = (d: OsDraft) => {
   const { ctlplanes, workers } = nodeCounts(d);
-  return d.topology === 'ha' ? workers : ctlplanes;
+  return storageOnWorkers(d) ? workers : ctlplanes;
 };
 
 const PACKAGE_RE = /^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -93,7 +95,7 @@ export const osDraftErrors = (d: OsDraft): string[] => {
   const { workers } = nodeCounts(d);
   if (d.topology === 'ha' && workers < 2) errors.push('HA needs at least 2 workers.');
   if (d.storage === 'odf' && storageNodes(d) < 3) {
-    errors.push(d.topology === 'ha' ? 'ODF needs at least 3 workers.' : 'ODF needs at least 3 nodes (not SNO).');
+    errors.push('ODF needs at least 3 nodes (not SNO).');
   }
   const numbers = [d.ctl.memory, d.ctl.vcpu, d.ctl.disk, ...(d.topology === 'ha' ? [d.wrk.memory, d.wrk.vcpu, d.wrk.disk] : [])];
   if (numbers.some((v) => !(Number(v) > 0))) errors.push('Node sizes must be positive numbers.');
@@ -101,8 +103,10 @@ export const osDraftErrors = (d: OsDraft): string[] => {
   return errors;
 };
 
-const toResources = (r: Role) => ({
-  memory: Math.round(Number(r.memory) * 1024), vcpu: Number(r.vcpu), disk_size: Number(r.disk),
+const toResources = (r: Role, odf = false) => ({
+  memory: Math.round(Number(r.memory) * 1024) + (odf ? ODF_EXTRA.memoryGiB * 1024 : 0),
+  vcpu: Number(r.vcpu) + (odf ? ODF_EXTRA.vcpu : 0),
+  disk_size: Number(r.disk),
 });
 
 /** The request parts the draft drives: counts, sizes and the `openshift` options */
@@ -121,7 +125,16 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
     metallb: { enabled: d.metallb.enabled, addresses: d.metallb.addresses, demo: d.metallb.demo },
     disable_updates: d.disableUpdates,
   };
-  return { ctlplanes, workers, ctlplane: toResources(d.ctl), worker: toResources(d.topology === 'ha' ? d.wrk : d.ctl), openshift: options };
+  // The backend adds ODF's overhead only when no sizes are sent: the UI always sends them, so it adds it itself
+  const odf = d.storage === 'odf';
+  const onWorkers = storageOnWorkers(d);
+  return {
+    ctlplanes,
+    workers,
+    ctlplane: toResources(d.ctl, odf && !onWorkers),
+    worker: d.topology === 'ha' ? toResources(d.wrk, odf && onWorkers) : toResources(d.ctl),
+    openshift: options,
+  };
 };
 
 const hint = (text: React.ReactNode, variant: 'default' | 'warning' | 'error' = 'default') => (
@@ -330,7 +343,7 @@ export const TopologySection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDr
 export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => {
   const nodes = storageNodes(draft);
   const odfPossible = draft.topology !== 'sno';
-  const where = draft.topology === 'ha' ? 'worker' : 'node';
+  const where = storageOnWorkers(draft) ? 'worker' : draft.topology === 'ha' ? 'control plane' : 'node';
   return (
     <FormSection title="Storage" titleElement="h3">
       <FormGroup role="radiogroup" fieldId="os-storage" label="Persistent volumes">
@@ -356,8 +369,9 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
       {draft.storage === 'odf' && (
         <Alert id="os-odf-warning" variant={nodes < 3 ? 'danger' : 'warning'} isInline isPlain
           title={nodes < 3
-            ? `ODF needs 3 storage nodes (${draft.topology === 'ha' ? 'workers' : 'nodes'}): ${nodes} selected.`
-            : `ODF is heavy: +${nodes * ODF_EXTRA.vcpu} vCPU and +${nodes * ODF_EXTRA.memoryGiB} GiB RAM in total on top of the node sizes.`} />
+            ? `ODF needs 3 storage nodes: ${nodes} selected.`
+            : `ODF is heavy: each storage ${where} gets +${ODF_EXTRA.vcpu} vCPU / +${ODF_EXTRA.memoryGiB} GiB on top of the sizes above `
+              + `(+${nodes * ODF_EXTRA.vcpu} vCPU, +${nodes * ODF_EXTRA.memoryGiB} GiB in total, included in the resources below).`} />
       )}
     </FormSection>
   );
@@ -365,16 +379,14 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
 
 // Operators
 
-const MANAGED_LABEL: Record<string, string> = { storage: 'Storage', sriov: 'SR-IOV', metallb: 'MetalLB' };
+const managedOption = (managedBy: string) => (managedBy.startsWith('storage') ? 'Storage'
+  : managedBy === 'sriov' ? 'SR-IOV' : managedBy === 'metallb' ? 'MetalLB' : managedBy);
 
-/** Is a managed operator installed by the current options? (LVMS / ODF / LSO by storage, SR-IOV, MetalLB) */
+/** Is a managed operator installed by the current options? managed_by: storage:lvms | storage:odf | sriov | metallb */
 const managedOn = (op: CatalogOperator, d: OsDraft) => {
   if (op.managed_by === 'sriov') return d.sriov.enabled;
   if (op.managed_by === 'metallb') return d.metallb.enabled;
-  if (op.managed_by === 'storage') {
-    if (d.storage === 'lvms') return /lvm/.test(op.name);
-    if (d.storage === 'odf') return /odf|ocs|local-storage/.test(op.name);
-  }
+  if (op.managed_by?.startsWith('storage:')) return d.storage === op.managed_by.slice(8);
   return false;
 };
 
@@ -418,8 +430,8 @@ export const OperatorsSection: React.FC<{
               return (
                 <Checkbox key={op.name} id={`os-op-${op.name}`} isChecked={checked} isDisabled={managed || tooSmall}
                   onChange={(_e, v) => toggle(op.name, v)}
-                  label={<>{op.display_name}{managed && <Label isCompact style={{ marginLeft: 6 }}>{MANAGED_LABEL[op.managed_by!] || op.managed_by} option</Label>}</>}
-                  description={tooSmall ? `Needs ${op.min_nodes} nodes.` : managed ? `Driven by the ${MANAGED_LABEL[op.managed_by!] || op.managed_by} option.` : op.description}
+                  label={<>{op.display_name}{managed && <Label isCompact style={{ marginLeft: 6 }}>{managedOption(op.managed_by!)} option</Label>}</>}
+                  description={tooSmall ? `Needs ${op.min_nodes} nodes.` : managed ? `Driven by the ${managedOption(op.managed_by!)} option.` : op.description}
                   style={{ marginBottom: 6 }} />
               );
             })}
@@ -545,7 +557,7 @@ export const ResourceSummary: React.FC<{ draft: OsDraft; autoGroup: boolean }> =
   ];
   if (workers) rows.push({ what: `${workers} × worker`, vcpu: workers * n(draft.wrk.vcpu), mem: workers * n(draft.wrk.memory), disk: workers * n(draft.wrk.disk) });
   if (sNodes) rows.push({ what: `${sNodes} × storage disk`, vcpu: 0, mem: 0, disk: sNodes * n(draft.storageDisk) });
-  if (odfNodes) rows.push({ what: `ODF overhead (${odfNodes} nodes)`, vcpu: odfNodes * ODF_EXTRA.vcpu, mem: odfNodes * ODF_EXTRA.memoryGiB, disk: 0 });
+  if (odfNodes) rows.push({ what: `ODF overhead, added to ${odfNodes} nodes`, vcpu: odfNodes * ODF_EXTRA.vcpu, mem: odfNodes * ODF_EXTRA.memoryGiB, disk: 0 });
   if (autoGroup) rows.push({ what: 'Lab group router', vcpu: ROUTER.vcpu, mem: ROUTER.memoryGiB, disk: ROUTER.diskGiB });
   const total = rows.reduce((a, r) => ({ vcpu: a.vcpu + r.vcpu, mem: a.mem + r.mem, disk: a.disk + r.disk }), { vcpu: 0, mem: 0, disk: 0 });
 

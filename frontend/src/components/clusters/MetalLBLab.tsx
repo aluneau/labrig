@@ -118,9 +118,13 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
   const announces = (n: ClusterNode) => sameNode(s.announcing_node, n);
   const dot = (n: ClusterNode) => (n.state === 'running' ? C.ok : n.state === 'missing' ? C.danger : C.off);
   const wg = s.wireguard;
+  const tunnel = wg ? `WireGuard${s.wireguard_port ? ` UDP ${s.wireguard_port}` : ' tunnel'}` : 'WireGuard (off)';
 
   const laptop = { title: 'Laptop', lines: [{ text: wg ? 'WireGuard peer' : 'WireGuard not set up' }, { text: `curl http://${hostname}` }] };
-  const host = { title: 'This host', lines: [{ text: 'vm-manager UDP relay' }, { text: '→ router uplink' }] };
+  const host = {
+    title: 'This host',
+    lines: [{ text: s.wireguard_port ? `UDP relay :${s.wireguard_port}` : 'vm-manager UDP relay' }, { text: '→ router uplink' }],
+  };
   const router = {
     title: 'Router',
     lines: [
@@ -170,7 +174,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="MetalLB L2 lab diagram" id="mlb-diagram">
         {defs}
         <Box x={16} y={y0} w={190} h={bh} {...laptop} accent />
-        <Wire d={`M206,${y0 + 46} L328,${y0 + 46}`} label={wg ? 'WireGuard tunnel' : 'WireGuard (off)'} lx={267} ly={y0 + 38} active={wg} dashed={!wg} />
+        <Wire d={`M206,${y0 + 46} L328,${y0 + 46}`} label={tunnel} lx={267} ly={y0 + 38} active={wg} dashed={!wg} />
         <Box x={330} y={y0} w={210} h={bh} {...host} />
         <Wire d={`M540,${y0 + 46} L${rx - 2},${y0 + 46}`} label="UDP relay" lx={(540 + rx) / 2} ly={y0 + 38} active={wg} />
         <Box x={rx} y={y0} w={rw} h={bh} {...router} accent />
@@ -234,7 +238,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
         y += 36;
       }
     };
-    step(laptop, wg ? 'WireGuard tunnel' : 'WireGuard (off)', true, wg, !wg);
+    step(laptop, tunnel, true, wg, !wg);
     step(host, 'UDP relay', false, wg);
     step(router, null, true);
     const busY = y + 40;

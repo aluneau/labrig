@@ -463,7 +463,7 @@ export interface CatalogOperator {
   description: string;
   source: string;
   category: string;
-  managed_by?: 'storage' | 'sriov' | 'metallb' | string | null;
+  managed_by?: 'storage:lvms' | 'storage:odf' | 'sriov' | 'metallb' | string | null;
   min_nodes: number;
 }
 
@@ -526,6 +526,7 @@ export interface MetalLBScenario {
   router_ip?: string | null;
   group_cidr?: string | null;
   wireguard: boolean;
+  wireguard_port?: number | null; // host relay UDP port, null when remote access is off
   checks: ScenarioCheck[];
 }
 
