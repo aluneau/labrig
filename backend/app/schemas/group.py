@@ -130,11 +130,17 @@ class CloudInitSpec(BaseModel):
 
 
 class MemberSpec(BaseModel):
+    """A member VM. Quick members are a cloud image + the group's cloud-init; "custom" ones
+    (the full Create VM form) can also boot an ISO or an empty disk: those get no cloud-init,
+    their OS gets the reserved IP and name by DHCP from the router (dhcp-host on the MAC)."""
     name: str = Field(..., pattern=LABEL, description="Member name, also its hostname (<name>.<domain>)")
-    image: str = "debian-13"
+    # Boot source: cloud_image (image, configured by cloud-init) | iso (install from `iso`) | empty disk
+    source: Literal["cloud_image", "iso", "empty"] = "cloud_image"
+    image: Optional[str] = "debian-13"  # cloud_image only (cleared for the other sources)
+    iso: Optional[str] = None           # iso only: ISO volume path or name (see GET /storage/isos)
     memory: int = Field(1024, ge=128)  # MiB
     vcpu: int = Field(1, ge=1, le=512)
-    disk_size: int = Field(10, ge=1)   # GiB
+    disk_size: int = Field(10, ge=0)   # GiB (0 = no disk, iso only)
     role: str = Field("member", pattern=r"^[a-z0-9_-]{1,32}$")
     # Assigned by the app when unset
     ip: Optional[str] = None
@@ -151,6 +157,21 @@ class MemberSpec(BaseModel):
     @classmethod
     def _mac(cls, v: Optional[str]) -> Optional[str]:
         return v.lower() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _source(self):
+        if self.source == "iso":
+            if not self.iso:
+                raise ValueError(f"Member {self.name}: choose the ISO to boot ('iso')")
+        elif self.iso:
+            raise ValueError(f"Member {self.name}: 'iso' is only used with source 'iso'")
+        if self.source == "cloud_image" and not self.image:
+            raise ValueError(f"Member {self.name}: choose a cloud image ('image')")
+        if self.source != "iso" and self.disk_size < 1:
+            raise ValueError(f"Member {self.name}: the disk size must be at least 1 GiB")
+        if self.source != "cloud_image":
+            self.image = None
+        return self
 
 
 class DHCPRange(BaseModel):
@@ -228,20 +249,24 @@ class GroupSpec(BaseModel):
         dupes = {n for n in names if names.count(n) > 1}
         if dupes:
             raise ValueError(f"Duplicate member names: {', '.join(sorted(dupes))}")
-        if "router" in names:
-            raise ValueError("'router' is reserved for the group's router")
+        for reserved in ("router", "rtr"):
+            if reserved in names:
+                raise ValueError(f"'{reserved}' is reserved for the group's router")
         for label, ip in [("Router IP", self.router.ip)] + [(f"Member {m.name} IP", m.ip) for m in self.members]:
             if ip is None:
                 continue
             addr = ipaddress.IPv4Address(ip)
             if addr not in net or addr in (net.network_address, net.broadcast_address):
                 raise ValueError(f"{label} {ip} is not a usable address of {net}")
-        ips = [m.ip for m in self.members if m.ip]
+        owners: Dict[str, List[str]] = {}
         if self.router.ip:
-            ips.append(self.router.ip)
-        dupes = {ip for ip in ips if ips.count(ip) > 1}
+            owners[self.router.ip] = ["router"]
+        for m in self.members:
+            if m.ip:
+                owners.setdefault(m.ip, []).append(m.name)
+        dupes = [f"{ip} ({', '.join(names)})" for ip, names in sorted(owners.items()) if len(names) > 1]
         if dupes:
-            raise ValueError(f"Duplicate IPs: {', '.join(sorted(dupes))}")
+            raise ValueError(f"Duplicate IPs: {'; '.join(dupes)}")
         if self.dhcp:
             for label, ip in (("DHCP start", self.dhcp.start), ("DHCP end", self.dhcp.end)):
                 if ipaddress.IPv4Address(_ipv4(ip, label)) not in net:

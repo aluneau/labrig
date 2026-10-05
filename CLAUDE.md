@@ -104,6 +104,11 @@ e2e/                  Playwright browser tests against the real app (see below)
   `spec.dhcp_hosts` = static reservations of non-member machines (`dhcp-host=` + `host-record=` lines,
   validated against router/member IPs/MACs/names in `GroupSpec`). Leases are read from the router's
   `/var/lib/dnsmasq/dnsmasq.leases` via guest-exec; releasing one = stop dnsmasq, delete the line, start it.
+  Members (`MemberSpec`) have `source`: `cloud_image` (default, `image` + cloud-init) | `iso` (`iso` = volume
+  path or name) | `empty`; the last two get no seed, only the MAC reservation + DNS name. Both the quick
+  "Add member" form and CreateVMModal in group mode (`group` prop, or its "Lab group" select) POST a
+  MemberSpec to `/groups/{id}/members`; new members are pre-checked (VM name free, <= 64 chars) and dropped
+  from the spec again if their VM can't be created.
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 

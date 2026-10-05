@@ -44,7 +44,7 @@ SHUTDOWN_TIMEOUT = 120
 LEASES_FILE = "/var/lib/dnsmasq/dnsmasq.leases"
 
 # Member fields that can't change in place (the VM must be recreated)
-MEMBER_IMMUTABLE = ("image", "memory", "vcpu", "disk_size", "role", "mac", "cloud_init", "user_data")
+MEMBER_IMMUTABLE = ("source", "image", "iso", "memory", "vcpu", "disk_size", "role", "mac", "cloud_init", "user_data")
 
 
 class LeaseInUse(Exception):
@@ -103,6 +103,15 @@ class GroupService:
         known = ", ".join(sorted(f"{i.distribution}-{i.version}" for i in images)) or "none"
         raise ValueError(f"Cloud image '{ref}' is not downloaded (ready images: {known}). "
                          "Download it on the Storage page.")
+
+    def resolve_iso(self, db: Session, ref: str) -> str:
+        """ISO volume path or name -> its path"""
+        from app.services.storage_service import storage_service
+        isos = storage_service.list_isos(db)
+        for iso in isos:
+            if ref in (iso["path"], iso["name"]):
+                return iso["path"]
+        raise ValueError(f"ISO '{ref}' not found (upload or download it on the Storage page)")
 
     def _default_router_image(self, db: Session) -> str:
         ready = {f"{i.distribution}-{i.version}".lower() for i in cloud_image_service.list_images(db)
@@ -192,9 +201,15 @@ class GroupService:
                 raise ValueError(f"Member {m.name} IP {m.ip} is inside the dynamic DHCP range "
                                  f"{spec.dhcp.start}-{spec.dhcp.end}")
             used_ips.add(m.ip)
-            self.resolve_image(db, m.image)
+            if m.source == "cloud_image":
+                self.resolve_image(db, m.image)
+            elif m.source == "iso":
+                self.resolve_iso(db, m.iso)
 
-        spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
+        try:
+            spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
+        except ValidationError as e:  # not the whole spec dump in the API error
+            raise ValueError("; ".join(err["msg"].replace("Value error, ", "") for err in e.errors()))
         backend.validate(spec)
         return spec
 
@@ -324,6 +339,18 @@ class GroupService:
         )
 
     def _create_member(self, db: Session, spec: GroupSpec, member: MemberSpec, start: bool) -> None:
+        metadata_xml = libvirt_client.group_metadata_xml(spec.name, member.role, member=member.name)
+        if member.source != "cloud_image":
+            # No cloud-init: the installed OS gets its IP and hostname from the router (dhcp-host on the MAC)
+            vm_service.create_vm(
+                db,
+                VMCreate(name=member_vm_name(spec.name, member.name), description=f"Member of lab group {spec.name}",
+                         memory=member.memory, vcpu=member.vcpu, disk_size=member.disk_size,
+                         iso_path=self.resolve_iso(db, member.iso) if member.source == "iso" else None,
+                         network_name=network_name(spec.name), mac_address=member.mac, start=start),
+                metadata_xml=metadata_xml,
+            )
+            return
         ci = member.cloud_init or spec.cloud_init
         image = self.resolve_image(db, member.image)
         vm_service.create_vm(
@@ -333,8 +360,7 @@ class GroupService:
                      cloudinit_username=ci.username, cloudinit_password=ci.password, cloudinit_ssh_keys=ci.ssh_keys,
                      cloudinit_keyboard=ci.keyboard, cloudinit_userdata=member.user_data,
                      network_name=network_name(spec.name), mac_address=member.mac, start=start),
-            hostname=member.name, fqdn=f"{member.name}.{spec.domain}",
-            metadata_xml=libvirt_client.group_metadata_xml(spec.name, member.role, member=member.name),
+            hostname=member.name, fqdn=f"{member.name}.{spec.domain}", metadata_xml=metadata_xml,
         )
 
     def _wait_router(self, vm_name: str, timeout: float, on_wait: Optional[Callable[[], None]] = None) -> None:
@@ -460,11 +486,18 @@ class GroupService:
         new_names = {m.name for m in spec.members}
         removed = [n for n in old_members if n not in new_names]
         added = [m for m in spec.members if m.name not in old_members]
+        for m in added:  # before touching anything: a failure here would leave a member without VM
+            vm_name = member_vm_name(spec.name, m.name)
+            if len(vm_name) > 64:
+                raise ValueError(f"VM name '{vm_name}' is too long (max 64 characters): use a shorter member name")
+            if libvirt_client.get_vm(vm_name) is not None:
+                raise ValueError(f"A VM named '{vm_name}' already exists")
 
         router_running = (libvirt_client.get_vm(router_vm_name(spec.name)) or {}).get("state") == "running"
         previous_status = group.status
         group.status = "updating"
         db.commit()
+        self._publish(group, "updated")
         try:
             for name in removed + replaced:
                 self._delete_member_vm(spec.name, name, delete_disks=True if name in replaced else removed_disks)
@@ -474,7 +507,12 @@ class GroupService:
             # router first, so new members get their lease
             self.push_router_config(db, group)
             for m in added + [m for m in spec.members if m.name in replaced]:
-                self._create_member(db, spec, m, start=router_running)
+                try:
+                    self._create_member(db, spec, m, start=router_running)
+                except Exception:
+                    if m in added:
+                        self._drop_member(db, group, spec, m.name)
+                    raise
         finally:
             group.status = previous_status
             db.commit()
@@ -482,6 +520,16 @@ class GroupService:
             self._sync_member_rows(db, group, spec)
             self._publish(group, "updated")
         return group
+
+    def _drop_member(self, db: Session, group: Group, spec: GroupSpec, name: str) -> None:
+        """Undo adding a member whose VM could not be created (spec + router config)"""
+        spec.members = [m for m in spec.members if m.name != name]
+        group.spec = spec.model_dump(mode="json")
+        db.commit()
+        try:
+            self.push_router_config(db, group)
+        except RuntimeError as e:
+            logger.warning(f"Could not remove member {name} from the router config: {e}")
 
     def add_member(self, db: Session, group_id: int, member: MemberSpec) -> Optional[Group]:
         group = self.get_group(db, group_id)
@@ -532,12 +580,22 @@ class GroupService:
 
     # Power
 
+    @staticmethod
+    def _check_no_power_task(db: Session, group: Group) -> None:
+        """A start racing a stop still waiting on a VM would power that VM off again (and vice versa)"""
+        busy = db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id,
+                                     Task.type.in_(["group_start", "group_stop"]),
+                                     Task.status.in_(["pending", "running"])).first()
+        if busy is not None:
+            raise ValueError(f"'{busy.name}' is still running: wait for it to finish")
+
     def start_group(self, db: Session, group_id: int) -> Optional[Task]:
         group = self.get_group(db, group_id)
         if not group:
             return None
         if group.status in ("creating", "deleting", "missing"):
             raise ValueError(f"Group is {group.status}")
+        self._check_no_power_task(db, group)
         return task_service.start(
             db, TaskCreate(name=f"Start lab group {group.name}", type="group_start", target_type="group",
                            target_id=group.id, target_name=group.name),
@@ -578,6 +636,7 @@ class GroupService:
             return None
         if group.status in ("creating", "deleting"):
             raise ValueError(f"Group is {group.status}")
+        self._check_no_power_task(db, group)
         return task_service.start(
             db, TaskCreate(name=f"Stop lab group {group.name}", type="group_stop", target_type="group",
                            target_id=group.id, target_name=group.name),
@@ -715,7 +774,7 @@ class GroupService:
             return {"name": name, "role": role, "hostname": name, "fqdn": f"{name}.{spec.domain}", "ip": ip,
                     "mac": mac, "vm_id": vm.id if vm else None, "vm_name": vm_name,
                     "vm_uuid": live["uuid"] if live else None, "state": live["state"] if live else "missing",
-                    "image": m.image, "memory": m.memory, "vcpu": m.vcpu}
+                    "image": m.image or self._source_label(m), "memory": m.memory, "vcpu": m.vcpu}
 
         router = info("router", router_vm_name(spec.name), "router", spec.router.ip, spec.router.lan_mac, spec.router)
         members = [info(m.name, member_vm_name(spec.name, m.name), m.role, m.ip, m.mac, m) for m in spec.members]
@@ -736,6 +795,15 @@ class GroupService:
             "config_error": group.config_error, "spec": spec, "created_at": group.created_at,
             "updated_at": group.updated_at,
         }
+
+    @staticmethod
+    def _source_label(m: Any) -> Optional[str]:
+        """What a non cloud-image member boots, for the members table"""
+        if getattr(m, "source", None) == "iso":
+            return f"ISO {m.iso.rsplit('/', 1)[-1]}"
+        if getattr(m, "source", None) == "empty":
+            return "empty disk"
+        return None
 
     def list_api(self, db: Session) -> List[Dict[str, Any]]:
         groups = self.list_groups(db)

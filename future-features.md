@@ -150,6 +150,13 @@ Design:
 > it needs `dnsmasq-utils` on the router, absent on existing routers, and the push already restarts dnsmasq).
 > `vmmanager_group` `dhcp_host` blocks. Note: systemd-networkd ignores the NAK on a plain `networkctl renew`;
 > `networkctl reconfigure <if>` or a reboot picks up a changed reservation. `e2e/group-dhcp.js`.
+> **Custom members** (done): the full Create VM form adds members too ("Custom VM…" on the Members tab,
+> "Lab group" select on the VMs page). `MemberSpec.source` = `cloud_image` | `iso` | `empty` (+ `iso`), so
+> ISO installs live in the spec like the rest (router metadata, rebuild, export). ISO/empty members get no
+> cloud-init: only the MAC reservation + DNS name, the installed OS must use DHCP. Next: the OpenTofu
+> `vmmanager_group` `member` block should gain `source`, `iso`, `cloud_init` and `user_data` (it only has
+> name/image/memory/vcpu/disk_size/role/ip today); PXE boot from the router (dnsmasq `dhcp-boot`) would
+> make empty-disk members useful (they boot nothing until an ISO is inserted on the VM's Devices tab).
 
 ### 2.1 Concept and data model (L)
 
