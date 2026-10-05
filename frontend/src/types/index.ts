@@ -73,6 +73,7 @@ export interface VMNic {
   model?: string | null; // null for SR-IOV VFs (hostdev networks)
   link_state: LinkState;
   device?: string | null; // host tap while running
+  vf: boolean; // SR-IOV VF passed through from the host (VF pool network)
   // running VM only: 'attach' = appears at next start, 'detach' = goes away when released, 'change' = saved differs
   pending?: 'attach' | 'detach' | 'change' | null;
 }

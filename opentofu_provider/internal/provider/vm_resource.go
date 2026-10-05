@@ -58,6 +58,8 @@ type vmModel struct {
 	VNCPort      types.Int64     `tfsdk:"vnc_port"`
 	BootOrder    types.List      `tfsdk:"boot_order"`
 	Cdrom        types.String    `tfsdk:"cdrom"`
+	Iommu        types.Bool      `tfsdk:"iommu"`
+	KernelArgs   types.String    `tfsdk:"guest_kernel_args"`
 }
 
 func NewVMResource() resource.Resource { return &vmResource{} }
@@ -111,6 +113,15 @@ func (r *vmResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *r
 				Description:   "Persistent boot order: \"hd\", \"cdrom\", \"network\". Updated in place; applies at the next start.",
 				PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 			},
+			"iommu": schema.BoolAttribute{
+				Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "Virtual IOMMU (intel-iommu with interrupt remapping), needed for vfio / VF passthrough in the guest. " +
+					"Changed in place; on a running VM it applies after a power off + start.",
+			},
+			"guest_kernel_args": schema.StringAttribute{
+				Optional: true, PlanModifiers: replaceStr,
+				Description: "Cloud images: added to the guest kernel command line at first boot (then one reboot), e.g. \"intel_iommu=on iommu=pt\".",
+			},
 			"cdrom": schema.StringAttribute{
 				Optional: true, Computed: true,
 				Description:   "ISO volume path in the CD-ROM drive (\"\" = empty). Changed in place, live when running.",
@@ -148,6 +159,10 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 		"network_name": plan.Network.ValueString(),
 		"mac_address":  strPtr(plan.MACAddress),
 		"autostart":    plan.Autostart.ValueBool(),
+		"iommu":        plan.Iommu.ValueBool(),
+	}
+	if args := strPtr(plan.KernelArgs); args != nil {
+		body["guest_kernel_args"] = *args
 	}
 	// Boot order / CD-ROM are set before the first start
 	setDevices := known(plan.BootOrder) || (known(plan.Cdrom) && plan.Cdrom.ValueString() != plan.ISOPath.ValueString())
@@ -249,6 +264,9 @@ func (r *vmResource) refresh(ctx context.Context, m *vmModel, d diags) bool {
 	} else {
 		m.BootOrder = types.ListNull(types.StringType)
 	}
+	if vm.Iommu != nil {
+		m.Iommu = types.BoolValue(vm.Iommu.Enabled)
+	}
 	if vm.Cdrom != nil && vm.Cdrom.Path != nil {
 		m.Cdrom = types.StringValue(*vm.Cdrom.Path)
 	} else {
@@ -302,6 +320,16 @@ func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, res
 	if err := r.applyDevices(ctx, id, plan, &state); err != nil {
 		resp.Diagnostics.AddError("Cannot update VM devices", err.Error())
 		return
+	}
+	if known(plan.Iommu) && !plan.Iommu.Equal(state.Iommu) {
+		var change apiDeviceChange
+		if err := r.client.Do(ctx, "PUT", "/vms/"+id+"/iommu", map[string]any{"enabled": plan.Iommu.ValueBool()}, &change); err != nil {
+			resp.Diagnostics.AddError("Cannot change the virtual IOMMU", err.Error())
+			return
+		}
+		if change.Pending {
+			resp.Diagnostics.AddWarning("Virtual IOMMU change applies after a power off + start", change.Message)
+		}
 	}
 
 	if !plan.Running.Equal(state.Running) {

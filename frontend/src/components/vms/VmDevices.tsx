@@ -383,7 +383,7 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
         </Thead>
         <Tbody>
           {vm.nics.map((nic) => {
-            const vf = !nic.model && nic.type !== 'bridge';
+            const vf = nic.vf;
             const ips = ipsOf(nic);
             return (
               <Tr key={nic.mac || nic.network}>

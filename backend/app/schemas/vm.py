@@ -146,6 +146,7 @@ class VMNic(BaseModel):
     model: Optional[str] = None  # virtio, e1000e, igb ...; None for SR-IOV VFs (hostdev networks)
     link_state: str = "up"  # "down" = cable unplugged
     device: Optional[str] = None  # host tap device while running (vnetN)
+    vf: bool = False  # an SR-IOV VF passed through from the host (VF pool network)
     # Running VM only: "attach" = appears at next start, "detach" = goes away when the guest releases it,
     # "change" = network / link state saved for the next start differ from the running ones
     pending: Optional[str] = None

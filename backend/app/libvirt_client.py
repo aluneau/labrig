@@ -472,9 +472,13 @@ class LibvirtClient:
                 seen.add(info["mac"])
                 info.pop("alias")
                 info["pending"] = None
+                # A NIC on an SR-IOV VF pool network runs as <interface type='hostdev'> (no source network)
+                info["vf"] = info["type"] == "hostdev"
                 if live is not None and info["mac"]:
                     el_live = domain_xml.find_interface(live, info["mac"])
                     el_config = domain_xml.find_interface(config, info["mac"])
+                    if info["type"] == "hostdev" and el_config is not None:
+                        info["network"] = domain_xml.nic_info(el_config)["network"]
                     if el_live is None:
                         info["pending"] = "attach"
                     elif el_config is None:
@@ -484,6 +488,10 @@ class LibvirtClient:
                         if (saved["network"], saved["link_state"]) != (info["network"], info["link_state"]):
                             info["pending"] = "change"
                 nics.append(info)
+        # Shut off: a VF pool NIC is a plain type='network' without model; ask the network
+        for info in nics:
+            if not info["vf"] and info["type"] == "network" and not info["model"] and info["network"]:
+                info["vf"] = self.network_forward_mode(info["network"]) == "hostdev"
         return nics
 
     def vm_has_iommu(self, name: str) -> Dict[str, Any]:

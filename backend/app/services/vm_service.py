@@ -117,8 +117,11 @@ class VMService:
                         fqdn=fqdn,
                         kernel_args=vm_data.guest_kernel_args,
                     )
-                if network_config is None and image.distribution in ("debian", "ubuntu"):
-                    network_config = cloud_image_service.dhcp_all_network_config()  # extra / hot-plugged NICs
+                if network_config is None and nics is None and image.distribution in ("debian", "ubuntu"):
+                    # DHCP on extra / hot-plugged NICs too; the primary NIC (by MAC) keeps the default route
+                    if not vm_data.mac_address:
+                        vm_data = vm_data.model_copy(update={"mac_address": self._free_mac()})
+                    network_config = cloud_image_service.dhcp_all_network_config(vm_data.mac_address)
                 seed = cloud_image_service.build_seed_iso(hostname or vm_data.name, user_data, network_config)
                 seed_path = libvirt_client.upload_volume(
                     pool_name, f"{vm_data.name}-cidata.iso", len(seed), io.BytesIO(seed))
@@ -327,6 +330,15 @@ class VMService:
         return disk
 
     # Devices: NICs, vIOMMU
+
+    @staticmethod
+    def _free_mac() -> str:
+        import random
+        used = set(libvirt_client.all_macs())
+        while True:
+            mac = "52:54:00:%02x:%02x:%02x" % tuple(random.randint(0, 255) for _ in range(3))
+            if mac not in used:
+                return mac
 
     def _nic_xml(self, network: str, model: str = "virtio", mac: Optional[str] = None,
                  link_state: str = "up") -> str:

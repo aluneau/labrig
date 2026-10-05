@@ -215,14 +215,18 @@ class CloudImageService:
         return config
 
     @staticmethod
-    def dhcp_all_network_config() -> str:
+    def dhcp_all_network_config(primary_mac: str) -> str:
         """network-config v2: DHCP on every NIC, including ones hot-plugged later (netplan + networkd on
-        Debian / Ubuntu; cloud-init's default only configures the first NIC there). optional: boot doesn't
-        wait for NICs on networks without DHCP. EL images don't need it: NetworkManager already runs DHCP
-        on new NICs by itself."""
+        Debian / Ubuntu, where cloud-init's default only configures the first NIC). Other NICs get a
+        higher route metric so the primary NIC keeps the default route, and are optional (boot doesn't
+        wait for NICs on networks without DHCP). networkd uses the first matching file by name:
+        "nic0" (primary, by MAC) sorts before "nicx" (everything else). EL images don't need this:
+        NetworkManager already runs DHCP on new NICs."""
+        others = {"dhcp4": True, "optional": True, "dhcp4-overrides": {"route-metric": 200}}
         return yaml.safe_dump({"version": 2, "ethernets": {
-            "all-en": {"match": {"name": "en*"}, "dhcp4": True, "optional": True},
-            "all-eth": {"match": {"name": "eth*"}, "dhcp4": True, "optional": True},
+            "nic0": {"match": {"macaddress": primary_mac.lower()}, "dhcp4": True},
+            "nicx": {"match": {"name": "en*"}, **others},
+            "nicy": {"match": {"name": "eth*"}, **others},
         }}, sort_keys=False)
 
     def build_seed_iso(self, hostname: str, user_data: str, network_config: Optional[str] = None) -> bytes:
