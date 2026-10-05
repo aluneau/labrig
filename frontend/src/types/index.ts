@@ -270,3 +270,118 @@ export interface HostInfo {
   total_networks: number;
   active_networks: number;
 }
+
+// Lab groups (backend/app/schemas/group.py)
+
+export interface DNSRecord {
+  name: string; // relative to the group domain ("api.ocp", "*.apps.ocp"), absolute if it ends with '.'
+  a?: string | null;
+  cname?: string | null;
+}
+
+export interface GroupCloudInit {
+  username?: string | null;
+  password?: string | null;
+  ssh_keys?: string[];
+  keyboard?: string | null;
+}
+
+export interface MemberSpec {
+  name: string;
+  image?: string;
+  memory?: number; // MiB
+  vcpu?: number;
+  disk_size?: number; // GiB
+  role?: string;
+  ip?: string | null;
+  mac?: string | null;
+  cloud_init?: GroupCloudInit | null;
+  user_data?: string | null;
+}
+
+export interface RouterSpec {
+  flavour?: 'el' | 'vyos';
+  image?: string | null;
+  memory?: number;
+  vcpu?: number;
+  disk_size?: number;
+  dns?: { forwarders?: string[]; records?: DNSRecord[] };
+  bgp?: unknown;
+  wireguard?: unknown;
+  vlans?: unknown[];
+  ip?: string | null;
+  lan_mac?: string | null;
+  uplink_mac?: string | null;
+}
+
+export interface GroupSpec {
+  name: string;
+  cidr: string;
+  domain?: string | null;
+  uplink?: string | null;
+  dhcp?: { start: string; end: string } | null;
+  router?: RouterSpec;
+  cloud_init?: GroupCloudInit;
+  members: MemberSpec[];
+}
+
+export interface GroupMemberInfo {
+  name: string;
+  role: string;
+  hostname?: string | null;
+  fqdn?: string | null;
+  ip?: string | null;
+  mac?: string | null;
+  vm_id?: number | null;
+  vm_name?: string | null;
+  vm_uuid?: string | null;
+  state: string;
+  image?: string | null;
+  memory?: number | null;
+  vcpu?: number | null;
+}
+
+export interface Group {
+  id: number;
+  name: string;
+  cidr: string;
+  domain: string;
+  uplink?: string | null;
+  status: 'creating' | 'ready' | 'updating' | 'error' | 'deleting' | 'missing' | string;
+  state: 'running' | 'stopped' | 'partial' | string;
+  error_message?: string | null;
+  network_name: string;
+  network_id?: number | null;
+  router: GroupMemberInfo;
+  members: GroupMemberInfo[];
+  member_count: number;
+  config_applied: boolean;
+  config_applied_at?: string | null;
+  config_error?: string | null;
+  spec: GroupSpec;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GroupLease {
+  ip: string;
+  mac: string;
+  hostname?: string | null;
+  expiry?: number | null;
+}
+
+export interface GroupDetail extends Group {
+  router_uplink_ips: string[];
+  leases: GroupLease[];
+}
+
+export interface RouterConfig {
+  flavour: string;
+  user_data: string;
+  network_config: string;
+  files: Record<string, string>;
+  apply_command: string;
+  config_applied: boolean;
+  config_applied_at?: string | null;
+  config_error?: string | null;
+}

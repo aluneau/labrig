@@ -8,11 +8,13 @@ import {
   NetworkIcon,
   ServerIcon,
   TaskIcon,
+  TopologyIcon,
 } from '@patternfly/react-icons';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: TachometerAltIcon },
   { path: '/vms', label: 'Virtual Machines', icon: VirtualMachineIcon },
+  { path: '/groups', label: 'Lab groups', icon: TopologyIcon },
   { path: '/storage', label: 'Storage', icon: StorageDomainIcon },
   { path: '/networks', label: 'Networks', icon: NetworkIcon },
   { path: '/hosts', label: 'Host', icon: ServerIcon },
@@ -33,7 +35,7 @@ export const AppSidebar: React.FC = () => {
                 key={path}
                 itemId={path}
                 to={path}
-                isActive={location.pathname === path}
+                isActive={location.pathname === path || (path !== '/' && location.pathname.startsWith(`${path}/`))}
                 onClick={(event) => {
                   event.preventDefault();
                   navigate(path);
