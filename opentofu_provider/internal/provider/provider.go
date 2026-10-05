@@ -97,3 +97,11 @@ func strPtr(v types.String) *string {
 	s := v.ValueString()
 	return &s
 }
+
+func intPtr(v types.Int64) *int64 {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	n := v.ValueInt64()
+	return &n
+}

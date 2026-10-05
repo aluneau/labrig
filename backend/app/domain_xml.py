@@ -9,7 +9,7 @@ at a specific CD-ROM (cloud-image VMs have a cloud-init seed CD-ROM next to the 
 """
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional
-from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape, quoteattr
 
 BOOT_DEVICES = ("hd", "cdrom", "network")
 
@@ -123,10 +123,14 @@ def media_change_xml(cdrom: ET.Element, iso_path: Optional[str]) -> str:
     return ET.tostring(disk, encoding="unicode")
 
 
-def data_disk_xml(path: str, target: str, bus: str = "virtio", fmt: str = "qcow2") -> str:
+def data_disk_xml(path: str, target: str, bus: str = "virtio", fmt: str = "qcow2",
+                  serial: Optional[str] = None) -> str:
+    """serial: shows up as /dev/disk/by-id/virtio-<serial> (virtio: 20 characters max)"""
     discard = " discard='unmap'" if fmt == "qcow2" else ""
+    serial_xml = f"<serial>{escape(serial)}</serial>" if serial else ""
     return (f"<disk type='file' device='disk'><driver name='qemu' type={quoteattr(fmt)}{discard}/>"
-            f"<source file={quoteattr(path)}/><target dev={quoteattr(target)} bus={quoteattr(bus)}/></disk>")
+            f"<source file={quoteattr(path)}/><target dev={quoteattr(target)} bus={quoteattr(bus)}/>"
+            f"{serial_xml}</disk>")
 
 
 # Boot order

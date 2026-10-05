@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.openshift import OpenShiftOptions
+
 # Accepted by the API; k3s and kubeadm are implemented (cluster_drivers.DRIVERS)
 CLUSTER_TYPES = ["k3s", "kubeadm", "openshift"]
 
@@ -20,6 +22,7 @@ class ClusterCreate(BaseModel):
     type: str = "k3s"
     # k3s: release (INSTALL_K3S_VERSION, e.g. v1.33.5+k3s1), empty = stable channel.
     # kubeadm: Kubernetes minor (v1.37) or patch (v1.37.1), empty = KUBEADM_DEFAULT_VERSION
+    # openshift: use openshift.version instead
     version: Optional[str] = Field(None, pattern=r"^v?\d+\.\d+(\.\d+)?(\+k3s\d+)?$")
     ctlplanes: int = Field(1, ge=1, le=5)  # 1, or 3/5 with embedded etcd
     workers: int = Field(2, ge=0, le=20)
@@ -47,6 +50,9 @@ class ClusterCreate(BaseModel):
     password: Optional[str] = None
     ssh_keys: List[str] = []
     keyboard: Optional[str] = Field(None, pattern=r"^[a-z]{2,10}$")
+    # type "openshift": version, topology (sno / compact / ha), storage, operators, SR-IOV, MetalLB.
+    # ctlplanes / workers / ctlplane / worker sizes follow the topology (workers: ha only).
+    openshift: Optional[OpenShiftOptions] = None
 
 
 class ClusterScale(BaseModel):
@@ -87,6 +93,8 @@ class Cluster(BaseModel):
     task_running: bool = False
     task_progress: Optional[int] = None
     has_kubeconfig: bool = False
+    # OpenShift: web console (reachable where *.apps.<cluster>.<domain> resolves: WireGuard, router DNS)
+    console_url: Optional[str] = None
     ctlplanes: int = 0
     workers: int = 0
     spec: Optional[Dict[str, Any]] = None

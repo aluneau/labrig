@@ -108,6 +108,7 @@ class ELRouterBackend(RouterBackend):
             f"dhcp-option=option:router,{rip}",
             f"dhcp-option=option:dns-server,{rip}",
             f"dhcp-option=option:domain-search,{domain}",
+            f"dhcp-option=option:ntp-server,{rip}",  # chrony on the router (ntp_command)
             "dhcp-authoritative",
             "log-dhcp",
         ]
@@ -241,8 +242,16 @@ class ELRouterBackend(RouterBackend):
                 " else systemctl enable -q wg-quick@wg0 && systemctl restart wg-quick@wg0; fi"
                 " && systemctl is-active wg-quick@wg0")
 
+    @staticmethod
+    def ntp_command(spec: GroupSpec) -> str:
+        """The router (synced to the public pools through its uplink) serves NTP to the lab: OpenShift's
+        installer checks the nodes' clock against it, and labs keep time without internet NTP."""
+        allow = f"allow {spec.cidr}"
+        return (f"{{ grep -qx '{allow}' /etc/chrony.conf || {{ echo '{allow}' >> /etc/chrony.conf"
+                " && systemctl restart chronyd; }; true; }")
+
     def apply_command(self, spec: GroupSpec) -> str:
-        base = (f"restorecon -R /etc/dnsmasq.d /etc/nftables 2>/dev/null; "
+        base = (f"{self.ntp_command(spec)}; restorecon -R /etc/dnsmasq.d /etc/nftables 2>/dev/null; "
                 f"nft -f {NFT_CONF} && systemctl stop dnsmasq && {{ sh {PRUNE_LEASES} || true; }}; "
                 "systemctl start dnsmasq && systemctl is-active dnsmasq")
         base += " && " + self._wg_apply(spec)
@@ -289,7 +298,7 @@ class ELRouterBackend(RouterBackend):
         # has load balancers: adding one later needs no dnf run on a live, memory-tight router
         # wireguard-tools too (tiny): enabling remote access later needs no dnf run either
         config["packages"] = ["qemu-guest-agent", "dnsmasq", "nftables", "policycoreutils-python-utils", "haproxy",
-                              "wireguard-tools"]
+                              "wireguard-tools", "chrony"]
         # cc_mounts runs before package installation: the swap file absorbs dnf's metadata peak
         config["swap"] = {"filename": "/swapfile", "size": SWAP_SIZE, "maxsize": SWAP_SIZE}
 
@@ -315,6 +324,7 @@ class ELRouterBackend(RouterBackend):
             "restorecon -R /etc/dnsmasq.conf /etc/dnsmasq.d /etc/nftables /etc/sysconfig/nftables.conf || true",
             "systemctl enable nftables && systemctl restart nftables",
             "systemctl enable dnsmasq && systemctl restart dnsmasq",
+            self.ntp_command(spec),
             *([f"{self.apply_command(spec)} || true"] if spec.load_balancers or self._wg(spec) else []),
             f"mkdir -p {STATE_DIR}",
             f"if systemctl is-active -q dnsmasq; then touch {STATE_DIR}/ready; "

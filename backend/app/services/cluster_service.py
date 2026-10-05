@@ -67,7 +67,7 @@ class Cancelled(Exception):
 GROUP_CREATE_TIMEOUT = 20 * 60  # auto-created group: router first boot (dnf)
 API_PORT = 6443
 # Never returned by the API
-SECRET_SPEC_KEYS = ("password", "certificate_key")
+SECRET_SPEC_KEYS = ("password", "certificate_key", "iso_path")
 
 
 def network_for(cluster: Cluster) -> ClusterNetwork:
@@ -244,6 +244,10 @@ class ClusterService:
             "status": status, "status_message": cluster.status_message, "task_id": cluster.task_id,
             "task_running": busy, "task_progress": task_progress,
             "has_kubeconfig": bool(cluster.kubeconfig),
+            # OpenShift: only once installed (the name doesn't answer before)
+            "console_url": (f"https://console-openshift-console.apps.{zone}"
+                            if cluster.type == "openshift" and status in ("ready", "stopped", "starting", "stopping")
+                            else None),
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
@@ -295,6 +299,15 @@ class ClusterService:
         raise ValueError("No cloud image is ready: download Debian 13 or AlmaLinux 9 on the Storage page")
 
     def create_cluster(self, db: Session, data: ClusterCreate) -> Cluster:
+        if data.type == "openshift":
+            if data.network:
+                raise ValueError("OpenShift clusters live in a lab group: pick a group_id or let the app create one")
+            if db.query(Cluster).filter(Cluster.name == data.name).first():
+                raise ValueError(f"Cluster '{data.name}' already exists")
+            from app.services.openshift_installer import openshift_installer
+            return openshift_installer.create(db, data)
+        if data.openshift is not None:
+            raise ValueError("'openshift' options are for type openshift")
         driver = get_driver(data.type)  # rejects unsupported types
         if driver.needs_group and data.network:
             raise ValueError(f"{data.type} clusters live in a lab group (router DNS + API load balancer): "
@@ -370,53 +383,9 @@ class ClusterService:
 
     def _create_in_group(self, db: Session, data: ClusterCreate, image: CloudImage) -> Cluster:
         """kubeadm: nodes in an existing lab group, or in a group created for (and deleted with) the cluster"""
-        from app.schemas.group import CloudInitSpec, GroupSpec, RouterSpec
-        group_service.sync_groups(db)
-        pod, svc = (ipaddress.IPv4Network(c, strict=False) for c in (data.pod_cidr, data.service_cidr))
-        if data.group_id is not None:
-            group = group_service.get_group(db, data.group_id)
-            if group is None:
-                raise ValueError(f"Lab group {data.group_id} not found")
-            if group.status in ("creating", "deleting", "missing", "error"):
-                raise ValueError(f"Lab group {group.name} is {group.status}")
-            gspec = GroupSpec.model_validate(group.spec)
-            if not gspec.uplink:
-                raise ValueError(f"Lab group {group.name} has no uplink: the host could not reach the API")
-            names = {m.name for m in gspec.members} | {r.name for r in gspec.reservations}
-            clash = [n for n in self._node_names(data.name, data.ctlplanes, data.workers) if n in names]
-            if clash:
-                raise ValueError(f"'{clash[0]}' already exists in group {group.name}")
-            node_subnet = ipaddress.IPv4Network(gspec.cidr)
-            domain, owned, task = gspec.domain, False, None
-        else:
-            if len(data.name) > 32:
-                raise ValueError("The cluster name is also its lab group's name: 32 characters max")
-            if db.query(Group).filter(Group.name == data.name).first():
-                raise ValueError(f"A lab group named '{data.name}' already exists: pick it (group_id) "
-                                 "or another cluster name")
-            avoid = [data.pod_cidr, data.service_cidr] + [g.cidr for g in db.query(Group).all()]
-            if data.cidr:
-                node_subnet = ipaddress.IPv4Network(data.cidr, strict=False)
-                if any(node_subnet.overlaps(ipaddress.IPv4Network(c, strict=False)) for c in avoid):
-                    raise ValueError(f"{node_subnet} overlaps the pod / service network or another group")
-            else:
-                node_subnet = free_subnet(avoid)
-            router = RouterSpec(memory=data.router_memory) if data.router_memory else RouterSpec()
-            gspec = GroupSpec(
-                name=data.name, cidr=str(node_subnet), domain=data.domain, owner=f"cluster:{data.name}",
-                router=router,
-                cloud_init=CloudInitSpec(username=data.username, password=data.password,
-                                         ssh_keys=data.ssh_keys, keyboard=data.keyboard),
-            )
-            domain, owned = gspec.domain, True
-            group = None
-        for label, net in (("pod_cidr", pod), ("service_cidr", svc)):
-            if net.overlaps(node_subnet):
-                raise ValueError(f"{label} {net} overlaps the node network {node_subnet}")
-        existing_vms = {vm["name"] for vm in libvirt_client.list_vms()}
-        clash = [n for n in self._node_names(data.name, data.ctlplanes, data.workers) if n in existing_vms]
-        if clash:
-            raise ValueError(f"VM '{clash[0]}' already exists")
+        names = self._node_names(data.name, data.ctlplanes, data.workers)
+        group, gspec, owned, node_subnet = self._resolve_group(db, data, names, [data.pod_cidr, data.service_cidr])
+        task = None
         if group is None:
             group, task = group_service.create_group(db, gspec)
 
@@ -427,7 +396,7 @@ class ClusterService:
         spec.pop("network", None)
         cluster = Cluster(
             name=data.name, type=data.type, version=data.version, network=group_network_name(group.name),
-            network_owned=False, group_id=group.id, group_owned=owned, domain=domain, spec=spec,
+            network_owned=False, group_id=group.id, group_owned=owned, domain=gspec.domain, spec=spec,
             token=kubeadm_token(), status="provisioning",
             status_message="Creating the lab group (router first boot)" if owned else "Queued",
         )
@@ -444,6 +413,62 @@ class ClusterService:
         cluster.task_id = task.id
         db.commit()
         return cluster
+
+    def _resolve_group(self, db: Session, data: ClusterCreate, node_names: List[str],
+                       cluster_cidrs: List[str], check: Optional[Callable[[Any], None]] = None) -> tuple:
+        """Validate the lab group of a new cluster: an existing one (data.group_id) or the spec of one
+        to create, named after the cluster. cluster_cidrs: in-cluster networks the node network must
+        not overlap. check(gspec): extra validation of an existing group's spec.
+        Returns (group or None, GroupSpec, owned, node subnet); nothing is created."""
+        from app.schemas.group import CloudInitSpec, GroupSpec, RouterSpec
+        group_service.sync_groups(db)
+        nets = [ipaddress.IPv4Network(c, strict=False) for c in cluster_cidrs]
+        if data.group_id is not None:
+            group = group_service.get_group(db, data.group_id)
+            if group is None:
+                raise ValueError(f"Lab group {data.group_id} not found")
+            if group.status in ("creating", "deleting", "missing", "error"):
+                raise ValueError(f"Lab group {group.name} is {group.status}")
+            gspec = GroupSpec.model_validate(group.spec)
+            if not gspec.uplink:
+                raise ValueError(f"Lab group {group.name} has no uplink: the host could not reach the API")
+            names = {m.name for m in gspec.members} | {r.name for r in gspec.reservations}
+            clash = [n for n in node_names if n in names]
+            if clash:
+                raise ValueError(f"'{clash[0]}' already exists in group {group.name}")
+            if check is not None:
+                check(gspec)
+            node_subnet = ipaddress.IPv4Network(gspec.cidr)
+            owned = False
+        else:
+            if len(data.name) > 32:
+                raise ValueError("The cluster name is also its lab group's name: 32 characters max")
+            if db.query(Group).filter(Group.name == data.name).first():
+                raise ValueError(f"A lab group named '{data.name}' already exists: pick it (group_id) "
+                                 "or another cluster name")
+            avoid = list(cluster_cidrs) + [g.cidr for g in db.query(Group).all()]
+            if data.cidr:
+                node_subnet = ipaddress.IPv4Network(data.cidr, strict=False)
+                if any(node_subnet.overlaps(ipaddress.IPv4Network(c, strict=False)) for c in avoid):
+                    raise ValueError(f"{node_subnet} overlaps an in-cluster network or another group")
+            else:
+                node_subnet = free_subnet(avoid)
+            router = RouterSpec(memory=data.router_memory) if data.router_memory else RouterSpec()
+            gspec = GroupSpec(
+                name=data.name, cidr=str(node_subnet), domain=data.domain, owner=f"cluster:{data.name}",
+                router=router,
+                cloud_init=CloudInitSpec(username=data.username, password=data.password,
+                                         ssh_keys=data.ssh_keys, keyboard=data.keyboard),
+            )
+            group, owned = None, True
+        for net in nets:
+            if net.overlaps(node_subnet):
+                raise ValueError(f"The in-cluster network {net} overlaps the node network {node_subnet}")
+        existing_vms = {vm["name"] for vm in libvirt_client.list_vms()}
+        clash = [n for n in node_names if n in existing_vms]
+        if clash:
+            raise ValueError(f"VM '{clash[0]}' already exists")
+        return group, gspec, owned, node_subnet
 
     def _wait_group(self, db: Session, task: Task, cluster: Cluster) -> None:
         """Auto-created group: wait for its creation task (router first boot)"""
@@ -779,6 +804,11 @@ class ClusterService:
     def start_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
+                if cluster.type == "openshift":
+                    from app.services.openshift_installer import openshift_installer
+                    result = openshift_installer.start(db, task, cluster)
+                    self._set_status(db, cluster, "ready", None)
+                    return result
                 self._set_status(db, cluster, "starting",
                                  "Starting the lab group's router" if cluster.group_id else "Starting nodes")
                 network_for(cluster).ensure()
@@ -843,6 +873,8 @@ class ClusterService:
         db.commit()
 
     def add_workers(self, db: Session, cluster: Cluster, count: int) -> Task:
+        if cluster.type == "openshift":
+            raise ValueError("Adding workers to an OpenShift cluster is not supported yet")
         if self.to_dict(db, cluster)["status"] != "ready":
             raise ValueError("Start the cluster first")
         if not cluster.token:
@@ -879,6 +911,8 @@ class ClusterService:
             raise LookupError(f"Node '{node_name}' is not part of cluster {cluster.name}")
         if node.role != "worker":
             raise ValueError("Only workers can be removed")
+        if cluster.type == "openshift":
+            raise ValueError("Removing OpenShift nodes is not supported yet")
 
         def run(db: Session, task: Task, cluster_id: int, node_name: str) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
@@ -945,6 +979,9 @@ class ClusterService:
                     logger.warning(f"Could not remove cluster {cluster.name}'s entries from its group: {e}")
         elif network.owned:
             network.destroy()
+        if cluster.type == "openshift":
+            from app.services.openshift_installer import openshift_installer
+            openshift_installer.delete_files(cluster)
         name, cluster_id = cluster.name, cluster.id
         db.delete(cluster)
         db.commit()
@@ -952,6 +989,10 @@ class ClusterService:
         event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
 
     def get_kubeconfig(self, db: Session, cluster: Cluster) -> str:
+        if cluster.type == "openshift":
+            if not cluster.kubeconfig:
+                raise ValueError("The cluster has no kubeconfig yet (it is written when the install starts)")
+            return cluster.kubeconfig
         if not cluster.kubeconfig:
             if not cluster.api_ip:
                 raise ValueError("The cluster has no API address yet")
@@ -961,6 +1002,10 @@ class ClusterService:
     def kubectl(self, db: Session, cluster: Cluster, view: str) -> Dict[str, Any]:
         if view not in KUBECTL_VIEWS:
             raise ValueError(f"Unknown view '{view}' ({', '.join(KUBECTL_VIEWS)})")
+        if cluster.type == "openshift":
+            from app.services.openshift_service import openshift_service
+            out = openshift_service.oc(cluster.name, cluster.version, KUBECTL_VIEWS[view], 30)
+            return {"command": "oc " + " ".join(KUBECTL_VIEWS[view]), "node": "(host, via the router)", **out}
         driver = get_driver(cluster.type)
         first = self._api_node(cluster)
         if first is None:

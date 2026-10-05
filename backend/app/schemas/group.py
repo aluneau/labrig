@@ -364,6 +364,23 @@ class DHCPHostSpec(BaseModel):
         return v
 
 
+class AddressPoolSpec(BaseModel):
+    """A range of the group network kept free for something inside the guests (e.g. a cluster's
+    MetalLB pool): never handed out by DHCP nor assigned to members / reservations."""
+    name: str = Field(..., pattern=HOST_LABEL)
+    start: str
+    end: str
+    owner: Optional[str] = None  # "cluster:<name>"
+
+    @field_validator("start", "end")
+    @classmethod
+    def _ip(cls, v: str) -> str:
+        return _ipv4(v, "Address pool bound")
+
+    def contains(self, ip: str) -> bool:
+        return ipaddress.IPv4Address(self.start) <= ipaddress.IPv4Address(ip) <= ipaddress.IPv4Address(self.end)
+
+
 class GroupSpec(BaseModel):
     name: str = Field(..., pattern=LABEL, description="Lowercase letters, digits and '-', max 32 chars")
     cidr: str = Field(..., description="IPv4 subnet of the group network, e.g. 10.42.7.0/24")
@@ -379,6 +396,7 @@ class GroupSpec(BaseModel):
     load_balancers: List[LoadBalancerSpec] = []
     owner: Optional[str] = None  # "cluster:<name>" for a group created for (and deleted with) a cluster
     dhcp_hosts: List[DHCPHostSpec] = []  # static reservations for non-member machines
+    address_pools: List[AddressPoolSpec] = []  # ranges kept free (MetalLB pools...)
 
     @field_validator("cidr")
     @classmethod
