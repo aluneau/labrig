@@ -70,17 +70,19 @@ ok "${PRETTY_NAME:-$ID} (family: $FAMILY), user: $TARGET_USER"
 step "Installing packages"
 case "$FAMILY" in
   arch)
-    pkgs=(libvirt dnsmasq edk2-ovmf libvirt-python python)
+    pkgs=(libvirt dnsmasq edk2-ovmf libvirt-python python polkit)  # dnsmasq ships dhcp_release
     command -v qemu-system-x86_64 >/dev/null || pkgs+=(qemu-base)
     $SUDO pacman -S --needed --noconfirm "${pkgs[@]}"
     ;;
   rhel)
-    $SUDO dnf install -y libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client python3 python3-libvirt
+    $SUDO dnf install -y libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client python3 python3-libvirt \
+      dnsmasq-utils polkit
     ;;
   debian)
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils ovmf dnsmasq-base python3 python3-venv python3-libvirt
+      libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils ovmf dnsmasq-base python3 python3-venv python3-libvirt \
+      dnsmasq-utils polkitd pkexec
     ;;
 esac
 ok "packages installed"
@@ -116,6 +118,27 @@ else
   $SUDO usermod -aG libvirt "$TARGET_USER"
   ok "added $TARGET_USER to group libvirt (log out and back in for virsh in your own shells; the service gets it now)"
 fi
+
+# ---------------------------------------------------------------------------
+step "Privileged helper and polkit rules"
+# - /usr/libexec/vm-manager/helper: root-owned, fixed command whitelist (dhcp-release), run via pkexec
+# - polkit: group libvirt may run it, and start/stop the libvirt daemons + sockets (Start/Stop in the UI)
+HELPER_DIR=/usr/libexec/vm-manager
+$SUDO install -d -o root -g root -m 0755 "$HELPER_DIR"
+$SUDO install -o root -g root -m 0755 "$APP_DIR/scripts/vm-manager-helper" "$HELPER_DIR/helper"
+$SUDO install -D -o root -g root -m 0644 "$APP_DIR/scripts/polkit/org.vmmanager.helper.policy" \
+  /usr/share/polkit-1/actions/org.vmmanager.helper.policy
+$SUDO install -d -m 0755 /etc/polkit-1/rules.d 2>/dev/null || true
+$SUDO install -o root -g root -m 0644 "$APP_DIR/scripts/polkit/50-vm-manager.rules" /etc/polkit-1/rules.d/50-vm-manager.rules
+# SELinux: label the copies like their directories (bin_t, etc_t, usr_t)
+if command -v restorecon >/dev/null 2>&1; then
+  $SUDO restorecon -RF "$HELPER_DIR" /usr/share/polkit-1/actions/org.vmmanager.helper.policy /etc/polkit-1/rules.d/50-vm-manager.rules
+fi
+$SUDO sh -c 'command -v pkexec' >/dev/null 2>&1 || warn "pkexec not found: DHCP lease release will not work (install polkit / pkexec)"
+$SUDO sh -c 'command -v dhcp_release' >/dev/null 2>&1 || warn "dhcp_release not found: DHCP lease release will not work"
+# polkitd picks up rule changes by itself; restart it only if it isn't running
+systemctl is-active --quiet polkit 2>/dev/null || $SUDO systemctl start polkit 2>/dev/null || true
+ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules"
 
 # ---------------------------------------------------------------------------
 step "Default network"

@@ -14,7 +14,8 @@ import { BarsIcon } from '@patternfly/react-icons';
 import { useEventsConnected } from '../../hooks/useEvents';
 import { useLibvirt } from '../../hooks/useLibvirt';
 
-const PILL_COLORS = { running: 'green', stopped: 'grey', starting: 'blue', stopping: 'orange' } as const;
+// (grey would be unreadable on the dark masthead)
+const PILL_COLORS = { running: 'green', stopped: 'orange', starting: 'blue', stopping: 'orange' } as const;
 
 /** Header pill: `libvirt: running` / `libvirt: stopped [Start]` */
 const LibvirtPill: React.FC = () => {

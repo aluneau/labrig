@@ -18,13 +18,24 @@ import {
   SplitItem,
 } from '@patternfly/react-core';
 import { Link } from 'react-router-dom';
-import { LibvirtStopMode } from '../../types';
+import { LibvirtStopMode, LibvirtUnit } from '../../types';
 import { libvirtApi, vmApi } from '../../services/api';
 import { useLibvirt } from '../../hooks/useLibvirt';
 import { errorText } from '../../utils/format';
 
 const STATE_COLORS = { running: 'green', stopped: 'grey', starting: 'blue', stopping: 'orange' } as const;
 const INACTIVE = ['shutoff', 'crashed', 'nostate'];
+
+/** "virtqemud, virtnetworkd running · 21 sockets listening" */
+function unitSummary(units: LibvirtUnit[]): string {
+  const active = units.filter((u) => u.active_state === 'active');
+  const services = active.filter((u) => u.name.endsWith('.service')).map((u) => u.name.replace('.service', ''));
+  const sockets = active.filter((u) => u.name.endsWith('.socket')).length;
+  const parts = [];
+  if (services.length) parts.push(`${services.join(', ')} running`);
+  if (sockets) parts.push(`${sockets} socket(s) listening`);
+  return parts.join(' · ') || 'none active';
+}
 
 /** Stop confirmation: when VMs run, choose "shut them down first" or "stop anyway" */
 const StopModal: React.FC<{ onClose: () => void; onDone: (msg: string) => void }> = ({ onClose, onDone }) => {
@@ -131,7 +142,7 @@ export const LibvirtCard: React.FC = () => {
             <DescriptionListGroup>
               <DescriptionListTerm>Units</DescriptionListTerm>
               <DescriptionListDescription>
-                {status.units.filter((u) => u.active_state !== 'inactive').map((u) => u.name).join(', ') || 'none active'}
+                {unitSummary(status.units)}
               </DescriptionListDescription>
             </DescriptionListGroup>
           )}
