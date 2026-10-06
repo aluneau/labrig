@@ -182,7 +182,7 @@ class ELRouterBackend(RouterBackend):
             reachable = nets + spec.router.egress.allow
             egress = ("        ct status dnat accept\n"
                       f"        ip saddr {spec.cidr} ip daddr {{ {', '.join(reachable)} }} accept\n"
-                      f"        ip saddr {spec.cidr} counter reject with icmpx type admin-prohibited"
+                      f"        ip saddr {spec.cidr} counter reject with icmp type admin-prohibited"
                       " comment \"vmm egress blocked\"\n")
         return (
             "#!/usr/sbin/nft -f\n"

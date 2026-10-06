@@ -210,9 +210,10 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
     check(r.code === 0, `copy: member pulls ${ready.url}/e2e/copied:v1 (${r.out.trim()})`);
     //   upload an archive saved on this host (podman save), through the browser
     const archive = path.join(os.tmpdir(), `${GROUP}-upload.tar`);
-    execFileSync('podman', ['pull', '-q', UPLOAD_IMAGE], { stdio: 'ignore' });
-    execFileSync('podman', ['save', '-q', '-o', archive, UPLOAD_IMAGE], { stdio: 'ignore' });
-    await page.locator('#upload-file input[type=file]').setInputFiles(archive);
+    if (fs.existsSync(archive)) fs.unlinkSync(archive);
+    execFileSync('podman', ['pull', '-q', UPLOAD_IMAGE], { stdio: ['ignore', 'ignore', 'pipe'] });
+    execFileSync('podman', ['save', '-q', '-o', archive, UPLOAD_IMAGE], { stdio: ['ignore', 'ignore', 'pipe'] });
+    await page.locator('#registry-images input[type=file]').setInputFiles(archive);
     await page.locator('#upload-repo').fill('e2e/uploaded');
     await page.locator('#upload-tag').fill('v1');
     await page.locator('#upload-start').click();
