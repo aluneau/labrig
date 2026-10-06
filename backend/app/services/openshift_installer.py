@@ -73,6 +73,14 @@ MINIMUMS = {
 ODF_EXTRA = {"lab": {"memory": 6144, "vcpu": 2}, "lean": {"memory": 24576, "vcpu": 8}}
 
 
+class _BlockDumper(yaml.SafeDumper):
+    """install-config.yaml: multi-line strings (additionalTrustBundle) as | blocks"""
+
+
+_BlockDumper.add_representer(str, lambda d, v: d.represent_scalar(
+    "tag:yaml.org,2002:str", v, style="|" if "\n" in v else None))
+
+
 def sriov_network_name(cluster_name: str) -> str:
     """Isolated L2 network of the cluster's igb (SR-IOV) NICs: no IP, no DHCP, so the extra NICs don't
     get a second address in the machine network (the installer rejects overlapping networks)"""
@@ -693,7 +701,7 @@ class OpenShiftInstaller:
             [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes])
         configs = {"install-config.yaml": install, "agent-config.yaml": agent}
         for name, data in configs.items():
-            text = yaml.safe_dump(data, sort_keys=False)
+            text = yaml.dump(data, Dumper=_BlockDumper, sort_keys=False)
             for path in (workdir / name, workdir / f"{name}.orig"):  # the installer consumes the first
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "w") as f:
