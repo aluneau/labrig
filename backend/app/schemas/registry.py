@@ -41,6 +41,8 @@ class MirrorRequest(BaseModel):
                 continue
             if not re.match(IMAGE_REF, image):
                 raise ValueError(f"'{image}' is not an image reference")
+            if "@" not in image and ":" not in image.rsplit("/", 1)[-1]:
+                image += ":latest"  # oc-mirror v2 refuses references without a tag or digest
             out.append(image)
         return out
 

@@ -505,22 +505,43 @@ def _request_id(spec: GroupSpec, request: MirrorRequest) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
-_PROGRESS = re.compile(r"(?:✓|✗|copying image|images? to copy)\D{0,40}?(\d+)\s*/\s*(\d+)")
+_PROGRESS = re.compile(r"(?:✓|✗|copying image)\D{0,40}?(\d+)\s*/\s*(\d+)")
+_TO_COPY = re.compile(r"images to copy\D{0,5}(\d+)")
 
 
 def _parse_progress(log: str) -> Tuple[Optional[int], Optional[int], str]:
-    """(done, total, last line) from oc-mirror's output"""
+    """(done, total, last line) from oc-mirror v2's output. Its log has "📌 images to copy N" once, then a
+    "Success copying <src> ➡️ <dest>" (or "Failed to copy") line per image; older builds print "✓ n / N".
+    The router-side summary lines COPIED=<count> / TOTAL=<n> (_follow_run) count over the whole log."""
     done = total = None
     last = ""
+    copied = None   # router-side count over the whole log
+    seen = 0        # counted in the lines given
     for line in log.splitlines():
         text = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+        if text.startswith("COPIED="):
+            copied = int(text[7:] or 0)
+            continue
+        if text.startswith("TOTAL="):
+            total = max(total or 0, int(text[6:] or 0)) or None
+            continue
+        if text.startswith(("RC=", "ACTIVE")):
+            continue
         if text:
             last = text
+        m = _TO_COPY.search(text)
+        if m:
+            total = max(total or 0, int(m.group(1)))
+        if "Success copying" in text or "Failed to copy" in text:
+            seen += 1
         m = _PROGRESS.search(text)
         if m:
             d, t = int(m.group(1)), int(m.group(2))
             if t >= (total or 0):
                 done, total = d, t
+    copied = seen if copied is None else copied
+    if total and (done is None or copied > done):
+        done = min(copied, total)
     last = re.sub(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\s+", "", last)
     return done, total, last[:200]
 
@@ -623,8 +644,11 @@ def _follow_run(rtr: str, run_id: str, run_dir: str, progress: _Progress, record
         try:
             out = _exec(rtr, f"systemctl is-active -q vmm-mirror-{run_id} && echo ACTIVE; "
                              f"echo \"RC=$(cat {run_dir}/rc 2>/dev/null)\"; "
-                             f"grep -aE '✓|✗|copying image|images? to copy|ERROR|WARN|INFO' {run_dir}/log 2>/dev/null"
-                             " | tail -n 400", timeout=30)["stdout"]
+                             f"echo \"COPIED=$(grep -acE 'Success copying|Failed to copy' {run_dir}/log 2>/dev/null)\"; "
+                             f"echo \"TOTAL=$(grep -aoE 'images to copy [0-9]+' {run_dir}/log 2>/dev/null"
+                             " | awk '{s += $4} END {print s + 0}')\"; "
+                             f"grep -aE '✓|✗|copying image|images to copy|ERROR|WARN|INFO' {run_dir}/log 2>/dev/null"
+                             " | tail -n 40", timeout=30)["stdout"]
             errors = 0
         except (libvirt.libvirtError, TimeoutError) as e:
             errors += 1

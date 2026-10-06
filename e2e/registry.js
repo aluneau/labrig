@@ -226,9 +226,17 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
     r = await guestSh(MEMBER, `podman run --rm ${ready.url}/e2e/uploaded:v1 sh -c 'echo uploaded-ok' 2>&1 | tail -n 1`, 300);
     check(r.out.includes('uploaded-ok'), `upload: member runs ${ready.url}/e2e/uploaded:v1 (${r.out.trim()})`);
     //   listed, then deleted from the list
-    await page.getByRole('button', { name: 'Refresh' }).click();
+    const listed = await waitFor(async () => {
+      const l = await api(`/groups/${groupId}/registry/images`);
+      return l.images.some((i) => i.repository === 'e2e/uploaded') ? l : null;
+    }, 120000, 'uploaded image in the API list');
+    log('API list:', listed.images.map((i) => `${i.repository}:${i.tags.join(',')}${i.added ? ' (added)' : ''}`).join(' '));
     const list = page.locator('#registry-image-list');
-    await list.getByText('e2e/uploaded').waitFor({ timeout: 30000 });
+    await waitFor(async () => {
+      await page.getByRole('button', { name: 'Refresh' }).click();
+      await page.waitForTimeout(3000);
+      return await list.getByText('e2e/uploaded').count() > 0;
+    }, 60000, 'uploaded image in the UI list');
     check(await list.getByText('e2e/copied').count() > 0, 'images listed (copied + uploaded)');
     await page.screenshot({ path: 'registry-images.png', fullPage: true });
     await page.getByRole('button', { name: 'Delete e2e/uploaded:v1' }).click();
@@ -237,6 +245,11 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
       30000, 'tag deleted');
     check(true, 'uploaded tag deleted from the UI');
     const creds = await api(`/groups/${groupId}/registry/credentials`);
+    // authenticated pull by the registry.<domain> name (how cluster nodes pull with the pull secret): the token
+    // realm is the uplink address, reached from the lab (router-local, not blocked by the egress switch)
+    r = await guestSh(MEMBER, `podman login -u '${creds.username}' -p '${creds.password}' ${ready.url} 2>&1 && podman rmi -f ${ready.url}/e2e/copied:v1 >/dev/null 2>&1;`
+      + ` podman pull ${ready.url}/e2e/copied:v1 2>&1 | tail -n 1; rc=$?; podman logout ${ready.url} >/dev/null 2>&1; exit $rc`, 300);
+    check(r.code === 0 && r.out.includes('Login Succeeded'), `blocked: authenticated login + pull via ${ready.url} (${r.out.trim().split('\n').pop()})`);
     check(!!creds.password && !JSON.stringify(await api(`/groups/${groupId}`)).includes(creds.password)
       && !JSON.stringify(await api(`/groups/${groupId}/registry`)).includes(creds.password), 'credentials only on /registry/credentials');
 
