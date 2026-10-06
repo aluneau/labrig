@@ -198,11 +198,12 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
     await page.locator('#copy-source').fill(COPY_IMAGE);
     await page.locator('#copy-repo').fill('e2e/copied');
     await page.locator('#copy-tag').fill('v1');
+    let lastTask = Math.max(0, ...(await api('/tasks')).map((x) => x.id));
     await page.locator('#copy-start').click();
     await page.locator('#image-task').waitFor({ timeout: 30000 }).catch(() => {});
     await page.screenshot({ path: 'registry-copying.png' });
     await waitFor(async () => {
-      const t = (await api('/tasks')).find((x) => x.type === 'registry_copy' && x.target_name === GROUP);
+      const t = (await api('/tasks')).find((x) => x.id > lastTask && x.type === 'registry_copy' && x.target_name === GROUP);
       if (t && t.status === 'failed') throw new Error(`copy failed: ${t.error_message}`);
       return t && t.status === 'completed';
     }, 10 * 60000, 'copy done');
@@ -216,9 +217,10 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
     await page.locator('#registry-images input[type=file]').setInputFiles(archive);
     await page.locator('#upload-repo').fill('e2e/uploaded');
     await page.locator('#upload-tag').fill('v1');
+    lastTask = Math.max(0, ...(await api('/tasks')).map((x) => x.id));
     await page.locator('#upload-start').click();
     await waitFor(async () => {
-      const t = (await api('/tasks')).find((x) => x.type === 'registry_upload' && x.target_name === GROUP);
+      const t = (await api('/tasks')).find((x) => x.id > lastTask && x.type === 'registry_upload' && x.target_name === GROUP);
       if (t && t.status === 'failed') throw new Error(`upload failed: ${t.error_message}`);
       return t && t.status === 'completed';
     }, 10 * 60000, 'upload pushed');

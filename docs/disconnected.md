@@ -86,7 +86,8 @@ Registry tab → *Mirror content* (or `POST /groups/{id}/registry/mirror`):
   ocp`, no graph image; operators from `registry.redhat.io/redhat/redhat-operator-index:v<minor>` unless a
   `catalog` is given), run on the router as `oc-mirror --v2 … docker://registry.<domain>:<port>` (mirror to
   mirror) in a **detached systemd unit** (`vmm-mirror-<id>`): a guest-agent timeout or an app restart doesn't
-  stop it; the app polls its log (progress = images copied / total). One run at a time per router.
+  stop it; the app polls its log (progress = "Success copying" lines / "images to copy N"). One run at a time
+  per router. `additional_images` without a tag or digest get `:latest` (oc-mirror v2 refuses them otherwise).
 - The **OpenShift pull secret** (set in the Create cluster dialog) is merged with the registry credentials
   into `/run/vmm-mirror-<id>/auth.json` (tmpfs, 0600) for the run only and deleted when oc-mirror exits. It is
   never logged nor returned.
