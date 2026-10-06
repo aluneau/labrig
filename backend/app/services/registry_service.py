@@ -160,7 +160,9 @@ def ensure_router_disk(spec: GroupSpec) -> Dict[str, Any]:
     size = reg.disk_gb * 1024 ** 3
     if disk is None:
         pool = libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
-        name = libvirt_client.free_volume_name(pool, f"{rtr}-registry", "qcow2")
+        name = f"{rtr}-registry.qcow2"
+        if libvirt_client.volume_exists(str(Path(settings.DEFAULT_POOL_PATH) / name)):
+            name = libvirt_client.free_volume_name(pool, f"{rtr}-registry", "qcow2")  # left by a group kept on disk
         path = libvirt_client.create_volume(pool, name, size, "qcow2")
         target = libvirt_client.next_disk_target(rtr, "vd")
         attached = libvirt_client.attach_disk(rtr, data_disk_xml(path, target, "virtio", "qcow2",
@@ -273,7 +275,7 @@ def status(db: Session, group: Group) -> RegistryStatus:
             out.message = (f"The router runs with {out.router_memory_mb} MiB: it gets "
                            f"{spec.router.effective_memory()} MiB at its next restart")
     elif router.get("setup_active") in ("active", "activating"):
-        out.state, out.message = "installing", f"Setting up: {phase}"
+        out.state, out.message = "installing", f"Setting up: {_phase_text(router)}"
     elif needs_restart or phase == "restart-required":
         out.state = "restart-required"
         out.message = (f"The router has {out.router_memory_mb} MiB of RAM, the registry needs "
@@ -290,7 +292,7 @@ def status(db: Session, group: Group) -> RegistryStatus:
 
 
 def _running_task(db: Session, group: Group, kind: str) -> Optional[int]:
-    task = (db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id, Task.type == kind,
+    task = (db.query(Task).filter(Task.target_type == "registry", Task.target_id == group.id, Task.type == kind,
                                   Task.status.in_(["pending", "running"]))
             .order_by(Task.id.desc()).first())
     return task.id if task is not None and task_service.is_running(task.id) else None
@@ -329,6 +331,18 @@ class _Progress:
             raise RuntimeError("Cancelled")
 
 
+MIRROR_REGISTRY_SIZE = 1_300_000_000  # mirror-registry-amd64.tar.gz 2.0.x, for the download progress
+
+
+def _phase_text(st: Dict[str, Any]) -> str:
+    phase = st.get("phase") or "starting"
+    if phase == "download" and st.get("download"):
+        return f"downloading mirror-registry ({int(st['download']) // 1_000_000} MB of ~1300 MB)"
+    return {"disk": "formatting the registry disk", "packages": "installing podman",
+            "certificate": "making the TLS certificate", "install": "installing Quay (a few minutes)",
+            "starting": "starting Quay"}.get(phase, phase)
+
+
 SETUP_PHASES = {"disk": 0.05, "packages": 0.1, "download": 0.2, "certificate": 0.55, "install": 0.6,
                 "certificate-update": 0.9, "starting": 0.92, "ready": 1.0}
 
@@ -339,7 +353,7 @@ def start_setup(db: Session, group: Group) -> Task:
     if running:
         return task_service.get_task(db, running)
     return task_service.start(
-        db, TaskCreate(name=f"Set up mirror registry of {group.name}", type="registry_setup", target_type="group",
+        db, TaskCreate(name=f"Set up mirror registry of {group.name}", type="registry_setup", target_type="registry",
                        target_id=group.id, target_name=group.name,
                        description="Download mirror-registry, install Quay on the router"),
         _setup_task, group.id)
@@ -406,7 +420,10 @@ def ensure_ready(db: Session, group: Group, task: Optional[Task] = None,
                         break
                     raise RuntimeError(f"Registry setup failed ({phase}): {st.get('error') or 'see '
                                        + rr.SETUP_LOG + ' on the router'}")
-                progress(SETUP_PHASES.get(phase, 0.0), f"Registry setup: {phase or 'starting'}")
+                frac = SETUP_PHASES.get(phase, 0.0)
+                if phase == "download" and st.get("download"):
+                    frac += 0.35 * min(int(st["download"]) / MIRROR_REGISTRY_SIZE, 1)
+                progress(frac, f"Registry setup: {_phase_text(st)}")
                 if time.monotonic() > deadline:
                     raise TimeoutError(f"The registry setup didn't finish in {SETUP_TIMEOUT // 60} min "
                                        f"(phase {phase}); see {rr.SETUP_LOG} on the router")
@@ -693,7 +710,7 @@ def start_mirror(db: Session, group: Group, request: MirrorRequest) -> Task:
         f"{sum(len(c.packages) for c in request.operators)} operator(s)" if request.operators else "",
         f"{len(request.additional_images)} image(s)" if request.additional_images else ""]))
     return task_service.start(
-        db, TaskCreate(name=f"Mirror into {group.name} registry", type="registry_mirror", target_type="group",
+        db, TaskCreate(name=f"Mirror into {group.name} registry", type="registry_mirror", target_type="registry",
                        target_id=group.id, target_name=group.name, description=what),
         _mirror_task, group.id, request.model_dump())
 

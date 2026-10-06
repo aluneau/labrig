@@ -1260,6 +1260,7 @@ class GroupService:
                     "image": m.image or self._source_label(m), "memory": m.memory, "vcpu": m.vcpu}
 
         router = info("router", router_vm_name(spec.name), "router", spec.router.ip, spec.router.lan_mac, spec.router)
+        router.update(memory=spec.router.effective_memory(), vcpu=spec.router.effective_vcpu())  # registry: more
         members = [info(m.name, member_vm_name(spec.name, m.name), m.role, m.ip, m.mac, m) for m in spec.members]
         all_states = [router["state"]] + [m["state"] for m in members]
         if all(s == "running" for s in all_states):

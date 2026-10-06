@@ -177,8 +177,11 @@ class ELRouterBackend(RouterBackend):
             # lab itself (+ allow) is refused, every packet (not only new connections: switching to blocked
             # cuts running downloads too). Traffic to the router's own addresses (DNS, NTP, haproxy, the
             # registry, its uplink address) is not forwarded: it never reaches this chain.
+            # `ct status dnat`: connections to a port the router publishes for a container (the registry's Quay pod,
+            # podman DNAT) are forwarded to the container's address: they stay allowed.
             reachable = nets + spec.router.egress.allow
-            egress = (f"        ip saddr {spec.cidr} ip daddr {{ {', '.join(reachable)} }} accept\n"
+            egress = ("        ct status dnat accept\n"
+                      f"        ip saddr {spec.cidr} ip daddr {{ {', '.join(reachable)} }} accept\n"
                       f"        ip saddr {spec.cidr} counter reject with icmpx type admin-prohibited"
                       " comment \"vmm egress blocked\"\n")
         return (

@@ -163,6 +163,10 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         roles.append("wireguard")
     if spec.router.bgp is not None and spec.router.bgp.enabled:
         roles.append("bgp")
+    if spec.router.registry.enabled:
+        roles.append("registry")
+    if spec.router.egress.mode == "blocked":
+        roles.append("egress")  # lab machines can't reach the internet
     uplink_ips = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]] if router_running else []
     return {
         "id": group.id, "name": spec.name, "cidr": spec.cidr, "domain": spec.domain,
