@@ -37,12 +37,14 @@ from app.libvirt_client import libvirt_client
 from app.models import Cluster, ClusterNode, Group, Task
 from app.schemas import ClusterCreate, TaskCreate, VMCreate
 from app.schemas.openshift import OpenShiftOptions
+from app.schemas.registry import MirrorRequest, OperatorCatalog, OperatorPackage
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
 from app.schemas.group import BGP_PEER_ASN
-from app.services.openshift_addons import STORAGE_SERIAL, AddonRunner, metallb_pool
-from app.services.openshift_service import POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
+from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner, metallb_pool
+from app.services import registry_service
+from app.services.openshift_service import CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
 
@@ -53,6 +55,7 @@ ASSISTED_PORT = 8090
 INSTALL_TIMEOUT = 150 * 60     # boot + install + cluster operators (a nested rig can be slow)
 IMAGE_TIMEOUT = 30 * 60        # agent create image (first run downloads the 1.4 GB base ISO)
 START_TIMEOUT = 20 * 60
+CATALOG_TIMEOUT = 15 * 60      # disconnected: mirrored CatalogSource READY
 
 # Defaults per role, used when the request doesn't size the nodes (MiB / vCPU / GiB)
 DEFAULTS = {
@@ -190,11 +193,16 @@ class OpenShiftInstaller:
             openshift_service.check_cidr(gspec.cidr)
 
         group, gspec, owned, node_subnet = self.svc._resolve_group(db, data, names, RESERVED_CIDRS, check)
+        if opts.disconnected:
+            # the router becomes the lab's bastion: mirror registry (more RAM + a registry disk)
+            if not version.startswith("4."):
+                raise ValueError("Disconnected installs: OpenShift 4.x releases only")
+            gspec.router.registry.enabled = True
         if gspec.router.wireguard and gspec.router.wireguard.subnet:
             for reserved in RESERVED_CIDRS:
                 if ipaddress.IPv4Network(gspec.router.wireguard.subnet).overlaps(ipaddress.IPv4Network(reserved)):
                     raise ValueError(f"The group's WireGuard subnet overlaps {reserved}, used inside OpenShift")
-        self._check_budget(db, sizes, counts, opts)
+        self._check_budget(db, sizes, counts, opts, self._registry_extra(gspec, owned) if opts.disconnected else 0)
 
         task = None
         if group is None:
@@ -221,6 +229,8 @@ class OpenShiftInstaller:
         topo = {"sno": "single node", "compact": "compact (3 masters)",
                 "ha": f"3 masters + {counts['workers']} workers"}[opts.topology]
         where = f"new lab group {group.name}" if owned else f"lab group {group.name}"
+        if opts.disconnected:
+            where += ", disconnected (mirror registry on the router)"
         task = task_service.start(db, TaskCreate(
             name=f"Create OpenShift cluster {data.name}", type="cluster_create", target_type="cluster",
             target_id=cluster.id, target_name=data.name, description=f"OpenShift {version}, {topo}, {where}",
@@ -252,11 +262,22 @@ class OpenShiftInstaller:
         return result
 
     @staticmethod
+    def _registry_extra(gspec, owned: bool) -> int:
+        """MiB the router needs on top of what it uses now to run the mirror registry"""
+        want = gspec.router.effective_memory()  # registry enabled in gspec by the caller
+        if owned:
+            return want
+        live = libvirt_client.get_vm(router_vm_name(gspec.name)) or {}
+        current = live.get("max_memory", 0) // 1024 if live.get("state") == "running" else 0
+        return max(0, want - current)
+
+    @staticmethod
     def _check_budget(db: Session, sizes: Dict[str, Dict[str, int]], counts: Dict[str, int],
-                      opts: OpenShiftOptions) -> None:
+                      opts: OpenShiftOptions, extra: int = 0) -> None:
         """Refuse a cluster whose RAM can't fit next to the running VMs (no overcommit on purpose:
-        an OOM-killed master corrupts etcd)"""
-        need = sizes["ctlplane"]["memory"] * counts["masters"] + sizes["worker"]["memory"] * counts["workers"]
+        an OOM-killed master corrupts etcd). extra: MiB more for the router (mirror registry)."""
+        need = (sizes["ctlplane"]["memory"] * counts["masters"] + sizes["worker"]["memory"] * counts["workers"]
+                + extra)
         try:
             with open("/proc/meminfo") as f:
                 total = next(int(line.split()[1]) // 1024 for line in f if line.startswith("MemTotal:"))
@@ -265,7 +286,9 @@ class OpenShiftInstaller:
         running = sum(vm.get("max_memory", 0) // 1024 for vm in libvirt_client.list_vms() if vm.get("state") == "running")
         free = total - running - 4096  # keep 4 GiB for the host
         if need > free:
-            raise ValueError(f"Not enough memory: the cluster needs {need // 1024} GiB, the host has "
+            raise ValueError(f"Not enough memory: the cluster needs {need // 1024} GiB"
+                             + (f" (including {extra // 1024} GiB more for the router's mirror registry)" if extra else "")
+                             + ", the host has "
                              f"{total // 1024} GiB with {running // 1024} GiB used by running VMs "
                              "(stop some VMs or shrink the nodes)")
 
@@ -286,11 +309,16 @@ class OpenShiftInstaller:
             network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
             network.ensure()
 
-            def bin_progress(message: str, pct: int) -> None:
-                svc._check(task, cluster, db, 22 + pct * 8 // 100, message)
-            openshift_service.ensure_binaries(version, bin_progress, lambda: task_service.is_cancelled(task.id))
+            bin_end = 24 if opts.disconnected else 30
 
-            svc._check(task, cluster, db, 30, "Reserving node addresses, DNS records and load balancers")
+            def bin_progress(message: str, pct: int) -> None:
+                svc._check(task, cluster, db, 22 + pct * (bin_end - 22) // 100, message)
+            openshift_service.ensure_binaries(version, bin_progress, lambda: task_service.is_cancelled(task.id))
+            if opts.disconnected:
+                self._mirror(db, task, cluster, opts, network, (24, 30))
+
+            svc._check(task, cluster, db, 30, "Reserving node addresses, DNS records and load balancers"
+                       + (", blocking the group's egress" if opts.disconnected else ""))
             nodes = self._allocate(db, cluster, network, opts)
 
             svc._check(task, cluster, db, 31, "Building the agent ISO (openshift-install agent create image)")
@@ -318,6 +346,9 @@ class OpenShiftInstaller:
 
         svc._check(task, cluster, db, 93, "Ejecting the agent ISO")
         self._eject(cluster, iso)
+        if opts.disconnected:
+            svc._check(task, cluster, db, 93, "Switching to the mirror: IDMS / ITMS, mirrored catalog, default sources off")
+            self._apply_mirror_resources(db, task, cluster)
         if opts.disable_updates:
             openshift_service.oc(cluster.name, cluster.version, ["patch", "clusterversion", "version", "--type",
                                                                   "merge", "-p", '{"spec":{"channel":""}}'], 60)
@@ -390,6 +421,12 @@ class OpenShiftInstaller:
                                      cluster.name)
             self._update_spec(db, cluster, openshift={**spec["openshift"], "metallb": {
                 **spec["openshift"]["metallb"], "pool": pool}})
+        if opts.disconnected:
+            # before the nodes boot: everything they pull comes from the mirror (the router keeps its access)
+            os_spec = cluster.spec.get("openshift") or {}
+            if "egress_before" not in os_spec:
+                self._update_spec(db, cluster, openshift={**os_spec, "egress_before": gspec.router.egress.mode})
+            network.set_egress("blocked")
         network.commit()
         if not network.uplink_ip():
             raise RuntimeError(f"The router of group {network.group_name} has no uplink address: the host can't reach the API")
@@ -424,6 +461,208 @@ class OpenShiftInstaller:
             taken += [str(ipaddress.IPv4Address(i)) for i in range(int(a), int(b) + 1)]
         return metallb_pool(gspec.cidr, gspec.dhcp.end, size, taken)
 
+    # ---------------------------------------------------- disconnected (mirror)
+
+    def mirror_request(self, cluster: Cluster, opts: OpenShiftOptions, release: bool = True) -> MirrorRequest:
+        """What a disconnected cluster needs in the group's registry: the release, the operator packages of
+        its add-ons (+ their dependencies, default channels as the add-ons install them) and the images the
+        add-ons pull outside the catalogs (hello demo)"""
+        version = cluster.version
+        minor = ".".join(version.split("-")[0].split(".")[:2])
+        wanted: Dict[str, List[str]] = {}   # catalog source -> packages
+        channels: Dict[str, Optional[str]] = {}
+        if opts.storage == "lvms":
+            wanted.setdefault("redhat-operators", []).append("lvms-operator")
+        elif opts.storage == "odf":
+            wanted.setdefault("redhat-operators", []).extend(["local-storage-operator", "odf-operator"])
+        if opts.sriov.enabled:
+            wanted.setdefault("redhat-operators", []).append("sriov-network-operator")
+        if opts.metallb.enabled:
+            wanted.setdefault("redhat-operators", []).append("metallb-operator")
+        mirrored = {name: source for source, name in self.catalog_sources(cluster).items()}
+        for op in opts.operators:
+            # picked from the cluster's (mirrored) catalog: cs-redhat-operator-index-v4-20 -> redhat-operators
+            names = wanted.setdefault(mirrored.get(op.source, op.source), [])
+            if op.name not in names:
+                names.append(op.name)
+            channels[op.name] = op.channel
+        catalogs: List[OperatorCatalog] = []
+        for source, names in wanted.items():
+            index = openshift_service.catalog_index(source, minor)
+            if index is None:
+                raise ValueError(f"Operator source {source}: not a default catalog, can't be mirrored")
+            if source == "redhat-operators":
+                names = openshift_service.operator_closure(minor, names)
+            catalogs.append(OperatorCatalog(catalog=index, packages=[
+                OperatorPackage(name=n, channel=channels.get(n)) for n in names]))
+        images = [DEMO_IMAGE] if opts.metallb.enabled and opts.metallb.demo else []
+        return MirrorRequest(openshift_version=version if release else None, operators=catalogs,
+                             additional_images=images)
+
+    def _mirror_file(self, cluster: Cluster):
+        return openshift_service.cluster_dir(cluster.name) / "mirror.json"
+
+    def load_mirror(self, cluster: Cluster) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads(self._mirror_file(cluster).read_text())
+        except (OSError, ValueError):
+            return None
+
+    def mirror_pull_secret(self, cluster: Cluster) -> str:
+        """The cluster's pull secret when disconnected: the mirror registry's credentials only"""
+        mirror = self.load_mirror(cluster) or {}
+        return json.dumps(mirror.get("pull_secret_fragment") or {"auths": {}}, separators=(",", ":"))
+
+    @staticmethod
+    def install_mirror(mirror: Dict[str, Any]) -> Dict[str, Any]:
+        """install-config mirror settings. Every mirror on registry.<domain> also gets its <uplink_ip>
+        twin, tried second: `openshift-install agent create image` runs on the host, which can't resolve
+        registry.<domain> but reaches the router's uplink address (the installer's oc calls use
+        --insecure=true, so the CA isn't needed there); the nodes resolve the first one."""
+        host, uplink = mirror["registry_host"], mirror.get("uplink_registry_host")
+        sources = []
+        for entry in mirror.get("image_digest_sources") or []:
+            mirrors = list(entry["mirrors"])
+            for m in entry["mirrors"]:
+                if uplink and m.startswith(host + "/"):
+                    twin = uplink + m[len(host):]
+                    if twin not in mirrors:
+                        mirrors.append(twin)
+            sources.append({"source": entry["source"], "mirrors": mirrors})
+        return {"image_digest_sources": sources, "ca_pem": mirror["ca_pem"]}
+
+    def _mirror(self, db: Session, task: Task, cluster: Cluster, opts: OpenShiftOptions,
+                network: GroupClusterNetwork, window: tuple) -> Dict[str, Any]:
+        """Registry enabled on the group router (owned change; the setup grows the router and installs Quay),
+        then the release + add-on operators + images mirrored into it (idempotent: fast when done before).
+        Saves the results (incl. the registry credentials: 0600, install dir) for the ISO and after install."""
+        svc = self.svc
+        if not network.spec().router.registry.enabled:
+            svc._check(task, cluster, db, window[0], "Enabling the mirror registry on the group router")
+            network.enable_registry()
+            network.commit()
+        svc._check(task, cluster, db, window[0], "Mirror registry: setting up the router (Quay), then oc-mirror "
+                                                 "(first time: ~20+ GB, 30-90 min)")
+        group = db.query(Group).filter(Group.id == cluster.group_id).first()
+        request = self.mirror_request(cluster, opts)
+        self._update_spec(db, cluster, openshift={**cluster.spec["openshift"],
+                                                  "mirror_request": request.model_dump(mode="json")})
+        try:
+            result = registry_service.ensure_mirrored(db, group, request, task, window=window)
+        except RuntimeError as e:
+            if str(e) == "Cancelled":
+                from app.services.cluster_service import Cancelled
+                raise Cancelled()
+            raise
+        return self._save_mirror(db, cluster, result)
+
+    def _save_mirror(self, db: Session, cluster: Cluster, result: Any) -> Dict[str, Any]:
+        data = result.model_dump(mode="json")
+        fd = os.open(self._mirror_file(cluster), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        # what the API may show (no credentials)
+        self._update_spec(db, cluster, openshift={**cluster.spec["openshift"], "mirror": {
+            "registry": result.registry_host, "uplink_registry": result.uplink_registry_host,
+            "catalog_sources": result.catalog_sources}})
+        return data
+
+    def catalog_sources(self, cluster: Cluster) -> Dict[str, str]:
+        """OperatorHub source name -> mirrored CatalogSource (e.g. redhat-operators -> cs-redhat-operator-index-v4-20)"""
+        mirror = ((cluster.spec or {}).get("openshift") or {}).get("mirror") or {}
+        result: Dict[str, str] = {}
+        for index, name in (mirror.get("catalog_sources") or {}).items():
+            base = index.rsplit("/", 1)[-1].split(":", 1)[0]  # redhat-operator-index
+            source = next((s for s, i in CATALOG_INDEXES.items() if i == base), None)
+            if source:
+                result[source] = name
+        return result
+
+    def _apply_mirror_resources(self, db: Session, task: Task, cluster: Cluster) -> None:
+        """oc-mirror's cluster resources (IDMS, ITMS, CatalogSources, release signatures), default
+        OperatorHub sources off, then wait for the mirrored catalogs to serve. Idempotent."""
+        svc = self.svc
+        mirror = self.load_mirror(cluster)
+        if mirror is None:
+            raise RuntimeError("The mirror results are missing (mirror.json in the install dir)")
+        runner = self._runner(db, task, cluster)
+        skipped = []
+        for doc in mirror.get("cluster_resources") or []:
+            obj = yaml.safe_load(doc)
+            if not isinstance(obj, dict) or not obj.get("kind"):
+                continue
+            try:
+                runner.apply([obj])
+            except RuntimeError as e:
+                if "no matches for kind" in str(e) or "ensure CRDs are installed" in str(e):
+                    skipped.append(obj["kind"])  # e.g. OLM v1 ClusterCatalog on an older release
+                    continue
+                runner.apply_retry([obj], f"{obj['kind']} {obj.get('metadata', {}).get('name')}", timeout=180)
+        if skipped:
+            logger.info(f"{cluster.name}: skipped mirror resources {', '.join(sorted(set(skipped)))} (no such kind)")
+        openshift_service.oc(cluster.name, cluster.version, ["patch", "operatorhub", "cluster", "--type", "merge",
+                                                             "-p", '{"spec":{"disableAllDefaultSources":true}}'], 60)
+        names = sorted(set((mirror.get("catalog_sources") or {}).values()))
+        deadline = time.monotonic() + CATALOG_TIMEOUT
+        while names:
+            states = {}
+            for name in names:
+                out = openshift_service.oc(cluster.name, cluster.version, [
+                    "get", "catalogsource", name, "-n", "openshift-marketplace",
+                    "-o", "jsonpath={.status.connectionState.lastObservedState}"], 30)
+                states[name] = out["stdout"].strip() if out["exitcode"] == 0 else "missing"
+            if all(s == "READY" for s in states.values()):
+                return
+            if time.monotonic() > deadline:
+                raise TimeoutError("Mirrored catalog not ready after "
+                                   f"{CATALOG_TIMEOUT // 60} min: " + ", ".join(f"{n}: {s or 'pending'}" for n, s in states.items()))
+            svc._check(task, cluster, db, None, "Waiting for the mirrored catalog: "
+                       + ", ".join(f"{n} {s or 'pending'}" for n, s in states.items()))
+            svc._sleep(task, 10)
+
+    def _mirror_more(self, db: Session, task: Task, cluster: Cluster, opts: OpenShiftOptions) -> None:
+        """Day 2 on a disconnected cluster: mirror what the new add-on needs. The request repeats every
+        operator of the cluster (oc-mirror pushes one filtered catalog per index: a smaller request would
+        drop the packages mirrored before), without the release (already there)."""
+        group = db.query(Group).filter(Group.id == cluster.group_id).first()
+        if group is None:
+            raise ValueError("The cluster's lab group no longer exists")
+        request = self.mirror_request(cluster, opts, release=False)
+        if not (request.operators or request.additional_images):
+            return
+        self.svc._check(task, cluster, db, 5, "Mirroring the add-on into the group's registry (oc-mirror on the router)")
+        try:
+            result = registry_service.ensure_mirrored(db, group, request, task, window=(5, 40))
+        except RuntimeError as e:
+            if str(e) == "Cancelled":
+                from app.services.cluster_service import Cancelled
+                raise Cancelled()
+            raise
+        previous = self.load_mirror(cluster) or {}
+        data = result.model_dump(mode="json")
+        # keep the release's digest sources (install-time) next to the new run's resources
+        data["image_digest_sources"] = previous.get("image_digest_sources") or data["image_digest_sources"]
+        catalogs = {**(previous.get("catalog_sources") or {}), **result.catalog_sources}
+        result.catalog_sources = catalogs
+        data["catalog_sources"] = catalogs
+        fd = os.open(self._mirror_file(cluster), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        self._update_spec(db, cluster, openshift={**cluster.spec["openshift"],
+                                                  "mirror_request_day2": request.model_dump(mode="json"),
+                                                  "mirror": {**((cluster.spec["openshift"]).get("mirror") or {}),
+                                                             "catalog_sources": catalogs}})
+        self.svc._check(task, cluster, db, 40, "Updating the cluster's mirrored catalog")
+        self._apply_mirror_resources(db, task, cluster)
+
+    def release_group(self, cluster: Cluster, network: GroupClusterNetwork) -> None:
+        """Cluster deleted from a group it doesn't own: put the group's egress back as it was (queued on
+        `network`). The registry and its content stay (the group's, reusable by the next cluster)."""
+        os_spec = (cluster.spec or {}).get("openshift") or {}
+        before = os_spec.get("egress_before")
+        if os_spec.get("disconnected") and before and before != "blocked":
+            network.set_egress(before)
+
     # -------------------------------------------------------------- the ISO
 
     def _create_image(self, db: Session, task: Task, cluster: Cluster, nodes: List[ClusterNode],
@@ -441,8 +680,14 @@ class OpenShiftInstaller:
                             + [k.strip() for k in spec.get("ssh_keys") or [] if k.strip()])
         network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
         first = next(n for n in nodes if n.role == "ctlplane")
-        install = openshift_service.install_config(cluster.name, cluster.domain, spec["cidr"], spec["ctlplanes"],
-                                                   spec["workers"], openshift_service.pull_secret(), ssh_key)
+        mirror = self.load_mirror(cluster) if opts.disconnected else None
+        if opts.disconnected and mirror is None:
+            raise RuntimeError("The mirror results are missing: delete the cluster and create it again")
+        install = openshift_service.install_config(
+            cluster.name, cluster.domain, spec["cidr"], spec["ctlplanes"], spec["workers"],
+            # disconnected: the registry's credentials only (no quay.io / cloud.openshift.com: no telemetry)
+            self.mirror_pull_secret(cluster) if mirror else openshift_service.pull_secret(),
+            ssh_key, self.install_mirror(mirror) if mirror else None)
         agent = openshift_service.agent_config(
             cluster.name, first.ip, network.gateway(),  # NTP: chrony on the router
             [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes])
@@ -720,7 +965,7 @@ class OpenShiftInstaller:
     def _runner(self, db: Session, task: Task, cluster: Cluster) -> AddonRunner:
         svc = self.svc
         return AddonRunner(cluster.name, cluster.version, lambda s: svc._sleep(task, s),
-                           lambda m: svc._check(task, cluster, db, None, m))
+                           lambda m: svc._check(task, cluster, db, None, m), sources=self.catalog_sources(cluster))
 
     def _run_addons(self, db: Session, task: Task, cluster: Cluster, opts: OpenShiftOptions, initial: bool) -> None:
         svc = self.svc
@@ -866,6 +1111,11 @@ class OpenShiftInstaller:
                 opts = self.options(cluster)
                 self._set_addon(db, cluster, kind, name, "installing")
                 try:
+                    if opts.disconnected:  # the cluster can only pull from the group's mirror
+                        wanted = opts.model_copy(deep=True)
+                        if kind == "metallb-demo":
+                            wanted.metallb.demo = True
+                        self._mirror_more(db, task, cluster, wanted)
                     self.run_addon(db, cluster, self._runner(db, task, cluster), kind, name, opts)
                 except Exception as e:
                     self._set_addon(db, cluster, kind, name, "error", str(e)[-500:])

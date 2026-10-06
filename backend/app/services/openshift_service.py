@@ -89,6 +89,19 @@ CATALOG: List[Dict[str, Any]] = [
 ]
 
 
+# Disconnected installs: default OperatorHub sources -> their index image (registry.redhat.io/redhat/<x>:v<minor>)
+CATALOG_INDEXES = {"redhat-operators": "redhat-operator-index", "certified-operators": "certified-operator-index",
+                   "community-operators": "community-operator-index", "redhat-marketplace": "redhat-marketplace-index"}
+CATALOG_CACHE_TTL = 7 * 24 * 3600
+CATALOG_TIMEOUT = 20 * 60
+# Subscriptions an operator creates itself at run time (not declared in its bundle): mirrored with it
+RUNTIME_DEPENDENCIES = {"odf-operator": ["odf-dependencies"]}
+# When the catalog can't be read: what redhat-operator-index v4.20 resolves to
+FALLBACK_DEPENDENCIES = {"odf-operator": [
+    "odf-dependencies", "ocs-operator", "mcg-operator", "ocs-client-operator", "odf-csi-addons-operator",
+    "odf-external-snapshotter-operator", "odf-prometheus-operator", "recipe", "rook-ceph-operator", "cephcsi-operator"]}
+
+
 def _version_key(version: str) -> Tuple:
     main, _, pre = version.partition("-")
     nums = tuple(int(p) for p in main.split("."))
@@ -351,6 +364,107 @@ class OpenShiftService:
     # ----------------------------------------------------------------- catalog
 
     @staticmethod
+    def catalog_index(source: str, minor: str) -> Optional[str]:
+        """Index image of a default OperatorHub source ("redhat-operators" -> redhat-operator-index:v4.20)"""
+        name = CATALOG_INDEXES.get(source)
+        return f"registry.redhat.io/redhat/{name}:v{minor}" if name else None
+
+    def _catalog_configs(self, minor: str) -> Path:
+        """The FBC (/configs) of redhat-operator-index:v<minor>, extracted on the host (~200 MB) and kept a
+        week: package defaults and dependencies, to know what to mirror. Uses the pull secret file
+        (never printed)."""
+        base = self.root / "catalogs" / f"v{minor}"
+        configs = base / "configs"
+        stamp = base / ".complete"
+        if stamp.exists() and time.time() - stamp.stat().st_mtime < CATALOG_CACHE_TTL:
+            return configs
+        with self._lock:
+            lock = self._bin_locks.setdefault(f"catalog:{minor}", threading.Lock())
+        with lock:
+            if stamp.exists() and time.time() - stamp.stat().st_mtime < CATALOG_CACHE_TTL:
+                return configs
+            tmp = base / ".tmp"
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True)
+            image = self.catalog_index("redhat-operators", minor)
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root)}
+            proc = subprocess.run([str(self._any_oc()), "image", "extract", image, "--filter-by-os=linux/amd64",
+                                   f"--registry-config={self._pull_secret_path}", "--path", f"/configs/:{tmp}",
+                                   "--confirm"], capture_output=True, text=True, timeout=CATALOG_TIMEOUT, env=env)
+            if proc.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise RuntimeError(f"Cannot read {image}: {(proc.stderr or proc.stdout).strip()[-300:]}")
+            shutil.rmtree(configs, ignore_errors=True)
+            os.replace(tmp, configs)
+            stamp.touch()
+        return configs
+
+    @staticmethod
+    def _fbc_package(configs: Path, name: str) -> Dict[str, Any]:
+        """{default_channel, head bundle properties} of a package of a file-based catalog"""
+        docs: List[Dict[str, Any]] = []
+        pkg_dir = configs / name
+        files = [pkg_dir] if pkg_dir.is_file() else sorted(p for p in pkg_dir.rglob("*") if p.is_file()) \
+            if pkg_dir.is_dir() else []
+        for f in files:
+            text = f.read_text(errors="replace").strip()
+            if f.suffix == ".json":
+                decoder, i = json.JSONDecoder(), 0
+                while i < len(text):
+                    obj, i = decoder.raw_decode(text, i)
+                    docs.append(obj)
+                    while i < len(text) and text[i].isspace():
+                        i += 1
+            elif f.suffix in (".yaml", ".yml"):
+                docs += [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
+        package = next((d for d in docs if d.get("schema") == "olm.package"), None)
+        if package is None:
+            return {}
+        default = package.get("defaultChannel")
+        channel = next((d for d in docs if d.get("schema") == "olm.channel" and d.get("name") == default), None)
+        bundles = {d.get("name"): d for d in docs if d.get("schema") == "olm.bundle"}
+        head = None
+        if channel:
+            entries = channel.get("entries") or []
+            replaced = {e.get("replaces") for e in entries} | {s for e in entries for s in e.get("skips") or []}
+            heads = [e["name"] for e in entries if e.get("name") not in replaced]
+
+            def version(bundle: str) -> Tuple:
+                props = (bundles.get(bundle) or {}).get("properties") or []
+                v = next((p["value"].get("version", "") for p in props if p.get("type") == "olm.package"), "")
+                return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.+-]", v))
+            head = max(heads, key=version) if heads else None
+        return {"default_channel": default, "properties": (bundles.get(head) or {}).get("properties") or []}
+
+    def operator_closure(self, minor: str, names: List[str]) -> List[str]:
+        """`names` + the packages their default-channel heads require (olm.package.required, and the
+        subscriptions some operators create themselves, e.g. ODF's odf-dependencies): oc-mirror only
+        copies the packages it is given. Falls back to known lists when the catalog can't be read."""
+        try:
+            configs = self._catalog_configs(minor)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as e:
+            logger.warning(f"Operator dependencies from the catalog v{minor}: {e}; using the built-in lists")
+            result = list(names)
+            for name in names:
+                result += [d for d in FALLBACK_DEPENDENCIES.get(name, []) if d not in result]
+            return result
+        result: List[str] = []
+        queue = list(names)
+        while queue:
+            name = queue.pop(0)
+            if name in result:
+                continue
+            result.append(name)
+            info = self._fbc_package(configs, name)
+            for prop in info.get("properties") or []:
+                if prop.get("type") == "olm.package.required":
+                    queue.append(prop["value"]["packageName"])
+            for dep in RUNTIME_DEPENDENCIES.get(name, []):
+                if (configs / dep).exists():
+                    queue.append(dep)
+        return result
+
+    @staticmethod
     def catalog() -> List[Dict[str, Any]]:
         return [{"source": "redhat-operators", "managed_by": None, "min_nodes": 1, **entry} for entry in CATALOG]
 
@@ -367,8 +481,11 @@ class OpenShiftService:
 
     @staticmethod
     def install_config(name: str, base_domain: str, machine_cidr: str, masters: int, workers: int,
-                       pull_secret: str, ssh_key: str) -> Dict[str, Any]:
-        return {
+                       pull_secret: str, ssh_key: str, mirror: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """mirror (disconnected): {image_digest_sources: [{source, mirrors}], ca_pem}: the release comes
+        from the group's mirror registry, whose CA every node trusts (additionalTrustBundlePolicy Always:
+        also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it)"""
+        config = {
             "apiVersion": "v1",
             "baseDomain": base_domain,
             "metadata": {"name": name},
@@ -384,6 +501,11 @@ class OpenShiftService:
             "pullSecret": pull_secret,
             "sshKey": ssh_key,
         }
+        if mirror:
+            config["imageDigestSources"] = mirror["image_digest_sources"]
+            config["additionalTrustBundle"] = mirror["ca_pem"].strip() + "\n"
+            config["additionalTrustBundlePolicy"] = "Always"
+        return config
 
     @staticmethod
     def agent_config(name: str, rendezvous_ip: str, ntp: Optional[str],

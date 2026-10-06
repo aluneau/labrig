@@ -301,12 +301,14 @@ def _running_task(db: Session, group: Group, kind: str) -> Optional[int]:
 class _Progress:
     """Task progress (percent + description line) and cancellation"""
 
-    def __init__(self, db: Session, task: Optional[Task]):
+    def __init__(self, db: Session, task: Optional[Task], window: Tuple[int, int] = (0, 100)):
         self.db, self.task = db, task
-        self.lo, self.hi = 0, 100
+        self.window = window  # part of the task's 0-100 this work reports into (e.g. a cluster create)
+        self.lo, self.hi = window
 
     def span(self, lo: int, hi: int) -> "_Progress":
-        self.lo, self.hi = lo, hi
+        wlo, whi = self.window
+        self.lo, self.hi = wlo + (whi - wlo) * lo // 100, wlo + (whi - wlo) * hi // 100
         return self
 
     def __call__(self, fraction: float, message: Optional[str] = None) -> None:
@@ -512,12 +514,13 @@ def _pull_auths() -> Dict[str, Any]:
         return {}
 
 
-def ensure_mirrored(db: Session, group: Group, request: MirrorRequest, task: Optional[Task] = None) -> MirrorResult:
+def ensure_mirrored(db: Session, group: Group, request: MirrorRequest, task: Optional[Task] = None,
+                    window: Tuple[int, int] = (0, 100)) -> MirrorResult:
     """Copy `request` into the group's registry (blocking, idempotent: a request mirrored before only
-    reads its results back). Progress / cancellation through `task`."""
+    reads its results back). Progress / cancellation through `task` (its progress moves within `window`)."""
     if not (request.openshift_version or request.operators or request.additional_images):
         raise ValueError("Nothing to mirror: give an OpenShift version, operators or images")
-    progress = _Progress(db, task)
+    progress = _Progress(db, task, window)
     ensure_ready(db, group, task, progress.span(0, 10))
     spec = _spec(group)
     pull = _pull_auths()

@@ -18,17 +18,20 @@ STORAGE_DEVICE = f"/dev/disk/by-id/virtio-{STORAGE_SERIAL}"
 DEMO_NAMESPACE = "metallb-demo"
 DEMO_NAME = "hello"
 SRIOV_NAMESPACE = "openshift-sriov-network-operator"
+DEMO_IMAGE = "registry.access.redhat.com/ubi9/httpd-24"   # mirrored for disconnected clusters (ITMS)
 
 
 class AddonRunner:
     """Runs add-ons on one cluster. sleep(s) must raise when the task is cancelled; log(msg) reports."""
 
     def __init__(self, cluster_name: str, version: str, sleep: Callable[[float], None],
-                 log: Callable[[str], None]):
+                 log: Callable[[str], None], sources: Optional[Dict[str, str]] = None):
         self.cluster = cluster_name
         self.version = version
         self.sleep = sleep
         self.log = log
+        # disconnected: default OperatorHub source -> mirrored CatalogSource (redhat-operators -> cs-redhat-...)
+        self.sources = sources or {}
 
     # ------------------------------------------------------------- helpers
 
@@ -89,7 +92,8 @@ class AddonRunner:
         channel = channel or pkg["channel"]
         if channel and pkg["channels"] and channel not in pkg["channels"]:
             raise ValueError(f"{name} has no channel '{channel}' (available: {', '.join(pkg['channels'])})")
-        source = source if source and source != "redhat-operators" else pkg["source"]
+        mirrored = self.sources.get(source or "redhat-operators")
+        source = mirrored or (source if source and source != "redhat-operators" else pkg["source"])
         manifests: List[Dict[str, Any]] = []
         if namespace != "openshift-operators":
             labels = {"openshift.io/cluster-monitoring": "true"}
@@ -364,7 +368,7 @@ class AddonRunner:
              "spec": {"replicas": 2, "selector": {"matchLabels": {"app": DEMO_NAME}},
                       "template": {"metadata": {"labels": {"app": DEMO_NAME}}, "spec": {
                           "containers": [{
-                              "name": "httpd", "image": "registry.access.redhat.com/ubi9/httpd-24",
+                              "name": "httpd", "image": DEMO_IMAGE,
                               "command": ["/bin/sh", "-c", script],
                               "ports": [{"containerPort": 8080}],
                               "env": [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
