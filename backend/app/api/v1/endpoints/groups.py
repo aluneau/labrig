@@ -2,6 +2,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,7 +14,8 @@ from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
 from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
 from app.schemas.group import BGPSettings, BGPStatus, GroupTopology
 from app.services.group_service import LeaseInUse, group_service
-from app.services import topology_service
+from app.schemas.registry import MirrorRequest, MirrorStarted, RegistryStatus
+from app.services import registry_service, topology_service
 
 router = APIRouter()
 
@@ -331,3 +333,39 @@ def group_topology(group_id: int, db: Session = Depends(get_db)):
     """Everything the topology diagram shows: router roles and addresses, machines with state and BGP
     session, clusters (MetalLB pool / service IP), WireGuard devices, BGP routes"""
     return topology_service.topology(db, _group_or_404(db, group_id))
+
+
+# Mirror registry on the router + egress (docs/disconnected.md). Enable / disable / egress: spec PUT
+
+@router.get("/{group_id}/registry", response_model=RegistryStatus)
+def registry_status(group_id: int, db: Session = Depends(get_db)):
+    """Registry state (live from the router), URLs, CA, disk usage, mirrored content"""
+    return registry_service.status(db, _group_or_404(db, group_id))
+
+
+@router.post("/{group_id}/registry/setup", response_model=MirrorStarted, status_code=202)
+def registry_setup(group_id: int, db: Session = Depends(get_db)):
+    """(Re)run the registry setup: restarts the router when it needs more RAM, installs Quay (task)"""
+    group = _group_or_404(db, group_id)
+    if not GroupSpec.model_validate(group.spec).router.registry.enabled:
+        raise HTTPException(status_code=400, detail="Enable the mirror registry first (router.registry.enabled)")
+    return {"task_id": registry_service.start_setup(db, group).id}
+
+
+@router.post("/{group_id}/registry/mirror", response_model=MirrorStarted, status_code=202)
+def registry_mirror(group_id: int, body: MirrorRequest, db: Session = Depends(get_db)):
+    """Copy a release / operator packages / images into the registry with oc-mirror v2 (task)"""
+    group = _group_or_404(db, group_id)
+    try:
+        return {"task_id": registry_service.start_mirror(db, group, body).id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{group_id}/registry/ca.crt", response_class=PlainTextResponse)
+def registry_ca(group_id: int, db: Session = Depends(get_db)):
+    """The registry's CA certificate (PEM)"""
+    ca = registry_service.ca_pem(_group_or_404(db, group_id))
+    if not ca:
+        raise HTTPException(status_code=404, detail="The registry CA is not known yet (set the registry up first)")
+    return PlainTextResponse(ca, media_type="application/x-pem-file")
