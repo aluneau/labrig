@@ -87,6 +87,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   run with pkexec, polkit action `org.vmmanager.helper`). Fixed whitelist, validates everything itself.
   Never give the app sudo.
 - Background jobs (downloads) use `task_service.start(...)`; task bodies must poll `is_cancelled()`.
+  A restart marks running tasks failed (`mark_interrupted`); then `cluster_service.recover_interrupted` resumes an
+  OpenShift create whose nodes booted (the install carries on in them: `openshift_installer.resume` = follow it, eject,
+  add-ons), sets other interrupted creates to `error` and interrupted node add/remove back to `ready`.
 - **Devices** (`domain_xml.py` = pure XML helpers, calls in `libvirt_client`, endpoints `vm_devices.py`
   mounted before `vms` so `POST /vms/{id}/disks` isn't a power action): new VMs get an empty SATA CD-ROM
   `sda` (seed moves to `sdb`) and 16 `pcie-root-port`s (hot-plug needs free ports; older VMs fall back

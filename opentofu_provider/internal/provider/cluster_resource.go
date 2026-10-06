@@ -73,6 +73,7 @@ type openshiftModel struct {
 	Topology        types.String `tfsdk:"topology"`
 	Storage         types.String `tfsdk:"storage"`
 	StorageDiskSize types.Int64  `tfsdk:"storage_disk_size"`
+	OdfProfile      types.String `tfsdk:"odf_profile"`
 	Operators       types.List   `tfsdk:"operators"`
 	SRIOV           types.Bool   `tfsdk:"sriov"`
 	SRIOVNics       types.Int64  `tfsdk:"sriov_nics"`
@@ -204,6 +205,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
 					"storage":           osStr("none (default), lvms or odf (>= 3 nodes); adds a disk per storage node."),
 					"storage_disk_size": osInt("GiB (default 100)."),
+					"odf_profile":       osStr("ODF footprint: lab (default: small Ceph, no object storage, about +2 vCPU / +6 GiB per storage node) or lean (Red Hat sizing, +8 vCPU / +24 GiB)."),
 					"operators": schema.ListAttribute{Optional: true, Computed: true, ElementType: types.StringType,
 						PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 						Description:   "OLM package names (default channel, redhat-operators). Adding one installs it in place; removing is not supported (uninstall it in the cluster first)."},
@@ -340,6 +342,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			if v := intPtr(os.StorageDiskSize); v != nil {
 				opts["storage_disk_size"] = *v
+			}
+			if v := strPtr(os.OdfProfile); v != nil {
+				opts["odf_profile"] = *v
 			}
 			if !os.Operators.IsNull() && !os.Operators.IsUnknown() {
 				var names []string
@@ -677,6 +682,7 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 	mlb, _ := o["metallb"].(map[string]any)
 	m.Channel, m.Topology, m.Storage = str(o["channel"]), str(o["topology"]), str(o["storage"])
 	m.StorageDiskSize = num(o["storage_disk_size"])
+	m.OdfProfile = str(o["odf_profile"])
 	m.SRIOV, m.SRIOVNics, m.SRIOVVFs, m.SRIOVDeviceType = flag(sriov["enabled"]), num(sriov["nics"]), num(sriov["vfs"]), str(sriov["device_type"])
 	m.MetalLB, m.MetalLBAddrs, m.MetalLBDemo = flag(mlb["enabled"]), num(mlb["addresses"]), flag(mlb["demo"])
 	m.MetalLBMode = str(mlb["mode"])

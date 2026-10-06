@@ -26,7 +26,7 @@ import {
 } from '@patternfly/react-core';
 import { CheckCircleIcon, ExclamationTriangleIcon } from '@patternfly/react-icons';
 import {
-  CatalogOperator, HostResources, MetalLBOptions, OpenShiftChannel, OpenShiftOptions, OpenShiftStorage,
+  CatalogOperator, HostResources, MetalLBOptions, OdfProfile, OpenShiftChannel, OpenShiftOptions, OpenShiftStorage,
   OpenShiftTopology, OpenShiftVersion, PullSecretStatus, SriovOptions,
 } from '../../types';
 import { hostApi, openshiftApi } from '../../services/api';
@@ -44,6 +44,7 @@ export interface OsDraft {
   wrk: Role;
   storage: OpenShiftStorage;
   storageDisk: string;
+  odfProfile: OdfProfile;
   operators: string[]; // catalog operators ticked (not the managed ones)
   extraOperators: string[]; // added by package name
   sriov: SriovOptions;
@@ -58,7 +59,11 @@ export const TOPOLOGY_SIZES: Record<OpenShiftTopology, { ctl: Role; wrk: Role }>
   ha: { ctl: { memory: '20', vcpu: '8', disk: '120' }, wrk: { memory: '12', vcpu: '4', disk: '120' } },
 };
 
-export const ODF_EXTRA = { vcpu: 8, memoryGiB: 24 };
+/** Per storage node (backend ODF_EXTRA): lab = small Ceph daemons, no NooBaa / RGW; lean = Red Hat's sizing */
+export const ODF_EXTRA: Record<OdfProfile, { vcpu: number; memoryGiB: number }> = {
+  lab: { vcpu: 2, memoryGiB: 6 },
+  lean: { vcpu: 8, memoryGiB: 24 },
+};
 
 export const defaultOsDraft = (): OsDraft => ({
   channel: 'stable-4.20',
@@ -68,6 +73,7 @@ export const defaultOsDraft = (): OsDraft => ({
   ...TOPOLOGY_SIZES.sno,
   storage: 'none',
   storageDisk: '100',
+  odfProfile: 'lab',
   operators: [],
   extraOperators: [],
   sriov: { enabled: false, nics: 1, vfs: 4, device_type: 'netdevice', ipam_range: '192.168.50.0/24' },
@@ -103,9 +109,9 @@ export const osDraftErrors = (d: OsDraft): string[] => {
   return errors;
 };
 
-const toResources = (r: Role, odf = false) => ({
-  memory: Math.round(Number(r.memory) * 1024) + (odf ? ODF_EXTRA.memoryGiB * 1024 : 0),
-  vcpu: Number(r.vcpu) + (odf ? ODF_EXTRA.vcpu : 0),
+const toResources = (r: Role, odf: OdfProfile | null = null) => ({
+  memory: Math.round(Number(r.memory) * 1024) + (odf ? ODF_EXTRA[odf].memoryGiB * 1024 : 0),
+  vcpu: Number(r.vcpu) + (odf ? ODF_EXTRA[odf].vcpu : 0),
   disk_size: Number(r.disk),
 });
 
@@ -120,19 +126,20 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
     topology: d.topology,
     storage: d.storage,
     storage_disk_size: Number(d.storageDisk) || 100,
+    odf_profile: d.odfProfile,
     operators: names.map((name) => ({ name, source: source(name) })),
     sriov: d.sriov,
     metallb: { enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo },
     disable_updates: d.disableUpdates,
   };
   // The backend adds ODF's overhead only when no sizes are sent: the UI always sends them, so it adds it itself
-  const odf = d.storage === 'odf';
+  const odf = d.storage === 'odf' ? d.odfProfile : null;
   const onWorkers = storageOnWorkers(d);
   return {
     ctlplanes,
     workers,
-    ctlplane: toResources(d.ctl, odf && !onWorkers),
-    worker: d.topology === 'ha' ? toResources(d.wrk, odf && onWorkers) : toResources(d.ctl),
+    ctlplane: toResources(d.ctl, onWorkers ? null : odf),
+    worker: d.topology === 'ha' ? toResources(d.wrk, onWorkers ? odf : null) : toResources(d.ctl),
     openshift: options,
   };
 };
@@ -354,8 +361,8 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
           isChecked={draft.storage === 'lvms'} onChange={() => patch({ storage: 'lvms' })} />
         <Radio id="os-storage-odf" name="os-storage" label="OpenShift Data Foundation (ODF)" isDisabled={!odfPossible}
           description={odfPossible
-            ? `Ceph (lean profile) on an extra disk per ${where}: replicated block, file and object storage. `
-              + `Adds +${ODF_EXTRA.vcpu} vCPU / +${ODF_EXTRA.memoryGiB} GiB per storage ${where}.`
+            ? `Ceph on an extra disk per ${where}, replicated 3 times: block and file storage `
+              + '(+ object storage with the Red Hat sizing).'
             : 'Needs at least 3 nodes: not available on SNO.'}
           isChecked={draft.storage === 'odf'} onChange={() => patch({ storage: 'odf' })} />
       </FormGroup>
@@ -367,11 +374,24 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
         </FormGroup>
       )}
       {draft.storage === 'odf' && (
-        <Alert id="os-odf-warning" variant={nodes < 3 ? 'danger' : 'warning'} isInline isPlain
+        <FormGroup role="radiogroup" fieldId="os-odf-profile" label="ODF footprint">
+          <Radio id="os-odf-profile-lab" name="os-odf-profile" label="Lab"
+            description={`Small Ceph daemons, no object storage (NooBaa / RGW): +${ODF_EXTRA.lab.vcpu} vCPU / `
+              + `+${ODF_EXTRA.lab.memoryGiB} GiB per storage ${where}. Not a supported sizing: for functional tests.`}
+            isChecked={draft.odfProfile === 'lab'} onChange={() => patch({ odfProfile: 'lab' })} />
+          <Radio id="os-odf-profile-lean" name="os-odf-profile" label="Red Hat sizing (lean profile)"
+            description={`Block, file and object storage, as supported: +${ODF_EXTRA.lean.vcpu} vCPU / `
+              + `+${ODF_EXTRA.lean.memoryGiB} GiB per storage ${where}.`}
+            isChecked={draft.odfProfile === 'lean'} onChange={() => patch({ odfProfile: 'lean' })} />
+        </FormGroup>
+      )}
+      {draft.storage === 'odf' && (
+        <Alert id="os-odf-warning" variant={nodes < 3 ? 'danger' : draft.odfProfile === 'lean' ? 'warning' : 'info'} isInline isPlain
           title={nodes < 3
             ? `ODF needs 3 storage nodes: ${nodes} selected.`
-            : `ODF is heavy: each storage ${where} gets +${ODF_EXTRA.vcpu} vCPU / +${ODF_EXTRA.memoryGiB} GiB on top of the sizes above `
-              + `(+${nodes * ODF_EXTRA.vcpu} vCPU, +${nodes * ODF_EXTRA.memoryGiB} GiB in total, included in the resources below).`} />
+            : `Each storage ${where} gets +${ODF_EXTRA[draft.odfProfile].vcpu} vCPU / +${ODF_EXTRA[draft.odfProfile].memoryGiB} GiB `
+              + `on top of the sizes above (+${nodes * ODF_EXTRA[draft.odfProfile].vcpu} vCPU, `
+              + `+${nodes * ODF_EXTRA[draft.odfProfile].memoryGiB} GiB in total, included in the resources below).`} />
       )}
     </FormSection>
   );
@@ -565,7 +585,8 @@ export const ResourceSummary: React.FC<{ draft: OsDraft; autoGroup: boolean }> =
   ];
   if (workers) rows.push({ what: `${workers} × worker`, vcpu: workers * n(draft.wrk.vcpu), mem: workers * n(draft.wrk.memory), disk: workers * n(draft.wrk.disk) });
   if (sNodes) rows.push({ what: `${sNodes} × storage disk`, vcpu: 0, mem: 0, disk: sNodes * n(draft.storageDisk) });
-  if (odfNodes) rows.push({ what: `ODF overhead, added to ${odfNodes} nodes`, vcpu: odfNodes * ODF_EXTRA.vcpu, mem: odfNodes * ODF_EXTRA.memoryGiB, disk: 0 });
+  const odfExtra = ODF_EXTRA[draft.odfProfile];
+  if (odfNodes) rows.push({ what: `ODF overhead (${draft.odfProfile === 'lab' ? 'lab' : 'Red Hat sizing'}), added to ${odfNodes} nodes`, vcpu: odfNodes * odfExtra.vcpu, mem: odfNodes * odfExtra.memoryGiB, disk: 0 });
   if (autoGroup) rows.push({ what: 'Lab group router', vcpu: ROUTER.vcpu, mem: ROUTER.memoryGiB, disk: ROUTER.diskGiB });
   const total = rows.reduce((a, r) => ({ vcpu: a.vcpu + r.vcpu, mem: a.mem + r.mem, disk: a.disk + r.disk }), { vcpu: 0, mem: 0, disk: 0 });
 

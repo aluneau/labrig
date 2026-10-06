@@ -50,6 +50,8 @@ class OpenShiftOptions(BaseModel):
     topology: Literal["sno", "compact", "ha"] = "sno"
     storage: Literal["none", "lvms", "odf"] = "none"
     storage_disk_size: int = Field(100, ge=20, le=2048)  # GiB, extra disk per storage node (LVMS / ODF)
+    # ODF footprint: "lab" = small Ceph requests/limits, no object storage (NooBaa, RGW); "lean" = Red Hat sizing
+    odf_profile: Literal["lab", "lean"] = "lab"
     operators: List[OperatorRequest] = []
     sriov: SriovOptions = SriovOptions()
     metallb: MetalLBOptions = MetalLBOptions()

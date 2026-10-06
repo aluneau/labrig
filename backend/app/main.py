@@ -18,6 +18,7 @@ from app.libvirt_client import libvirt_client, LibvirtUnavailable
 from app.services.daemon_service import daemon_service, DaemonError
 from app.services.helper_service import HelperError
 from app.services.task_service import task_service
+from app.services.cluster_service import cluster_service
 from app.services import wireguard_service
 from app.services.wireguard_relay import relay
 from fastapi.concurrency import run_in_threadpool
@@ -34,6 +35,11 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         task_service.mark_interrupted(db)
+        # Clusters whose task died with the previous process: resume (OpenShift install) or report
+        try:
+            cluster_service.recover_interrupted(db)
+        except Exception:
+            logging.getLogger(__name__).exception("Interrupted clusters")
         # Cloud images whose download died with the previous process
         db.query(CloudImage).filter(CloudImage.status == "downloading").update({CloudImage.status: "error"})
         db.commit()

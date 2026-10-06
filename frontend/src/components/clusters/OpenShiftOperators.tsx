@@ -171,8 +171,8 @@ const quickAddons = (cluster: Cluster): QuickAddon[] => {
     {
       request: { kind: 'odf' }, title: 'OpenShift Data Foundation', available: storage === 'none' && nodes >= 3,
       reason: nodes < 3 ? 'needs 3 nodes' : storage !== 'none' ? `storage: ${storage}` : undefined,
-      text: 'Adds a disk per storage node, installs Local Storage + ODF (lean profile). Needs about +8 vCPU / +24 GiB '
-        + 'per storage node on top of the node sizes.',
+      text: 'Adds a disk per storage node, installs Local Storage + ODF with the lab footprint (block + file, no object '
+        + 'storage). Needs about +2 vCPU / +6 GiB per storage node on top of the node sizes.',
     },
     {
       request: { kind: 'sriov', sriov: { enabled: true, nics: 1, vfs: 4, device_type: 'netdevice', ipam_range: '192.168.50.0/24' } },

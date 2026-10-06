@@ -816,6 +816,29 @@ class ClusterService:
         db.commit()
         return task
 
+    def recover_interrupted(self, db: Session) -> None:
+        """At startup (after task_service.mark_interrupted): clusters left 'provisioning' by a task of the
+        previous process. An OpenShift install whose nodes already booted carries on in the nodes: follow it
+        again in a new task. Anything else can't be resumed: report it instead of 'provisioning' forever.
+        (starting / stopping are derived from the node states once no task runs.)"""
+        from app.services.openshift_installer import openshift_installer
+        for cluster in db.query(Cluster).filter(Cluster.status == "provisioning").all():
+            if task_service.is_running(cluster.task_id):
+                continue
+            task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
+            note = f" ({cluster.status_message})" if cluster.status_message else ""
+            if task is not None and task.type != "cluster_create":
+                # adding / removing a node of a working cluster: the cluster itself is still there
+                logger.warning(f"{task.name} was interrupted by a server restart")
+                self._set_status(db, cluster, "ready", f"{task.name} was interrupted by a server restart{note}")
+            elif cluster.type == "openshift" and openshift_installer.resumable(cluster):
+                logger.info(f"Resuming the interrupted install of cluster {cluster.name}")
+                self._run_task(db, cluster, "resume", "Resume install of", openshift_installer.resume)
+            else:
+                logger.warning(f"Cluster {cluster.name} was interrupted by a server restart")
+                self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "
+                                 "delete the cluster and create it again")
+
     def start_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:

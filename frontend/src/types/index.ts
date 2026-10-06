@@ -423,12 +423,15 @@ export interface MetalLBOptions {
   pool?: string | null; // assigned: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
 }
 
+export type OdfProfile = 'lab' | 'lean';
+
 export interface OpenShiftOptions {
   version?: string | null; // null = latest of the channel
   channel: string;
   topology: OpenShiftTopology;
   storage: OpenShiftStorage;
   storage_disk_size: number; // GiB per storage node
+  odf_profile?: OdfProfile; // lab (default): small Ceph, no object storage; lean: Red Hat sizing
   operators: OperatorRequest[];
   sriov: SriovOptions;
   metallb: MetalLBOptions;

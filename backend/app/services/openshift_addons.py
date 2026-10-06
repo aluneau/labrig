@@ -188,7 +188,12 @@ class AddonRunner:
         self.wait_storageclass("lvms-vg1")
         self.set_default_storageclass("lvms-vg1")
 
-    def odf(self, nodes: List[str]) -> None:
+    @staticmethod
+    def _odf_resources(memory: str, limit: str, cpu: str = "250m") -> Dict[str, Any]:
+        # no CPU limit (no throttling); the memory limit also sizes Ceph's caches (osd_memory_target = 80 %)
+        return {"requests": {"cpu": cpu, "memory": memory}, "limits": {"memory": limit}}
+
+    def odf(self, nodes: List[str], profile: str = "lab") -> None:
         self.install_operator("local-storage-operator", namespace="openshift-local-storage")
         for node in nodes:
             self.oc(["label", "node", node, "cluster.ocs.openshift.io/openshift-storage=", "--overwrite"], 30)
@@ -206,19 +211,29 @@ class AddonRunner:
         self.wait_storageclass("localblock")
         ns = self.install_operator("odf-operator", namespace="openshift-storage")
         # odf-operator 4.18+ installs its dependencies; the console plugin is optional
-        self.log("Creating the StorageCluster (Ceph, resource profile lean)")
+        device_set: Dict[str, Any] = {
+            "name": "ocs-deviceset-localblock", "count": 1, "replica": 3, "portable": False,
+            "dataPVCTemplate": {"spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Block",
+                                         "storageClassName": "localblock",
+                                         "resources": {"requests": {"storage": "1"}}}},
+        }
+        spec: Dict[str, Any] = {"resourceProfile": "lean", "monDataDirHostPath": "/var/lib/rook",
+                                "storageDeviceSets": [device_set]}
+        if profile == "lab":
+            # Lab footprint: block (RBD) + file (CephFS) only, small Ceph daemons
+            device_set["resources"] = self._odf_resources("2Gi", "3Gi", "500m")
+            spec["resources"] = {
+                "mon": self._odf_resources("1Gi", "2Gi"),
+                "mgr": self._odf_resources("512Mi", "1536Mi"),
+                "mds": self._odf_resources("1Gi", "2Gi"),
+            }
+            spec["multiCloudGateway"] = {"reconcileStrategy": "ignore"}   # no NooBaa (core + Postgres + endpoint)
+            spec["managedResources"] = {"cephObjectStores": {"reconcileStrategy": "ignore"},   # no RGW
+                                        "cephObjectStoreUsers": {"reconcileStrategy": "ignore"}}
+        self.log(f"Creating the StorageCluster (Ceph, {'lab footprint: no object storage' if profile == 'lab' else 'resource profile lean'})")
         self.apply_retry([{
             "apiVersion": "ocs.openshift.io/v1", "kind": "StorageCluster",
-            "metadata": {"name": "ocs-storagecluster", "namespace": ns},
-            "spec": {
-                "resourceProfile": "lean", "monDataDirHostPath": "/var/lib/rook",
-                "storageDeviceSets": [{
-                    "name": "ocs-deviceset-localblock", "count": 1, "replica": 3, "portable": False,
-                    "dataPVCTemplate": {"spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Block",
-                                                 "storageClassName": "localblock",
-                                                 "resources": {"requests": {"storage": "1"}}}},
-                }],
-            },
+            "metadata": {"name": "ocs-storagecluster", "namespace": ns}, "spec": spec,
         }], "StorageCluster", timeout=10 * 60)
         self.log("Waiting for Ceph (ocs-storagecluster-ceph-rbd)")
         self.wait_storageclass("ocs-storagecluster-ceph-rbd", timeout=30 * 60)

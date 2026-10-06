@@ -66,7 +66,8 @@ MINIMUMS = {
     "master": {"memory": 16384, "vcpu": 4, "disk_size": 100},
     "worker": {"memory": 8192, "vcpu": 2, "disk_size": 100},
 }
-ODF_EXTRA = {"memory": 24576, "vcpu": 8}   # resourceProfile lean, per storage node
+# Per storage node. lean = Red Hat's resourceProfile; lab = small Ceph limits, no NooBaa / RGW (openshift_addons.odf)
+ODF_EXTRA = {"lab": {"memory": 6144, "vcpu": 2}, "lean": {"memory": 24576, "vcpu": 8}}
 
 
 def sriov_network_name(cluster_name: str) -> str:
@@ -238,8 +239,8 @@ class OpenShiftInstaller:
             given = role in data.model_fields_set
             res = dict(getattr(data, role).model_dump()) if given else dict(DEFAULTS[kind])
             if not given and role in roles:
-                res["memory"] += ODF_EXTRA["memory"]
-                res["vcpu"] += ODF_EXTRA["vcpu"]
+                res["memory"] += ODF_EXTRA[opts.odf_profile]["memory"]
+                res["vcpu"] += ODF_EXTRA[opts.odf_profile]["vcpu"]
             if role == "ctlplane" or counts["workers"]:
                 low = [f"{k} {res[k]} < {v}" for k, v in MINIMUMS[kind].items() if res[k] < v]
                 if low:
@@ -300,19 +301,54 @@ class OpenShiftInstaller:
             for node in sorted(nodes, key=lambda n: n.role != "ctlplane"):
                 libvirt_client.start_vm(node.name)
             self._set_live(cluster.id, phase="booting")
+            return self._finish(db, task, cluster, nodes, iso)
 
-            self._wait_install(db, task, cluster, nodes)
+        try:
+            return svc._guarded(db, task, cluster_id, body)
+        except Exception:
+            self._set_live(cluster_id, phase="error")
+            raise
 
-            svc._check(task, cluster, db, 93, "Ejecting the agent ISO")
-            self._eject(cluster, iso)
-            if opts.disable_updates:
-                openshift_service.oc(cluster.name, version, ["patch", "clusterversion", "version", "--type",
-                                                              "merge", "-p", '{"spec":{"channel":""}}'], 60)
-            self._run_addons(db, task, cluster, opts, initial=True)
-            self._set_live(cluster.id, phase="ready")
-            svc._set_status(db, cluster, "ready", None)
-            return {"version": version, "console": self.console_url(cluster),
-                    "api_endpoint": f"https://{cluster.api_ip}:{LB_PORTS['api']}"}
+    def _finish(self, db: Session, task: Task, cluster: Cluster, nodes: List[ClusterNode],
+                iso: Optional[str]) -> Dict[str, Any]:
+        """Once the node VMs boot: follow the install, then eject, disable updates, add-ons"""
+        svc = self.svc
+        opts = self.options(cluster)
+        self._wait_install(db, task, cluster, nodes)
+
+        svc._check(task, cluster, db, 93, "Ejecting the agent ISO")
+        self._eject(cluster, iso)
+        if opts.disable_updates:
+            openshift_service.oc(cluster.name, cluster.version, ["patch", "clusterversion", "version", "--type",
+                                                                  "merge", "-p", '{"spec":{"channel":""}}'], 60)
+        self._run_addons(db, task, cluster, opts, initial=True)
+        self._set_live(cluster.id, phase="ready")
+        svc._set_status(db, cluster, "ready", None)
+        return {"version": cluster.version, "console": self.console_url(cluster),
+                "api_endpoint": f"https://{cluster.api_ip}:{LB_PORTS['api']}"}
+
+    def resumable(self, cluster: Cluster) -> bool:
+        """An install interrupted by a server restart once its node VMs were created and booted from the
+        agent ISO: the install goes on in the nodes by itself, only the follow-up has to run again"""
+        return cluster.status == "provisioning" and bool((cluster.spec or {}).get("iso_path")) and bool(cluster.nodes)
+
+    def resume(self, db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
+        svc = self.svc
+
+        def body(cluster: Cluster) -> Dict[str, Any]:
+            self._set_live(cluster.id, phase="booting", assisted_status=None, progress=None, hosts=[],
+                           cluster_operators=[])
+            missing = [n.name for n in cluster.nodes if libvirt_client.get_vm(n.name) is None]
+            if missing:
+                raise RuntimeError(f"Node VMs are gone: {', '.join(missing)}: delete the cluster and create it again")
+            if cluster.group_id:
+                GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned)).ensure()
+            for node in cluster.nodes:
+                live = libvirt_client.get_vm(node.name)
+                if live and live["state"] == "shutoff":
+                    libvirt_client.start_vm(node.name)
+            svc._check(task, cluster, db, 45, "Resuming after a server restart: following the install")
+            return self._finish(db, task, cluster, list(cluster.nodes), (cluster.spec or {}).get("iso_path"))
 
         try:
             return svc._guarded(db, task, cluster_id, body)
@@ -730,7 +766,7 @@ class OpenShiftInstaller:
                 runner.lvms()
             else:
                 roles = storage_roles(opts, len(nodes_by_role["worker"]))
-                runner.odf([n for r in roles for n in nodes_by_role[r]])
+                runner.odf([n for r in roles for n in nodes_by_role[r]], opts.odf_profile)
         elif kind == "sriov":
             runner.sriov(opts.sriov.model_dump(), single_or_compact=not nodes_by_role["worker"])
         elif kind == "metallb":
