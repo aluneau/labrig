@@ -163,7 +163,7 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
     const repo = IMAGE.replace(/^[^/]+\//, '');  // ubi9/ubi-minimal:latest
     const [repoPath, tag] = repo.split(':');
     // 4. block egress in the UI
-    await page.locator('#egress-switch').check({ force: true });
+    await page.locator('#egress-switch').click({ force: true });
     await waitFor(async () => (await api(`/groups/${groupId}`)).spec.router.egress.mode === 'blocked', 30000, 'egress blocked');
     await page.waitForTimeout(2000);
     await page.screenshot({ path: 'registry-egress-blocked.png' });
@@ -240,7 +240,7 @@ const internet = (vm) => guestSh(vm, 'curl -s -o /dev/null -m 10 -w "%{http_code
       && !JSON.stringify(await api(`/groups/${groupId}/registry`)).includes(creds.password), 'credentials only on /registry/credentials');
 
     // 5. open again (UI), then blocked / open through the spec PUT
-    await page.locator('#egress-switch').uncheck({ force: true });
+    await page.locator('#egress-switch').click({ force: true });
     await waitFor(async () => (await api(`/groups/${groupId}`)).spec.router.egress.mode === 'open', 30000, 'egress open');
     r = await waitFor(async () => { const x = await internet(MEMBER); return x.out.startsWith('200') ? x : null; }, 60000, 'internet back');
     check(true, `open: member reaches the internet again (${r.out.trim()})`);

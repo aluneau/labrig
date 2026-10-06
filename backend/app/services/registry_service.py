@@ -269,8 +269,11 @@ def status(db: Session, group: Group) -> RegistryStatus:
         return out
     phase = router.get("phase", "none")
     needs_restart = out.router_memory_mb is not None and out.router_memory_mb < spec.router.effective_memory() * 0.95
-    if router.get("healthy") == "1":
+    if router.get("healthy") == "1" and not out.setup_task_id:
         out.state, out.ready = "ready", True
+        if router.get("ca") and router["ca"] != reg.ca_pem:
+            _sync_ca(db, group, router["ca"])  # e.g. set up by a previous app process
+            out.ca_pem = router["ca"]
         if needs_restart:
             out.message = (f"The router runs with {out.router_memory_mb} MiB: it gets "
                            f"{spec.router.effective_memory()} MiB at its next restart")
