@@ -508,7 +508,7 @@ def _parse_progress(log: str) -> Tuple[Optional[int], Optional[int], str]:
     done = total = None
     last = ""
     for line in log.splitlines():
-        text = line.strip()
+        text = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
         if text:
             last = text
         m = _PROGRESS.search(text)

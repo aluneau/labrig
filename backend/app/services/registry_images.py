@@ -70,7 +70,10 @@ def _added_path(name: str) -> Path:
     return rs._group_dir(name) / "images.json"
 
 
-def _added(name: str) -> Dict[str, str]:
+DELETED = "_deleted"  # refs deleted through the app: Quay's tags/list keeps showing them for a while
+
+
+def _added(name: str) -> Dict[str, Any]:
     path = _added_path(name)
     try:
         return json.loads(path.read_text()) if path.exists() else {}
@@ -78,11 +81,18 @@ def _added(name: str) -> Dict[str, str]:
         return {}
 
 
+def _save_added(name: str, added: Dict[str, Any]) -> None:
+    _added_path(name).write_text(json.dumps(added, indent=1))
+
+
 def _record_added(name: str, refs: List[str], source: str) -> None:
     added = _added(name)
+    deleted = set(added.get(DELETED, []))
     for ref in refs:
         added[ref] = source
-    _added_path(name).write_text(json.dumps(added, indent=1))
+        deleted.discard(ref)
+    added[DELETED] = sorted(deleted)
+    _save_added(name, added)
 
 
 # ------------------------------------------------------------------ list / delete
@@ -96,12 +106,24 @@ def list_images(group: Group) -> RegistryImages:
     except (RegistryError, OSError) as e:
         raise RuntimeError(f"Could not list the registry: {e}")
     added = _added(group.name)
+    deleted = set(added.get(DELETED, []))
     images = []
     for repo in sorted(repos[:MAX_REPOS]):
         try:
-            tags = sorted(c.tags(repo))
+            # cosign signatures / attestations oc-mirror copies along (sha256-<digest>.sig) are not images to pull
+            tags = sorted(t for t in c.tags(repo) if not (t.startswith("sha256-") and t.endswith((".sig", ".att", ".sbom"))))
         except (RegistryError, OSError):
             tags = []
+        gone = []
+        for t in tags:
+            if f"{repo}:{t}" in deleted:
+                try:
+                    c.digest(repo, t)  # pushed again outside the app
+                except (RegistryError, OSError):
+                    gone.append(t)
+        tags = [t for t in tags if t not in gone]
+        if not tags:
+            continue
         sources = {t: added[f"{repo}:{t}"] for t in tags if f"{repo}:{t}" in added}
         images.append(RegistryImage(repository=repo, tags=tags, added=bool(sources), sources=sources))
     return RegistryImages(registry=hosts[0], uplink_registry=hosts[1] or None, images=images,
@@ -115,8 +137,9 @@ def delete_image(group: Group, ref: str) -> None:
     except RegistryError as e:
         raise RuntimeError(str(e))
     added = _added(group.name)
-    if added.pop(f"{repo}:{tag}", None) is not None:
-        _added_path(group.name).write_text(json.dumps(added, indent=1))
+    added.pop(f"{repo}:{tag}", None)
+    added[DELETED] = sorted(set(added.get(DELETED, [])) | {f"{repo}:{tag}"})
+    _save_added(group.name, added)
 
 
 # ------------------------------------------------------------------ copy (skopeo on the router)
