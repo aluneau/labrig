@@ -107,3 +107,42 @@ class RegistryStatus(BaseModel):
 
 class MirrorStarted(BaseModel):
     task_id: int
+
+
+# Images added by hand (copy from another registry, upload of an archive, podman push)
+
+REPO = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
+TAG = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+
+
+class ImageCopyRequest(BaseModel):
+    """Copy an image (all architectures) into the registry with skopeo on the router. username / password:
+    credentials for the source registry, used for this copy only (never stored); without them the
+    OpenShift pull secret's credentials are used for the source registry, if it has any."""
+    source: str = Field(..., pattern=IMAGE_REF, max_length=512)  # quay.io/org/app:1.0 or ...@sha256:...
+    dest_repo: Optional[str] = Field(None, pattern=REPO, max_length=255)  # default: source path without its host
+    dest_tag: Optional[str] = Field(None, pattern=TAG)                     # default: source tag
+    username: Optional[str] = Field(None, max_length=255)
+    password: Optional[str] = Field(None, max_length=4096)
+
+
+class RegistryImage(BaseModel):
+    repository: str
+    tags: List[str] = []
+    added: bool = False            # copied / uploaded through the app (else: oc-mirror content, or a podman push)
+    sources: Dict[str, str] = {}   # tag -> where it came from (copy:<ref> / upload:<file>)
+
+
+class RegistryImages(BaseModel):
+    registry: str                  # registry.<domain>:<port>
+    uplink_registry: Optional[str] = None
+    images: List[RegistryImage] = []
+    truncated: bool = False
+
+
+class RegistryCredentials(BaseModel):
+    """GET /groups/{id}/registry/credentials only (on demand): the registry's user (pull + push)"""
+    username: str
+    password: str
+    registry: str
+    uplink_registry: Optional[str] = None

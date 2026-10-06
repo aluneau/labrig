@@ -41,6 +41,7 @@ import { ConfirmModal } from '../components/common/ConfirmModal';
 import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { GroupBgp } from '../components/groups/GroupBgp';
+import { GroupRegistry } from '../components/groups/GroupRegistry';
 import { LabTopology } from '../components/topology/LabTopology';
 import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
@@ -463,6 +464,9 @@ export const GroupDetailPage: React.FC = () => {
             <PageSection variant="light"><GroupBgp group={group} onDone={onDone} onError={onError} /></PageSection>
           </Tab>
 
+          <Tab eventKey="registry" title={<TabTitleText>Registry &amp; egress</TabTitleText>}>
+            <PageSection variant="light"><GroupRegistry group={group} onDone={onDone} onError={onError} /></PageSection>
+          </Tab>
           <Tab eventKey="router" title={<TabTitleText>Router</TabTitleText>}>
             <PageSection variant="light"><RouterTab group={group} onError={onError} onDone={onDone} /></PageSection>
           </Tab>

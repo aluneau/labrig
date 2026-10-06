@@ -716,10 +716,109 @@ export interface RouterSpec {
   bgp?: BGPSpec | null;
   wireguard?: WireGuardSpec | null;
   vlans?: unknown[];
+  egress?: EgressSpec;
+  registry?: RegistrySpec;
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
   uplink_ip?: string | null; // fixed (reserved) address on the uplink network
+}
+
+/** Egress switch of the group router (disconnected labs, docs/disconnected.md) */
+export interface EgressSpec {
+  mode: 'open' | 'blocked';
+  allow?: string[]; // CIDRs / addresses still reachable when blocked
+}
+
+/** Mirror registry (mirror-registry / Quay) on the group router */
+export interface RegistrySpec {
+  enabled: boolean;
+  port?: number;
+  disk_gb?: number;
+  memory_mb?: number;
+  vcpus?: number;
+  hostname?: string | null; // assigned: registry.<domain>
+  ca_pem?: string | null;   // read back from the router
+}
+
+export interface OperatorPackage {
+  name: string;
+  channel?: string | null;
+}
+
+export interface OperatorCatalog {
+  catalog?: string | null; // default registry.redhat.io/redhat/redhat-operator-index:v<minor>
+  packages: OperatorPackage[];
+}
+
+export interface MirrorRequest {
+  openshift_version?: string | null;
+  operators?: OperatorCatalog[];
+  additional_images?: string[];
+}
+
+export interface MirrorRecord {
+  id: string;
+  status: 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | string;
+  openshift_version?: string | null;
+  operators: OperatorCatalog[];
+  additional_images: string[];
+  started_at?: string | null;
+  finished_at?: string | null;
+  task_id?: number | null;
+  images?: number | null;
+  error?: string | null;
+}
+
+export interface RegistryStatus {
+  enabled: boolean;
+  ready: boolean;
+  state: 'disabled' | 'not-installed' | 'installing' | 'restart-required' | 'ready' | 'stopped' | 'error' | 'starting' | string;
+  message?: string | null;
+  url?: string | null;
+  uplink_url?: string | null;
+  hostname?: string | null;
+  port?: number | null;
+  ca_pem?: string | null;
+  disk_used_gb?: number | null;
+  disk_total_gb?: number | null;
+  memory_mb?: number | null;
+  vcpus?: number | null;
+  router_memory_mb?: number | null;
+  egress: 'open' | 'blocked' | string;
+  egress_allow: string[];
+  mirrors: MirrorRecord[];
+  setup_task_id?: number | null;
+  mirror_task_id?: number | null;
+}
+
+export interface ImageCopyRequest {
+  source: string;
+  dest_repo?: string | null;
+  dest_tag?: string | null;
+  username?: string | null;
+  password?: string | null;
+}
+
+export interface RegistryImage {
+  repository: string;
+  tags: string[];
+  added: boolean;
+  sources: Record<string, string>;
+}
+
+export interface RegistryImages {
+  registry: string;
+  uplink_registry?: string | null;
+  images: RegistryImage[];
+  truncated: boolean;
+}
+
+export interface RegistryCredentials {
+  username: string;
+  password: string;
+  registry: string;
+  uplink_registry?: string | null;
 }
 
 /** BGP on the router (FRR): sessions from the group network (listen) + explicit neighbors */

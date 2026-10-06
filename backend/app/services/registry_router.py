@@ -74,6 +74,9 @@ hosts_entry() {
 
 setup() {
     exec >> @SETUP_LOG@ 2>&1
+    # systemd-run units have no HOME / USER: mirror-registry keeps its SSH key in ~/.ssh and runs its
+    # ansible over SSH as $USER@$(hostname)
+    export HOME=/root USER=root
     chmod 600 @SETUP_LOG@
     rm -f $STATE/error
     [ "$VMM_REG_ENABLED" = 1 ] || fail "the registry is not enabled in the group spec"
@@ -89,7 +92,16 @@ setup() {
     phase disk
     mount_disk || fail "could not mount the registry disk"
     phase packages
-    rpm -q podman openssl tar >/dev/null || dnf -y -q install podman openssl tar || fail "dnf install podman openssl tar failed"
+    rpm -q podman openssl tar skopeo >/dev/null || dnf -y -q install podman openssl tar skopeo || fail "dnf install podman openssl tar skopeo failed"
+    # podman's storage on the registry disk: Quay's images alone are ~3 GB unpacked (the root disk is 10 GiB)
+    if ! grep -q "^graphroot = \"$DATA/containers\"" /etc/containers/storage.conf 2>/dev/null; then
+        mkdir -p $DATA/containers
+        semanage fcontext -a -e /var/lib/containers $DATA/containers 2>/dev/null
+        restorecon -R $DATA/containers
+        sed -i "s|^graphroot = .*|graphroot = \"$DATA/containers\"|" /etc/containers/storage.conf
+        rm -rf /var/lib/containers/storage
+    fi
+    export TMPDIR=$DATA/tmp
     phase download
     mkdir -p $DATA/tools $DATA/tmp
     if [ ! -x $DATA/tools/mirror-registry/mirror-registry ]; then
@@ -131,6 +143,12 @@ setup() {
     if ! installed; then
         phase install
         cd $DATA/tools/mirror-registry || fail "mirror-registry is missing"
+        # its ansible logs in over SSH as root@localhost with this key (made here: idempotent across retries)
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        [ -s /root/.ssh/quay_installer.pub ] || { rm -f /root/.ssh/quay_installer; ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/quay_installer; }
+        grep -qF "$(cut -d' ' -f2 /root/.ssh/quay_installer.pub)" /root/.ssh/authorized_keys 2>/dev/null \
+            || cat /root/.ssh/quay_installer.pub >> /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys && restorecon -R /root/.ssh
         # quayHostname = SERVER_HOSTNAME = token realm: the uplink address (see registry_router.py)
         ./mirror-registry install --quayHostname "$VMM_REG_UPLINK_IP:$VMM_REG_PORT" \
             --quayRoot $DATA/quay-install --quayStorage $DATA/quay-storage --sqliteStorage $DATA/sqlite-storage \
@@ -145,12 +163,21 @@ setup() {
         printf '[Unit]\nRequiresMountsFor=%s\n' $DATA > /etc/systemd/system/$u.service.d/vmm-registry.conf
     done
     systemctl daemon-reload
+    cfg=$DATA/quay-install/quay-config/config.yaml
+    restart=0
+    # Mirrored repositories are readable without credentials (lab members pull with plain podman); pushing
+    # needs the app's credentials
+    if ! grep -q '^CREATE_PRIVATE_REPO_ON_PUSH: false' $cfg; then
+        sed -i '/^CREATE_PRIVATE_REPO_ON_PUSH:/d' $cfg && echo 'CREATE_PRIVATE_REPO_ON_PUSH: false' >> $cfg
+        restart=1
+    fi
     if [ $renewed = 1 ]; then
         phase certificate-update
         cp $C/ssl.crt $DATA/quay-install/quay-config/ssl.cert && cp $C/ssl.key $DATA/quay-install/quay-config/ssl.key
-        sed -i "s/^SERVER_HOSTNAME:.*/SERVER_HOSTNAME: $VMM_REG_UPLINK_IP:$VMM_REG_PORT/" $DATA/quay-install/quay-config/config.yaml
-        systemctl restart quay-app
+        sed -i "s/^SERVER_HOSTNAME:.*/SERVER_HOSTNAME: $VMM_REG_UPLINK_IP:$VMM_REG_PORT/" $cfg
+        restart=1
     fi
+    [ $restart = 1 ] && systemctl restart quay-app
     systemctl enable -q --now $UNITS
     phase starting
     for i in $(seq 60); do healthy && break; sleep 5; done
@@ -178,6 +205,7 @@ status() {
     echo "healthy=$( [ "$VMM_REG_ENABLED" = 1 ] && installed && healthy && echo 1 || echo 0)"
     echo "memory_mb=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"
     echo "disk=$( [ -b $DISK ] && echo 1 || echo 0)"
+    [ -f $DATA/tools/mirror-registry.tar.gz.part ] && echo "download=$(stat -c %s $DATA/tools/mirror-registry.tar.gz.part)"
     mountpoint -q $DATA && df -B1 --output=size,used $DATA | awk 'NR == 2 {print "disk_total=" $1; print "disk_used=" $2}'
     for u in $(systemctl list-units --plain --no-legend 'vmm-mirror-*.service' | awk '$3 == "active" {print $1}'); do
         echo "mirror_active=${u#vmm-mirror-}"
@@ -204,12 +232,29 @@ mirror() {
     echo $rc > $R/rc
 }
 
+copy() {
+    id=$1
+    R=$DATA/copies/$id
+    A=/run/vmm-copy-$id
+    trap 'rm -rf $A' EXIT
+    exec > $R/log 2>&1
+    rm -f $R/rc
+    rpm -q skopeo >/dev/null || dnf -y -q install skopeo || { echo 1 > $R/rc; exit 1; }
+    src=$(sed -n 1p $R/job)
+    dest=$(sed -n 2p $R/job)
+    export TMPDIR=$DATA/tmp
+    mkdir -p $TMPDIR
+    skopeo copy --all --retry-times 3 --authfile $A/auth.json "docker://$src" "docker://$dest"
+    echo $? > $R/rc
+}
+
 case "$1" in
     setup) setup ;;
     apply) apply ;;
     status) status ;;
     mirror) mirror "$2" ;;
-    *) echo "usage: $0 setup|apply|status|mirror <id>"; exit 2 ;;
+    copy) copy "$2" ;;
+    *) echo "usage: $0 setup|apply|status|mirror <id>|copy <id>"; exit 2 ;;
 esac
 """
 
