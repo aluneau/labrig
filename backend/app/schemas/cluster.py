@@ -95,6 +95,8 @@ class Cluster(BaseModel):
     has_kubeconfig: bool = False
     # OpenShift: web console (reachable where *.apps.<cluster>.<domain> resolves: WireGuard, router DNS)
     console_url: Optional[str] = None
+    # OpenShift disconnected: the group's mirror registry {url, uplink_url, egress}
+    registry: Optional[Dict[str, Any]] = None
     ctlplanes: int = 0
     workers: int = 0
     spec: Optional[Dict[str, Any]] = None

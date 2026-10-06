@@ -19,6 +19,7 @@ import {
   DescriptionListTerm,
   Flex,
   FlexItem,
+  Label,
   PageSection,
   Spinner,
   Stack,
@@ -225,7 +226,12 @@ export const ClusterDetailPage: React.FC = () => {
         <Flex alignItems={{ default: 'alignItemsFlexStart' }}>
           <FlexItem grow={{ default: 'grow' }}>
             <Title headingLevel="h1">{cluster.name}</Title>
-            <div style={{ marginTop: 8 }}><ClusterStatus cluster={cluster} /></div>
+            <div style={{ marginTop: 8 }}>
+              <ClusterStatus cluster={cluster} />
+              {isOpenShift && os.disconnected && (
+                <Label id="cluster-disconnected" color="purple" isCompact style={{ marginLeft: 8 }}>disconnected</Label>
+              )}
+            </div>
           </FlexItem>
           <FlexItem>
             <Flex spaceItems={{ default: 'spaceItemsSm' }}>
@@ -323,7 +329,21 @@ export const ClusterDetailPage: React.FC = () => {
                         {cluster.group_owned ? ', created for this cluster and deleted with it' : ', shared (kept when the cluster is deleted)'}
                       </DescriptionListDescription>
                     </DescriptionListGroup>
-                  ) : (
+                  ) : null}
+                  {cluster.registry && (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>Mirror registry</DescriptionListTerm>
+                      <DescriptionListDescription id="cluster-registry">
+                        <code>{cluster.registry.url}</code>
+                        {cluster.registry.uplink_url ? <> (from the host: <code>{cluster.registry.uplink_url}</code>)</> : null}
+                        {cluster.registry.egress === 'blocked'
+                          ? ' — the group has no internet access: the cluster pulls from this registry only'
+                          : ' — the group\'s internet access is open again'}
+                        {cluster.group_id ? <> (<Link to={`/groups/${cluster.group_id}`}>registry and egress on the group page</Link>)</> : null}
+                      </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
+                  {cluster.group_id ? null : (
                     <DescriptionListGroup>
                       <DescriptionListTerm>Network</DescriptionListTerm>
                       <DescriptionListDescription>

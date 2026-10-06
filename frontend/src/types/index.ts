@@ -387,6 +387,8 @@ export interface Cluster {
   task_progress?: number | null;
   has_kubeconfig: boolean;
   console_url?: string | null; // OpenShift web console
+  // OpenShift disconnected: the group's mirror registry and egress state
+  registry?: { url: string; uplink_url?: string | null; enabled: boolean; egress: 'open' | 'blocked' } | null;
   ctlplanes: number;
   workers: number;
   spec?: Record<string, any> | null;
@@ -436,6 +438,10 @@ export interface OpenShiftOptions {
   sriov: SriovOptions;
   metallb: MetalLBOptions;
   disable_updates: boolean;
+  // Disconnected install (create time only): mirror registry on the group router, group egress blocked
+  disconnected?: boolean;
+  // assigned (disconnected): what the cluster pulls from (no credentials)
+  mirror?: { registry: string; uplink_registry?: string | null; catalog_sources: Record<string, string> } | null;
 }
 
 export interface PullSecretIn {

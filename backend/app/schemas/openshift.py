@@ -57,6 +57,10 @@ class OpenShiftOptions(BaseModel):
     metallb: MetalLBOptions = MetalLBOptions()
     # Stop offering updates (clusterversion channel cleared)
     disable_updates: bool = True
+    # Disconnected install (create time only, docs/disconnected.md): the group router runs a mirror
+    # registry filled by oc-mirror (release + the add-ons' operators + demo images), the group's egress is
+    # blocked before the nodes boot, the cluster pulls everything from the mirror (registry-only pull secret)
+    disconnected: bool = False
 
     @field_validator("operators")
     @classmethod

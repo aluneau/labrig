@@ -488,7 +488,9 @@ catalog}`; `/clusters/{id}/{kubeadmin, ssh-key, operators, packagemanifests, add
 UI: create modal (version picker, topology, sizes, storage, operators, SR-IOV, MetalLB) with a resource
 summary; cluster page: install progress (Assisted stages, cluster operators), console link + kubeadmin,
 Operators tab, MetalLB lab tab with the diagram. OpenTofu: `vmmanager_cluster` `type = "openshift"` +
-`openshift` block. e2e: `openshift.js` (SNO + LVMS + MetalLB demo; long). Not in v1: OKD, disconnected,
+`openshift` block. e2e: `openshift.js` (SNO + LVMS + MetalLB demo; long). Disconnected: ✅ done (2026-10,
+`openshift.disconnected`: mirror registry + oc-mirror on the group router, egress blocked, docs/disconnected.md;
+the router keeps its uplink, so no uplink-less group is needed). Not in v1: OKD,
 `platform: baremetal` with VIPs, BGP, add workers, upgrades, FIPS.
 
 ---
