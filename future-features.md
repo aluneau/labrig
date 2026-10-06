@@ -19,6 +19,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | Lab remote access: WireGuard on the group router, laptop joins a lab (docs/wireguard.md) | ✅ done |
 | BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
+| Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
 | Authentication, CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),

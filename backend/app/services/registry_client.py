@@ -110,11 +110,28 @@ class RegistryClient:
 
     # --------------------------------------------------------------- read / delete
 
+    def _login(self, scope: str) -> None:
+        """Get a token for `scope` up front (endpoints that also answer anonymously, e.g. the catalog with only
+        public repositories, never send a 401)"""
+        conn = self._conn()
+        try:
+            conn.request("GET", "/v2/")
+            resp = conn.getresponse()
+            resp.read()
+            challenge = resp.getheader("WWW-Authenticate", "") or \
+                f'Bearer realm="https://{self.host}/v2/auth",service="{self.host}"'
+        finally:
+            conn.close()
+        self._tokens[scope] = self._token(challenge, scope)
+
     def catalog(self, limit: int = 1000) -> List[str]:
+        """Repositories the user can see (Quay: a token without scope carries the user)"""
         repos: List[str] = []
         path = f"/v2/_catalog?n={limit}"
+        if "" not in self._tokens:
+            self._login("")
         while path and len(repos) < limit:
-            _, headers, data = self.request("GET", path, scope="registry:catalog:*")
+            _, headers, data = self.request("GET", path, scope="")
             repos += json.loads(data).get("repositories") or []
             link = re.search(r"<([^>]+)>", headers.get("link", ""))
             path = link.group(1) if link else ""
@@ -139,7 +156,7 @@ class RegistryClient:
     def delete_tag(self, repo: str, tag: str) -> None:
         """Delete the manifest the tag points to (and so the tag)"""
         digest = self.digest(repo, tag)
-        self.request("DELETE", f"/v2/{repo}/manifests/{digest}", scope=f"repository:{repo}:pull,push,delete",
+        self.request("DELETE", f"/v2/{repo}/manifests/{digest}", scope=self._scope(repo),
                      ok=(200, 202, 204))
 
     # --------------------------------------------------------------- push
