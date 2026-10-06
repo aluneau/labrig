@@ -107,7 +107,17 @@ BGP mode: every node announces the service IP to the router, which routes it to 
 checks show each node's BGP session and the router's next hops; a stopped node's route disappears (≤ 30 s). The
 cluster's *Topology* tab follows a packet from the laptop to a pod in either mode.
 
-Not yet: OKD, disconnected installs, `platform: baremetal` with VIPs,
+## Disconnected installs
+
+**Disconnected** in the create dialog (`openshift.disconnected: true`, OpenTofu `disconnected = true`): the group
+router runs a mirror registry (`registry.<domain>:8443`, +8 GiB RAM / 4 vCPUs / 250 GiB thin disk), oc-mirror on
+the router copies the release, the add-ons' operators (with their dependencies) and the demo image into it, then
+the group's internet access is cut before the nodes boot. The cluster's pull secret holds the registry's
+credentials only, the release comes through `imageDigestSources`, OperatorHub shows the mirrored catalog only.
+First mirror: ~20+ GB, 30–90 min before the nodes are created. Details, day-2 operators and limits:
+[disconnected.md](disconnected.md#openshift).
+
+Not yet: OKD, `platform: baremetal` with VIPs,
 adding workers after install, upgrades from the app.
 
 ## OpenTofu

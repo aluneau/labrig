@@ -84,6 +84,7 @@ type openshiftModel struct {
 	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
 	MetalLBMode     types.String `tfsdk:"metallb_mode"`
 	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
+	Disconnected    types.Bool   `tfsdk:"disconnected"`
 }
 
 type apiClusterNode struct {
@@ -218,6 +219,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"metallb_demo":      liveBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
 					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
+					"disconnected":      osBool("Disconnected install (default false): the group router runs a mirror registry (8 GiB RAM, 4 vCPUs, 250 GiB disk) filled by oc-mirror with the release + the add-ons' operators, the group's egress is blocked before the nodes boot, the cluster pulls from the mirror only. The first mirror downloads ~20+ GB."),
 				},
 			},
 		},
@@ -389,6 +391,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			if !os.DisableUpdates.IsNull() && !os.DisableUpdates.IsUnknown() {
 				opts["disable_updates"] = os.DisableUpdates.ValueBool()
+			}
+			if !os.Disconnected.IsNull() && !os.Disconnected.IsUnknown() {
+				opts["disconnected"] = os.Disconnected.ValueBool()
 			}
 		}
 		if v := strPtr(plan.Version); v != nil {
@@ -690,6 +695,10 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 		m.MetalLBMode = types.StringValue("l2")
 	}
 	m.DisableUpdates = flag(o["disable_updates"])
+	m.Disconnected = flag(o["disconnected"])
+	if m.Disconnected.IsNull() {
+		m.Disconnected = types.BoolValue(false)
+	}
 	names := []string{}
 	if ops, ok := o["operators"].([]any); ok {
 		for _, op := range ops {

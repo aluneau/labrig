@@ -49,6 +49,8 @@ const InstallOperatorModal: React.FC<{
   const [channel, setChannel] = useState('');
   const [namespace, setNamespace] = useState('');
   const [busy, setBusy] = useState(false);
+  const [byName, setByName] = useState('');
+  const disconnected = !!cluster.spec?.openshift?.disconnected;
 
   useEffect(() => {
     clusterApi.packageManifests(cluster.id)
@@ -71,18 +73,19 @@ const InstallOperatorModal: React.FC<{
   };
   const isInstalled = (name: string) => installed.some((o) => o.name === name);
 
+  const named = byName.trim();
   const submit = async () => {
-    if (!picked) return;
+    if (!picked && !named) return;
     setBusy(true);
     setError(null);
     try {
       await clusterApi.addAddon(cluster.id, {
         kind: 'operator',
-        operator: {
+        operator: picked ? {
           name: picked.name, source: picked.source,
           channel: channel && channel !== picked.default_channel ? channel : null,
           namespace: namespace.trim() || null,
-        },
+        } : { name: named, source: 'redhat-operators', channel: null, namespace: null },
       });
       onStarted();
       onClose();
@@ -96,7 +99,7 @@ const InstallOperatorModal: React.FC<{
   return (
     <Modal variant={ModalVariant.medium} title="Install operator" isOpen onClose={onClose}
       actions={[
-        <Button key="install" onClick={submit} isDisabled={!picked || busy || cluster.task_running} isLoading={busy}>Install</Button>,
+        <Button key="install" onClick={submit} isDisabled={(!picked && !named) || busy || cluster.task_running} isLoading={busy}>Install</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); submit(); }}>
@@ -124,6 +127,16 @@ const InstallOperatorModal: React.FC<{
           )}
         </div>
         {matches != null && matches >= 60 && <div style={muted}>First 60 matches: refine the search.</div>}
+        {disconnected && !picked && (
+          <FormGroup label="Not mirrored yet? Package name (redhat-operators)" fieldId="os-pkg-byname">
+            <TextInput id="os-pkg-byname" value={byName} placeholder="e.g. kubernetes-nmstate-operator"
+              onChange={(_e, v) => setByName(v)} />
+            <FormHelperText><HelperText><HelperTextItem>
+              Disconnected cluster: the list shows the mirrored catalog only. Installing first mirrors the package
+              (default channel) into the group&apos;s registry, from the router.
+            </HelperTextItem></HelperText></FormHelperText>
+          </FormGroup>
+        )}
         {picked && (
           <>
             {picked.description && <div style={muted} id="os-pkg-description">{picked.description}</div>}

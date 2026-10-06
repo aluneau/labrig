@@ -50,6 +50,7 @@ export interface OsDraft {
   sriov: SriovOptions;
   metallb: MetalLBOptions;
   disableUpdates: boolean;
+  disconnected: boolean; // mirror registry on the group router, egress blocked
 }
 
 /** Default node sizes per topology (GiB / vCPU / GiB) */
@@ -79,6 +80,7 @@ export const defaultOsDraft = (): OsDraft => ({
   sriov: { enabled: false, nics: 1, vfs: 4, device_type: 'netdevice', ipam_range: '192.168.50.0/24' },
   metallb: { enabled: false, mode: 'l2', addresses: 16, demo: true },
   disableUpdates: true,
+  disconnected: false,
 });
 
 export const nodeCounts = (d: OsDraft) => ({
@@ -131,6 +133,7 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
     sriov: d.sriov,
     metallb: { enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo },
     disable_updates: d.disableUpdates,
+    disconnected: d.disconnected,
   };
   // The backend adds ODF's overhead only when no sizes are sent: the UI always sends them, so it adds it itself
   const odf = d.storage === 'odf' ? d.odfProfile : null;
@@ -568,6 +571,33 @@ export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
   );
 };
 
+// Disconnected
+
+/** Router with the mirror registry (backend RegistrySpec defaults) */
+export const REGISTRY_ROUTER = { vcpu: 4, memoryGiB: 8, diskGiB: 250 };
+
+export const DisconnectedSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void; autoGroup: boolean }> = ({ draft, patch, autoGroup }) => (
+  <FormSection title="Network access" titleElement="h3">
+    <Switch id="os-disconnected" label="Disconnected (mirror registry on the router)" isChecked={draft.disconnected}
+      onChange={(_e, v) => patch({ disconnected: v })} />
+    <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
+      Like a customer site without internet: the lab group's router becomes the bastion. It runs a mirror registry
+      (Red Hat mirror-registry) and copies into it, with oc-mirror, the OpenShift release, the operators of the
+      add-ons you pick and the demo images. Then the group's internet access is cut (the router alone keeps it)
+      before the nodes boot: the cluster pulls everything from registry.&lt;domain&gt;, with the registry's
+      credentials only (no telemetry, Insights stays disabled). OperatorHub shows the mirrored catalog only;
+      adding an operator later mirrors it first.
+    </div>
+    {draft.disconnected && (
+      <Alert id="os-disconnected-info" variant="info" isInline isPlain
+        title={`${autoGroup ? 'The new router gets' : 'The group router grows to'} ${REGISTRY_ROUTER.memoryGiB} GiB RAM and ${REGISTRY_ROUTER.vcpu} vCPUs`
+          + `${autoGroup ? '' : ' (restarted once, if not done yet)'}, plus a ${REGISTRY_ROUTER.diskGiB} GiB thin disk for the registry. `
+          + 'The first mirror downloads about 20 GB or more (the release + operators): count 30 to 90 minutes before '
+          + 'the nodes are even created. Later clusters of the same version in this group reuse it.'} />
+    )}
+  </FormSection>
+);
+
 // Resource summary
 
 const ROUTER = { vcpu: 1, memoryGiB: 0.5, diskGiB: 10 };
@@ -587,7 +617,15 @@ export const ResourceSummary: React.FC<{ draft: OsDraft; autoGroup: boolean }> =
   if (sNodes) rows.push({ what: `${sNodes} × storage disk`, vcpu: 0, mem: 0, disk: sNodes * n(draft.storageDisk) });
   const odfExtra = ODF_EXTRA[draft.odfProfile];
   if (odfNodes) rows.push({ what: `ODF overhead (${draft.odfProfile === 'lab' ? 'lab' : 'Red Hat sizing'}), added to ${odfNodes} nodes`, vcpu: odfNodes * odfExtra.vcpu, mem: odfNodes * odfExtra.memoryGiB, disk: 0 });
-  if (autoGroup) rows.push({ what: 'Lab group router', vcpu: ROUTER.vcpu, mem: ROUTER.memoryGiB, disk: ROUTER.diskGiB });
+  if (autoGroup && draft.disconnected) {
+    rows.push({ what: 'Lab group router + mirror registry', vcpu: REGISTRY_ROUTER.vcpu, mem: REGISTRY_ROUTER.memoryGiB,
+      disk: ROUTER.diskGiB + REGISTRY_ROUTER.diskGiB });
+  } else if (autoGroup) {
+    rows.push({ what: 'Lab group router', vcpu: ROUTER.vcpu, mem: ROUTER.memoryGiB, disk: ROUTER.diskGiB });
+  } else if (draft.disconnected) {
+    rows.push({ what: 'Group router with the mirror registry (at most)', vcpu: REGISTRY_ROUTER.vcpu,
+      mem: REGISTRY_ROUTER.memoryGiB, disk: REGISTRY_ROUTER.diskGiB });
+  }
   const total = rows.reduce((a, r) => ({ vcpu: a.vcpu + r.vcpu, mem: a.mem + r.mem, disk: a.disk + r.disk }), { vcpu: 0, mem: 0, disk: 0 });
 
   const GiB = 1024 ** 3;

@@ -75,6 +75,7 @@ const ago = (epoch?: number | null) => {
 };
 const ROLE_LABEL: Record<string, string> = {
   dhcp: 'DHCP', dns: 'DNS', nat: 'NAT', ntp: 'NTP', lb: 'Load balancer', wireguard: 'WireGuard', bgp: 'BGP',
+  registry: 'Registry', egress: 'Internet blocked',
 };
 
 // ---------------------------------------------------------------- box contents
@@ -415,6 +416,8 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       ntp: 'Gives the time to the lab (chrony). OpenShift\'s installer refuses nodes whose clock is off.',
       lb: `haproxy listens on these ports on every router address and spreads TCP connections over healthy backends: ${r.load_balancers.map((lb) => `:${lb.port} → ${lb.backends.join(', ')}`).join('; ')}.`,
       wireguard: `The end of your laptop's tunnel: wg0 at ${r.tunnel_ip}. Packets from the tunnel are decrypted here and routed into the lab like any other.`,
+      registry: `Mirror registry (Quay) at registry.${t.domain}: images copied from the internet by the router (oc-mirror) or pushed by you. Lab machines and clusters pull from it, even with internet blocked. Registry & egress tab.`,
+      egress: `Disconnected lab: the router refuses what lab machines send towards the internet (connections fail at once). DNS, NTP, load balancers, the registry and WireGuard still work. Switch it in the Registry & egress tab.`,
       bgp: `FRR listens for BGP sessions from any machine of ${t.cidr} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
     };
     return { title: ROLE_LABEL[role] || role, text: texts[role] || '' };

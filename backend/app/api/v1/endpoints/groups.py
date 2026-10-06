@@ -1,7 +1,10 @@
 """Lab group endpoints (future-features §2.4)"""
+import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,7 +16,10 @@ from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
 from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
 from app.schemas.group import BGPSettings, BGPStatus, GroupTopology
 from app.services.group_service import LeaseInUse, group_service
-from app.services import topology_service
+from app.schemas.registry import (
+    REPO, TAG, ImageCopyRequest, MirrorRequest, MirrorStarted, RegistryCredentials, RegistryImages, RegistryStatus,
+)
+from app.services import registry_images, registry_service, topology_service
 
 router = APIRouter()
 
@@ -331,3 +337,108 @@ def group_topology(group_id: int, db: Session = Depends(get_db)):
     """Everything the topology diagram shows: router roles and addresses, machines with state and BGP
     session, clusters (MetalLB pool / service IP), WireGuard devices, BGP routes"""
     return topology_service.topology(db, _group_or_404(db, group_id))
+
+
+# Mirror registry on the router + egress (docs/disconnected.md). Enable / disable / egress: spec PUT
+
+@router.get("/{group_id}/registry", response_model=RegistryStatus)
+def registry_status(group_id: int, db: Session = Depends(get_db)):
+    """Registry state (live from the router), URLs, CA, disk usage, mirrored content"""
+    return registry_service.status(db, _group_or_404(db, group_id))
+
+
+@router.post("/{group_id}/registry/setup", response_model=MirrorStarted, status_code=202)
+def registry_setup(group_id: int, db: Session = Depends(get_db)):
+    """(Re)run the registry setup: restarts the router when it needs more RAM, installs Quay (task)"""
+    group = _group_or_404(db, group_id)
+    if not GroupSpec.model_validate(group.spec).router.registry.enabled:
+        raise HTTPException(status_code=400, detail="Enable the mirror registry first (router.registry.enabled)")
+    return {"task_id": registry_service.start_setup(db, group).id}
+
+
+@router.post("/{group_id}/registry/mirror", response_model=MirrorStarted, status_code=202)
+def registry_mirror(group_id: int, body: MirrorRequest, db: Session = Depends(get_db)):
+    """Copy a release / operator packages / images into the registry with oc-mirror v2 (task)"""
+    group = _group_or_404(db, group_id)
+    try:
+        return {"task_id": registry_service.start_mirror(db, group, body).id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{group_id}/registry/credentials", response_model=RegistryCredentials)
+def registry_credentials(group_id: int, db: Session = Depends(get_db)):
+    """The registry's user and password (pull + push), shown on demand for podman login / push"""
+    try:
+        return registry_images.credentials(_group_or_404(db, group_id))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{group_id}/registry/images", response_model=RegistryImages)
+def registry_list_images(group_id: int, db: Session = Depends(get_db)):
+    """Repositories and tags in the registry (registry API through the router's uplink address)"""
+    try:
+        return registry_images.list_images(_group_or_404(db, group_id))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{group_id}/registry/images", response_model=MirrorStarted, status_code=202)
+def registry_copy_image(group_id: int, body: ImageCopyRequest, db: Session = Depends(get_db)):
+    """Copy an image from another registry with skopeo on the router (task). Source credentials: this copy only."""
+    try:
+        return {"task_id": registry_images.start_copy(db, _group_or_404(db, group_id), body).id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{group_id}/registry/images")
+def registry_delete_image(group_id: int, ref: str = Query(..., max_length=400, description="repo:tag"),
+                          db: Session = Depends(get_db)):
+    """Delete a tag (its manifest) from the registry"""
+    try:
+        registry_images.delete_image(_group_or_404(db, group_id), ref)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": f"{ref} deleted"}
+
+
+@router.post("/{group_id}/registry/upload", response_model=MirrorStarted, status_code=202)
+async def registry_upload(
+    group_id: int, request: Request,
+    filename: str = Query("image.tar", max_length=255),
+    repo: Optional[str] = Query(None, max_length=255, pattern=REPO, description="Destination repository (default: name in the archive)"),
+    tag: Optional[str] = Query(None, pattern=TAG),
+    db: Session = Depends(get_db),
+):
+    """Upload an image archive (`podman save`, `docker save`, OCI archive) as the raw request body: spooled to disk,
+    then pushed to the registry (task)"""
+    group = _group_or_404(db, group_id)
+    try:
+        registry_images._ready_spec(group)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    path = registry_images.new_upload_path(group)
+    size = 0
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            async for chunk in request.stream():
+                await run_in_threadpool(f.write, chunk)
+                size += len(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="Empty upload")
+        return {"task_id": registry_images.start_push_archive(db, group, path, filename, repo, tag).id}
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+@router.get("/{group_id}/registry/ca.crt", response_class=PlainTextResponse)
+def registry_ca(group_id: int, db: Session = Depends(get_db)):
+    """The registry's CA certificate (PEM)"""
+    ca = registry_service.ca_pem(_group_or_404(db, group_id))
+    if not ca:
+        raise HTTPException(status_code=404, detail="The registry CA is not known yet (set the registry up first)")
+    return PlainTextResponse(ca, media_type="application/x-pem-file")

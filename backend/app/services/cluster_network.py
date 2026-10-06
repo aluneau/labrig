@@ -443,6 +443,19 @@ class GroupClusterNetwork(ClusterNetwork):
                                        if not (r.owner == self.owner and (name is None or r.name == name))]
         self._ops.append(op)
 
+    def enable_registry(self) -> None:
+        """Mirror registry on the router (disconnected OpenShift). Stays enabled when the cluster goes:
+        the mirrored content is the group's (docs/disconnected.md)"""
+        def op(spec):
+            spec.router.registry.enabled = True
+        self._ops.append(op)
+
+    def set_egress(self, mode: str) -> None:
+        """Group egress (open / blocked): blocked = the group's machines can't reach the outside"""
+        def op(spec):
+            spec.router.egress.mode = mode
+        self._ops.append(op)
+
     def free_lb_port(self, start: int = 6443) -> int:
         from app.schemas.group import RESERVED_ROUTER_PORTS
         used = {lb.port for lb in self.spec().load_balancers} | RESERVED_ROUTER_PORTS

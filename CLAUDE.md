@@ -40,6 +40,8 @@ backend/app/
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
                       bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
+                      registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
+                      (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
@@ -52,8 +54,9 @@ docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift op
 docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
+docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), k3s, kubeadm (clusters)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -150,6 +153,18 @@ e2e/                  Playwright browser tests against the real app (see below)
   `announce_ranges` / `neighbors` keeps the stored ones (OpenTofu sends `{enabled}` only). MetalLB `mode: bgp`
   (OpenShift): pool = owned /27 range, `BGPPeer` to the router LAN IP + `BGPAdvertisement`; switching modes removes the
   other mode's objects, re-creates the demo Service if its IP left the pool and moves `hello.<domain>`.
+- **Disconnected labs** (docs/disconnected.md): `router.egress` (`mode` open|blocked, `allow` CIDRs) = nft forward rules on
+  the router (blocked: LAN -> anything but lab / WG / BGP ranges / allow is rejected; `ct status dnat` accepted = podman
+  published ports), live. `router.registry` (`enabled`, `port`, `disk_gb`, `memory_mb`, `vcpus`; assigned `hostname`,
+  read back `ca_pem`): the router gets `effective_memory/vcpu()` and a disk with serial `vmm-registry` (xfs at
+  /var/lib/vmm-registry, podman graphroot there too); `registry_service.ensure_ready` restarts the router once when its
+  live RAM is short, pushes `registry_router` script + env + credentials (`DATA_DIR/groups/<g>/registry-auth.json`, never
+  in spec/API except `/registry/credentials`) and runs the detached `vmm-registry-setup` unit (mirror-registry download
+  + install on the router, own CA). Quay `SERVER_HOSTNAME` = `<uplink_ip>:<port>` (token realm reachable from host, lab
+  and WireGuard); repos public on push. oc-mirror v2 runs per request hash in detached `vmm-mirror-<id>` units, polled
+  via guest-exec (survives app restarts; done runs only read back); the pull secret goes to `/run` (tmpfs) for the run
+  only. Spec PUTs without `egress`/`registry` keep the stored ones (`model_fields_set`). Own images: skopeo copy on the
+  router, archive uploads spooled to disk and pushed from the host by `registry_client` (registry v2 API, no tools).
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -167,6 +182,17 @@ e2e/                  Playwright browser tests against the real app (see below)
   MetalLB pool out of DHCP / static IPs. Every router serves NTP (chrony `allow <cidr>` + DHCP option): the
   installer validates node clocks. The SR-IOV policy must be created only after the config daemon reported the
   NICs (the controller skips nodes with empty status and doesn't retry).
+- **Disconnected OpenShift** (docs/disconnected.md, `openshift.disconnected`, create only): owned group change
+  `registry.enabled` -> `registry_service.ensure_mirrored(request, task, window)` (release + add-on packages: deps
+  from `redhat-operator-index` `/configs` extracted on the host, `olm.package.required` + ODF's runtime
+  `odf-dependencies`; + `DEMO_IMAGE`) -> egress `blocked` in the `_allocate` push (previous mode in
+  `openshift.egress_before`, restored on delete from a shared group) -> install-config `pullSecret` = registry auths
+  only, `imageDigestSources` with a 2nd `<uplink_ip>:8443` mirror (the host-side `agent create image` can't resolve
+  `registry.<domain>`; its oc calls use `--insecure=true --icsp-file`), CA in `additionalTrustBundle` (Always).
+  Results (incl. registry auth) in the install dir `mirror.json` 0600. After install: oc-mirror cluster resources,
+  `OperatorHub.disableAllDefaultSources`, CatalogSource READY; `AddonRunner.sources` maps redhat-operators -> the
+  mirrored CatalogSource. Day-2 add-ons mirror first with the union of the cluster's operators (one filtered catalog
+  image per index: a smaller request would drop packages).
 - **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
   (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
   nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry

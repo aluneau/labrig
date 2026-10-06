@@ -73,6 +73,7 @@ resource "vmmanager_cluster" "ocp" {
     metallb      = true
     metallb_mode = "l2" # bgp: a /27 announced to the group router (switch in place)
     sriov        = false # true: igb NICs + vIOMMU + SR-IOV Network Operator (dev mode)
+    # disconnected = true # mirror registry on the group router (+8 GiB RAM), no internet for the nodes
   }
 
   depends_on = [vmmanager_openshift_pull_secret.this]

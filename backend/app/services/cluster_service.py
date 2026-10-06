@@ -249,6 +249,14 @@ class ClusterService:
                 lb = {"name": entry["name"], "port": entry["port"], "backends": entry["backends"],
                       "router_ip": (gspec.get("router") or {}).get("ip"),
                       "uplink_ip": (gspec.get("router") or {}).get("uplink_ip")}
+        registry = None
+        if group is not None and ((cluster.spec or {}).get("openshift") or {}).get("disconnected"):
+            router = (group.spec or {}).get("router") or {}
+            reg = router.get("registry") or {}
+            port = reg.get("port") or 8443
+            registry = {"url": f"registry.{group.domain}:{port}",
+                        "uplink_url": f"{router['uplink_ip']}:{port}" if router.get("uplink_ip") else None,
+                        "enabled": bool(reg.get("enabled")), "egress": (router.get("egress") or {}).get("mode", "open")}
         return {
             "id": cluster.id, "name": cluster.name, "type": cluster.type, "version": cluster.version,
             "network": cluster.network, "network_owned": bool(cluster.network_owned), "domain": cluster.domain,
@@ -263,6 +271,7 @@ class ClusterService:
             "console_url": (f"https://console-openshift-console.apps.{zone}"
                             if cluster.type == "openshift" and status in ("ready", "stopped", "starting", "stopping")
                             else None),
+            "registry": registry,
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
@@ -1012,6 +1021,9 @@ class ClusterService:
                     group_service.delete_group(db, cluster.group_id, for_cluster=cluster.name)
             else:
                 try:
+                    if cluster.type == "openshift":
+                        from app.services.openshift_installer import openshift_installer
+                        openshift_installer.release_group(cluster, network)  # queued, applied by destroy()
                     network.destroy()  # only the cluster's reservations / records / load balancer
                 except (ValueError, RuntimeError) as e:
                     logger.warning(f"Could not remove cluster {cluster.name}'s entries from its group: {e}")
