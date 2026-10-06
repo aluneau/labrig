@@ -194,7 +194,7 @@ What the create task does, in order:
      of each package's default-channel head, plus the subscriptions an operator creates itself (ODF 4.18+:
      `odf-operator` -> `odf-dependencies` -> ocs, mcg, rook-ceph, cephcsi, csi-addons, ocs-client,
      prometheus, recipe, external-snapshotter). Without the catalog, a built-in v4.20 list is used.
-   - the images the add-ons use outside the catalogs: `registry.access.redhat.com/ubi9/httpd-24` (hello demo).
+   - the images the add-ons use outside the catalogs: `registry.access.redhat.com/ubi9/httpd-24:latest` (hello demo; oc-mirror refuses untagged references).
 
    First time: ~20 GB or more (a release is ~190 images, ODF adds several GB), 30 to 90 minutes depending on
    the line. A request mirrored before is only read back (seconds), so a second cluster of the same version

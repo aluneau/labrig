@@ -18,7 +18,7 @@ STORAGE_DEVICE = f"/dev/disk/by-id/virtio-{STORAGE_SERIAL}"
 DEMO_NAMESPACE = "metallb-demo"
 DEMO_NAME = "hello"
 SRIOV_NAMESPACE = "openshift-sriov-network-operator"
-DEMO_IMAGE = "registry.access.redhat.com/ubi9/httpd-24"   # mirrored for disconnected clusters (ITMS)
+DEMO_IMAGE = "registry.access.redhat.com/ubi9/httpd-24:latest"  # mirrored for disconnected clusters (ITMS); oc-mirror needs the tag
 
 
 class AddonRunner:
