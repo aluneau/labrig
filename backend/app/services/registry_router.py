@@ -38,6 +38,7 @@ CRED=@CRED@
 DATA=@DATA@
 STATE=@STATE@
 DISK=/dev/disk/by-id/virtio-@SERIAL@
+MIRROR_ATTEMPTS=3
 MR_URL=@MR_URL@
 OCM_URL=@OCM_URL@
 UNITS="@UNITS@"
@@ -219,16 +220,28 @@ mirror() {
     R=$DATA/runs/$id
     A=/run/vmm-mirror-$id
     trap 'rm -rf $A' EXIT
-    exec > $R/log 2>&1
-    rm -f $R/rc
+    rm -f $R/rc $R/log.*
     export TMPDIR=$DATA/tmp HOME=/root
-    mkdir -p $TMPDIR $DATA/cache
-    /usr/local/bin/oc-mirror --v2 -c $R/isc.yaml --workspace file://$R/workspace \
-        "docker://$VMM_REG_HOST:$VMM_REG_PORT" --cache-dir $DATA/cache --authfile $A/auth.json \
-        --image-timeout 30m --retry-times 5
-    rc=$?
-    # oc-mirror exits 0 even when some images failed: they are listed in working-dir/logs/mirroring_errors_*
-    if [ $rc = 0 ] && ls $R/workspace/working-dir/logs/mirroring_errors_* >/dev/null 2>&1; then rc=3; fi
+    mkdir -p $TMPDIR $DATA/cache $R/attempts
+    # A dropped CDN download fails the whole run even after --retry-times: re-run (images already in the
+    # registry are skipped). Each attempt has a fresh $R/log (the app counts progress over it), older ones log.<n>.
+    attempt=1
+    while :; do
+        mv $R/workspace/working-dir/logs/mirroring_errors_* $R/attempts/ 2>/dev/null
+        {
+            [ $attempt -gt 1 ] && echo "INFO attempt $attempt / $MIRROR_ATTEMPTS (the previous one failed: see log.$((attempt - 1)))"
+            /usr/local/bin/oc-mirror --v2 -c $R/isc.yaml --workspace file://$R/workspace \
+                "docker://$VMM_REG_HOST:$VMM_REG_PORT" --cache-dir $DATA/cache --authfile $A/auth.json \
+                --image-timeout 30m --retry-times 5
+        } > $R/log 2>&1
+        rc=$?
+        # oc-mirror exits 0 even when some images failed: they are listed in working-dir/logs/mirroring_errors_*
+        if [ $rc = 0 ] && ls $R/workspace/working-dir/logs/mirroring_errors_* >/dev/null 2>&1; then rc=3; fi
+        [ $rc = 0 ] || [ $attempt -ge $MIRROR_ATTEMPTS ] && break
+        cp $R/log $R/log.$attempt
+        attempt=$((attempt + 1))
+        sleep 30
+    done
     echo $rc > $R/rc
 }
 

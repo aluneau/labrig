@@ -156,8 +156,11 @@ ITMS only the tag references of mirrored additional images.
 - **restart-required**: the router runs with less RAM than the registry needs; *Set up now* restarts it.
 - **Quay**: `systemctl status quay-pod quay-app quay-redis` on the router; storage under
   `/var/lib/vmm-registry/quay-storage`, config `/var/lib/vmm-registry/quay-install/quay-config/config.yaml`.
-- **Mirror run failed**: the error (oc-mirror's last lines + `mirroring_errors_*`) is on the run's row; the
-  full log is `/var/lib/vmm-registry/runs/<id>/log`. Re-run the same request: what was copied stays.
+- **Mirror run failed**: the router already runs oc-mirror up to 3 times (30 s apart) before giving up, since a
+  dropped quay.io CDN download fails a whole run even after oc-mirror's own `--retry-times 5`; images already in
+  the registry are skipped. The error (oc-mirror's last lines + `mirroring_errors_*`) is on the run's row; the
+  last attempt's log is `/var/lib/vmm-registry/runs/<id>/log`, earlier ones `log.<n>`, their error lists in
+  `attempts/`. Re-run the same request: what was copied stays.
 - **x509 / unknown authority** from a client: install the CA (`/etc/containers/certs.d/<host:port>/ca.crt`
   for podman / CRI-O, or the system trust store), or use the name the certificate covers
   (`registry.<domain>`, router LAN IP, uplink IP).
