@@ -161,7 +161,8 @@ e2e/                  Playwright browser tests against the real app (see below)
   live RAM is short, pushes `registry_router` script + env + credentials (`DATA_DIR/groups/<g>/registry-auth.json`, never
   in spec/API except `/registry/credentials`) and runs the detached `vmm-registry-setup` unit (mirror-registry download
   + install on the router, own CA). Quay `SERVER_HOSTNAME` = `<uplink_ip>:<port>` (token realm reachable from host, lab
-  and WireGuard); repos public on push. oc-mirror v2 runs per request hash in detached `vmm-mirror-<id>` units, polled
+  and WireGuard); repos public on push. oc-mirror v2 runs per request hash in detached `vmm-mirror-<id>` units (up to 8 passes: quay.io's CDN drops
+  ~1 large blob per release pass, 2 of 3 passes in a real SNO run; re-runs skip copied images), polled
   via guest-exec (survives app restarts; done runs only read back); the pull secret goes to `/run` (tmpfs) for the run
   only. Spec PUTs without `egress`/`registry` keep the stored ones (`model_fields_set`). Own images: skopeo copy on the
   router, archive uploads spooled to disk and pushed from the host by `registry_client` (registry v2 API, no tools).
