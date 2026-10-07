@@ -679,8 +679,9 @@ class OpenShiftInstaller:
         spec = cluster.spec
         workdir = openshift_service.cluster_dir(cluster.name)
         # A retry starts from scratch (the installer refuses a dir with a previous state), keeping the SSH key
+        # and the mirror results (written just before, by the mirror step)
         for entry in workdir.iterdir():
-            if entry.name.startswith("id_ed25519") or entry.name == "spec.json":
+            if entry.name.startswith("id_ed25519") or entry.name in ("spec.json", self._mirror_file(cluster).name):
                 continue
             shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
         # the app's key + the user's (all authorized for `core`)
