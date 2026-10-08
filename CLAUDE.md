@@ -42,7 +42,8 @@ backend/app/
                       bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
-                      cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
+                      cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
+                      k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
@@ -56,7 +57,7 @@ docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli im
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), k3s, kubeadm (clusters)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -194,6 +195,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   `OperatorHub.disableAllDefaultSources`, CatalogSource READY; `AddonRunner.sources` maps redhat-operators -> the
   mirrored CatalogSource. Day-2 add-ons mirror first with the union of the cluster's operators (one filtered catalog
   image per index: a smaller request would drop packages).
+- **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
+  `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
+  `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into
+  `spec.mirror.flannel`: nodes can't download it) -> `registry_images.copy_list` (router script `copylist`, skopeo
+  --all) to one Quay namespace per upstream (`k8s/ docker/ ghcr/ quay/`, others host with `-`). Egress `blocked` +
+  owned `router.egress.exempt` per new node (nft `ip saddr … accept`) in `_add_nodes`; `ops.prereqs_done` drops the
+  exemptions before kubeadm pulls anything (packages = "golden image"). Nodes: `hosts.toml` per registry
+  (`override_path`, CA), containerd `config_path` + sandbox image, no `images pull` in prereqs, packages pinned to the
+  mirrored patch. Day 2: `POST /clusters/{id}/mirror` (new registry -> hosts.toml pushed via guest-exec). Delete from a
+  shared group restores `spec.mirror.egress_before`. Quay 401 on a missing repo = "not mirrored" (ImagePullBackOff).
 - **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
   (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
   nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry
@@ -260,6 +271,7 @@ node groups.js                                                  # lab group: cre
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
+node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

@@ -1456,6 +1456,7 @@ class GroupService:
         model.reservations = [r for r in model.reservations if not r.owner]
         model.load_balancers = [lb for lb in model.load_balancers if not lb.owner]
         model.address_pools = [p for p in model.address_pools if not p.owner]
+        model.router.egress.exempt = [e for e in model.router.egress.exempt if not e.owner]
         model.router.uplink_ip = None
         model.router.registry.hostname = model.router.registry.ca_pem = None
         model.owner = None
