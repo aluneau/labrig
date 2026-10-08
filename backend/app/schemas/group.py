@@ -75,10 +75,53 @@ class DNSRecord(BaseModel):
         return self
 
 
+ZONE_SERVER = re.compile(r"^(?P<ip>\d{1,3}(\.\d{1,3}){3})(#(?P<port>\d{1,5}))?$")
+
+
+class DNSZone(BaseModel):
+    """Conditional forwarding (split DNS): names in `domain` and below are resolved by `servers`
+    (dnsmasq server=/domain/ip), everything else by the forwarders. A server is an IPv4 address,
+    "ip#port", or the name of a group member / reserved host (e.g. a member running the customer's
+    internal DNS): resolved to its address when the router config is rendered."""
+    domain: str = Field(..., min_length=1, max_length=253)
+    servers: List[str] = Field(..., min_length=1)
+    # With router.dns.stop_rebind: private addresses answered for this zone are still accepted
+    allow_private: bool = True
+
+    @field_validator("domain")
+    @classmethod
+    def _domain(cls, v: str) -> str:
+        v = v.strip().rstrip(".").lower()
+        if not DNS_NAME.match(v) or v.startswith("*"):
+            raise ValueError(f"'{v}' is not a valid DNS zone")
+        return v
+
+    @field_validator("servers")
+    @classmethod
+    def _servers(cls, v: List[str]) -> List[str]:
+        out = []
+        for s in v:
+            s = s.strip().lower()
+            m = ZONE_SERVER.match(s)
+            if m:
+                _ipv4(m.group("ip"), "Zone server")
+                if m.group("port") and not 1 <= int(m.group("port")) <= 65535:
+                    raise ValueError(f"Zone server '{s}': bad port")
+            elif not re.match(HOST_LABEL, s):
+                raise ValueError(f"Zone server '{s}' must be an IPv4 address, ip#port or a member name")
+            out.append(s)
+        return out
+
+
 class DNSSpec(BaseModel):
     # Upstream resolvers; empty = whatever the uplink's DHCP gives the router
     forwarders: List[str] = []
     records: List[DNSRecord] = []
+    zones: List[DNSZone] = []  # split DNS (conditional forwarding), docs/router-cases.md
+    # Knobs to reproduce resolver behaviour (all off = dnsmasq defaults)
+    stop_rebind: bool = False   # drop private addresses in upstream answers (DNS rebinding protection)
+    no_negcache: bool = False   # don't cache NXDOMAIN / NODATA answers
+    cache_size: Optional[int] = Field(None, ge=0, le=100000)  # 0 = no cache (dnsmasq default 150)
 
     @field_validator("forwarders")
     @classmethod
@@ -271,13 +314,62 @@ class VLANSpec(BaseModel):
     cidr: str
 
 
+PROXY_USER = r"^[A-Za-z0-9._-]{1,64}$"
+PROXY_PASSWORD = r"^[A-Za-z0-9._~!*+=,;-]{1,128}$"  # no ':' '@' '/' (proxy URLs) nor shell / squid specials
+
+
+class ProxySpec(BaseModel):
+    """Egress mode "proxy": squid on the router, the only way out for the lab (docs/router-cases.md).
+    Plain forward proxy, CONNECT for HTTPS (no TLS interception)."""
+    port: int = Field(3128, ge=1, le=65535)
+    # Destinations allowed through the proxy (squid dstdomain: ".example.com" = the domain and below);
+    # empty = any
+    allow_domains: List[str] = []
+    connect_ports: List[int] = [443]  # CONNECT (HTTPS tunnels) only to these ports
+    username: Optional[str] = Field(None, pattern=PROXY_USER)  # basic auth when set (with password)
+    password: Optional[str] = Field(None, pattern=PROXY_PASSWORD)
+    # Members created from a cloud image get the proxy environment (http(s)_proxy / no_proxy in
+    # /etc/environment + profile.d, apt / dnf proxy). Off = reproduce an unconfigured host
+    member_env: bool = True
+
+    @field_validator("allow_domains")
+    @classmethod
+    def _domains(cls, v: List[str]) -> List[str]:
+        out: List[str] = []
+        for d in v:
+            d = d.strip().lower().rstrip(".")
+            bare = d.lstrip(".")
+            if not bare or not DNS_NAME.match(bare) or bare.startswith("*"):
+                raise ValueError(f"Proxy allowed domain '{d}' is not a domain ('.example.com' = it and below)")
+            if d not in out:
+                out.append(d)
+        return out
+
+    @field_validator("connect_ports")
+    @classmethod
+    def _ports(cls, v: List[int]) -> List[int]:
+        if not v or any(not 1 <= p <= 65535 for p in v):
+            raise ValueError("connect_ports: at least one port, 1-65535")
+        return sorted(set(v))
+
+    @model_validator(mode="after")
+    def _auth(self):
+        if bool(self.username) != bool(self.password):
+            raise ValueError("Proxy authentication needs both a username and a password")
+        if self.port in RESERVED_ROUTER_PORTS:
+            raise ValueError(f"The proxy can't listen on port {self.port} (used by the router itself)")
+        return self
+
+
 class EgressSpec(BaseModel):
     """What the group's machines may reach outside the lab (forwarded traffic through the router).
     blocked: everything from the group network to the uplink side is refused except `allow` (e.g. a
     customer proxy); the router itself (DNS forwarding, NTP, registry mirroring), WireGuard devices,
-    load balancers and BGP-announced addresses keep working. Applied live."""
-    mode: Literal["open", "blocked"] = "open"
-    allow: List[str] = []  # CIDRs / addresses still reachable when blocked
+    load balancers and BGP-announced addresses keep working. proxy: the same, plus squid on the router
+    (`proxy`) as the only way out. Applied live."""
+    mode: Literal["open", "blocked", "proxy"] = "open"
+    allow: List[str] = []  # CIDRs / addresses still reachable when blocked / proxy
+    proxy: ProxySpec = ProxySpec()
 
     @field_validator("allow")
     @classmethod
@@ -314,6 +406,22 @@ class RegistrySpec(BaseModel):
         return v
 
 
+class PathSpec(BaseModel):
+    """The router as a narrow hop between the lab and the outside (docs/router-cases.md): `mtu` on its
+    uplink and LAN interfaces (members keep the group network's MTU), the ICMP "fragmentation needed"
+    messages it must send can be dropped (PMTUD black hole), and TCP MSS clamping works around it. Live."""
+    mtu: Optional[int] = Field(None, ge=576, le=1500)
+    drop_frag_needed: bool = False  # PMTUD black hole: the router never tells senders the path is smaller
+    clamp_mss: bool = False         # rewrite the MSS of forwarded SYNs to the route MTU (the usual fix)
+
+
+class NetworkSpec(BaseModel):
+    """The group network itself. mtu: libvirt <mtu> of the bridge, the router's LAN, and DHCP option 26
+    for the members (default 1500). Changes reach the members at their next DHCP renewal / boot; the
+    bridge's own MTU (libvirt) follows at the next group start."""
+    mtu: Optional[int] = Field(None, ge=576, le=9000)
+
+
 class RouterSpec(BaseModel):
     flavour: Literal["el", "vyos"] = "el"
     # Cloud image: "almalinux-9" (distribution-version) or a cloudimg-*.qcow2 volume name.
@@ -328,6 +436,7 @@ class RouterSpec(BaseModel):
     vlans: List[VLANSpec] = []
     egress: EgressSpec = EgressSpec()
     registry: RegistrySpec = RegistrySpec()
+    path: PathSpec = PathSpec()
     # Assigned by the app
     ip: Optional[str] = None
     lan_mac: Optional[str] = Field(None, pattern=MAC)
@@ -504,6 +613,7 @@ class GroupSpec(BaseModel):
     owner: Optional[str] = None  # "cluster:<name>" for a group created for (and deleted with) a cluster
     dhcp_hosts: List[DHCPHostSpec] = []  # static reservations for non-member machines
     address_pools: List[AddressPoolSpec] = []  # ranges kept free (MetalLB pools...)
+    network: NetworkSpec = NetworkSpec()
 
     @field_validator("cidr")
     @classmethod
@@ -587,12 +697,37 @@ class GroupSpec(BaseModel):
                 raise ValueError(f"The registry port {reg.port} is already used by a load balancer")
             if "registry" in names + [h.hostname for h in self.dhcp_hosts] + records:
                 raise ValueError("The name 'registry' is used by the group's mirror registry")
+        self._check_router_cases(names, lb_ports)
         if self.router.wireguard is not None:
             self.router.wireguard.check(self.cidr)
         if self.router.bgp is not None:
             wg = self.router.wireguard
             self.router.bgp.check(self.cidr, wg.subnet if wg else None)
         return self
+
+    def _check_router_cases(self, names: List[str], lb_ports: List[int]) -> None:
+        """Split DNS zones, proxy port, MTUs (docs/router-cases.md)"""
+        zones = [z.domain for z in self.router.dns.zones]
+        dupes = {z for z in zones if zones.count(z) > 1}
+        if dupes:
+            raise ValueError(f"Duplicate DNS zones: {', '.join(sorted(dupes))}")
+        hosts = set(names) | {h.hostname for h in self.dhcp_hosts if h.hostname}
+        for z in self.router.dns.zones:
+            if z.domain == self.domain:
+                raise ValueError(f"DNS zone {z.domain} is the group's own domain (served by the router)")
+            for server in z.servers:
+                if not ZONE_SERVER.match(server) and server not in hosts:
+                    raise ValueError(f"DNS zone {z.domain}: server '{server}' is neither an address nor a member / host name")
+        egress = self.router.egress
+        if egress.mode == "proxy":
+            port = egress.proxy.port
+            if port in lb_ports:
+                raise ValueError(f"The proxy port {port} is already used by a load balancer")
+            if self.router.registry.enabled and port == self.router.registry.port:
+                raise ValueError(f"The proxy port {port} is the registry's")
+        path_mtu, lan_mtu = self.router.path.mtu, self.network.mtu
+        if path_mtu and lan_mtu and path_mtu > lan_mtu:
+            raise ValueError(f"router.path.mtu ({path_mtu}) can't be larger than the network MTU ({lan_mtu})")
 
     def _check_dhcp_hosts(self, net: ipaddress.IPv4Network) -> None:
         """Reservations: usable address of the subnet (inside the dynamic range is fine: dnsmasq never
@@ -705,9 +840,18 @@ class Group(BaseModel):
     updated_at: datetime
 
 
+class ProxyInfo(BaseModel):
+    url: str            # http://<router ip>:<port>
+    url_with_auth: str  # with user:password when the proxy needs it
+    fqdn_url: str       # http://router.<domain>:<port>
+    no_proxy: str
+    env: Dict[str, str]  # http_proxy, https_proxy, no_proxy (+ upper case)
+
+
 class GroupDetail(Group):
     router_uplink_ips: List[str] = []
     leases: List[GroupLease] = []  # read from the router's dnsmasq through the guest agent
+    proxy: Optional[ProxyInfo] = None  # egress mode proxy: URL + client environment
 
 
 class GroupCreateResult(BaseModel):
@@ -931,6 +1075,14 @@ class TopologyRouter(BaseModel):
     dns_forwarders: List[str] = []
     load_balancers: List[TopologyLoadBalancer] = []
     config_applied: bool = False
+    # router cases (docs/router-cases.md)
+    proxy_port: Optional[int] = None  # egress mode proxy
+    dns_zones: List[str] = []         # split DNS
+    network_mtu: int = 1500
+    lan_mtu: int = 1500
+    path_mtu: Optional[int] = None
+    drop_frag_needed: bool = False
+    clamp_mss: bool = False
 
 
 class TopologyWireGuardPeer(BaseModel):
