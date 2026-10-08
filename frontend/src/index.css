@@ -50,3 +50,7 @@
   padding: 0;
   margin: 0 0 8px;
 }
+
+/* Login page: PatternFly expects a background image (its footer text is white); a plain dark backdrop instead */
+.pf-v5-c-login { background-color: var(--pf-v5-global--BackgroundColor--dark-100); }
+.pf-v5-c-login__header .pf-v5-c-brand { display: none; }
