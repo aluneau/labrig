@@ -74,6 +74,7 @@ export interface VMNic {
   link_state: LinkState;
   device?: string | null; // host tap while running
   vf: boolean; // SR-IOV VF passed through from the host (VF pool network)
+  vlan?: number | null; // VF pool NICs: VLAN tag set on this NIC (overrides the pool's)
   // running VM only: 'attach' = appears at next start, 'detach' = goes away when released, 'change' = saved differs
   pending?: 'attach' | 'detach' | 'change' | null;
 }
@@ -83,6 +84,7 @@ export interface VMNicCreate {
   model?: NicModel;
   mac?: string;
   link_state?: LinkState;
+  vlan?: number; // SR-IOV VF pool networks only: VLAN tag the PF applies to this VF
 }
 
 export interface VMNicUpdate {
@@ -229,6 +231,7 @@ export interface Network {
   bridge_name?: string | null;
   forward_mode: string;
   forward_dev?: string | null;
+  vlan?: number | null; // SR-IOV VF pools: VLAN tag set on every VF of the pool
   domain?: string | null;
   ip_address?: string | null;
   prefix?: number | null;
@@ -295,6 +298,7 @@ export interface NetworkCreate {
   name: string;
   forward_mode: string; // nat | route | isolated | hostdev (SR-IOV VF pool: forward_dev = PF)
   forward_dev?: string;
+  vlan?: number; // SR-IOV VF pools only: VLAN tag set on every VF of the pool
   ip_address?: string;
   prefix?: number;
   dhcp_enabled: boolean;
@@ -1035,11 +1039,27 @@ export interface RouterConfig {
   config_error?: string | null;
 }
 
+export interface SriovCheck {
+  id: string;
+  label: string;
+  status: 'ok' | 'warning' | 'error' | 'info';
+  detail: string;
+  fix?: string | null; // exact command when there is one
+}
+
 export interface SriovVF {
   index: number;
   pci?: string | null;
-  driver?: string | null; // igbvf, iavf, vfio-pci (passed through), ...
+  driver?: string | null; // igbvf, iavf, mlx5_core, vfio-pci (passed through), ...
   netdev?: string | null;
+  in_use: boolean; // bound to vfio-pci: passed through to a VM
+  iommu_group?: number | null;
+  group_others: string[]; // other devices in its IOMMU group (non-empty = can't be passed through)
+  mac?: string | null;
+  vlan?: number | null;
+  spoofchk?: boolean | null;
+  trust?: boolean | null;
+  link_state?: string | null;
 }
 
 export interface SriovPF {
@@ -1049,13 +1069,28 @@ export interface SriovPF {
   vendor_id?: string | null;
   device_id?: string | null;
   vf_device_id?: string | null;
-  total_vfs: number;
+  total_vfs: number; // firmware limit (0 = SR-IOV off in the NIC firmware)
   num_vfs: number;
   operstate?: string | null;
+  carrier: boolean;
+  persistent: boolean; // VF count + options restored at boot (vm-manager-sriov.service)
+  persisted_num_vfs?: number | null;
+  trust?: boolean | null; // VF options applied to every VF (null = never set from the app)
+  spoofchk?: boolean | null;
   vfs: SriovVF[];
+  checks: SriovCheck[];
 }
 
 export interface SriovStatus {
   iommu: { enabled: boolean; groups: number; message?: string | null };
+  checks: SriovCheck[];
   pfs: SriovPF[];
+  helper_version?: number | null;
+}
+
+export interface SriovPFUpdate {
+  num_vfs?: number;
+  trust?: boolean;
+  spoofchk?: boolean;
+  persistent?: boolean;
 }

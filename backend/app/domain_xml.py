@@ -55,6 +55,7 @@ def disk_info(disk: ET.Element) -> Dict[str, Any]:
         "format": driver.get("type") if driver is not None else None,
         "boot_order": int(boot.get("order")) if boot is not None and boot.get("order") else None,
         "alias": alias.get("name") if alias is not None else None,
+        "vlan": int(tag.get("id")) if tag is not None and (tag.get("id") or "").isdigit() else None,
     }
 
 
@@ -235,6 +236,7 @@ def nic_info(iface: ET.Element) -> Dict[str, Any]:
     link = iface.find("link")
     target = iface.find("target")
     alias = iface.find("alias")
+    tag = iface.find("./vlan/tag")
     network = None
     if source is not None:
         network = source.get("network") or source.get("bridge") or source.get("dev")
@@ -246,18 +248,20 @@ def nic_info(iface: ET.Element) -> Dict[str, Any]:
         "link_state": link.get("state", "up") if link is not None else "up",
         "device": target.get("dev") if target is not None else None,  # host tap (vnetN), running only
         "alias": alias.get("name") if alias is not None else None,
+        "vlan": int(tag.get("id")) if tag is not None and (tag.get("id") or "").isdigit() else None,
     }
 
 
 def nic_xml(network: str, model: Optional[str] = "virtio", mac: Optional[str] = None,
-            link_state: Optional[str] = None) -> str:
+            link_state: Optional[str] = None, vlan: Optional[int] = None) -> str:
     """<interface type='network'>. model=None for hostdev (SR-IOV VF pool) networks: the guest
-    gets the VF itself, there is no emulated model."""
+    gets the VF itself, there is no emulated model; vlan = tag the PF applies to the VF."""
     mac_xml = f"<mac address={quoteattr(mac.lower())}/>" if mac else ""
     model_xml = f"<model type={quoteattr(model)}/>" if model else ""
     link_xml = f"<link state={quoteattr(link_state)}/>" if link_state and link_state != "up" else ""
+    vlan_xml = f"<vlan><tag id='{int(vlan)}'/></vlan>" if vlan else ""
     return (f"<interface type='network'>{mac_xml}<source network={quoteattr(network)}/>"
-            f"{model_xml}{link_xml}</interface>")
+            f"{vlan_xml}{model_xml}{link_xml}</interface>")
 
 
 def nic_update_xml(iface: ET.Element, link_state: Optional[str] = None, network: Optional[str] = None) -> str:
