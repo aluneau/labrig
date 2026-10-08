@@ -687,7 +687,7 @@ class GroupService:
             new.router.path = old.router.path.model_copy(deep=True)
         if "network" not in new.model_fields_set:
             new.network = old.network.model_copy(deep=True)
-        if new.router.egress.mode == "proxy" and "proxy" not in new.router.egress.model_fields_set:
+        if "proxy" not in new.router.egress.model_fields_set:  # squid settings survive mode switches
             new.router.egress.proxy = old.router.egress.proxy.model_copy(deep=True)
         # split DNS zones / resolver knobs: a dns block without them (e.g. OpenTofu's) keeps the stored ones
         dns_given = new.router.dns.model_fields_set

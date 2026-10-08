@@ -148,8 +148,8 @@ export const GroupRegistry: React.FC<{ group: GroupDetail; onDone: (msg: string)
   const allowList = allow.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
   const allowBad = allowList.some((a) => !CIDR_RE.test(a));
   const blocked = egress.mode === 'blocked';
-  const setEgress = (mode: 'open' | 'blocked') =>
-    putRouter({ egress: { mode, allow: allowList } },
+  const setEgress = (mode: 'open' | 'blocked' | 'proxy') =>
+    putRouter({ egress: { ...egress, mode, allow: allowList } },
       mode === 'blocked' ? 'Internet access blocked for the lab machines' : 'Internet access open again');
 
   const enableRegistry = (enabled: boolean) => putRouter({
