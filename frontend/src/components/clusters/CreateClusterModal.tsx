@@ -19,13 +19,13 @@ import {
   TextInput,
   Title,
 } from '@patternfly/react-core';
-import { CatalogOperator, CloudImage, ClusterCreate, Group, Network } from '../../types';
+import { CatalogOperator, CloudImage, ClusterCreate, Group, MetalLBOptions, Network } from '../../types';
 import { clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 import {
   DisconnectedSection, MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
-  TopologySection, VersionSection, defaultOsDraft, osDraftErrors, osRequest,
+  TopologySection, VersionSection, defaultOsDraft, osDraftErrors, osRequest, MetalLBFields,
 } from './OpenShiftFields';
 
 interface Props {
@@ -106,6 +106,8 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const [sshKeys, setSshKeys] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // kubeadm: MetalLB installed by the app
+  const [k8sMetallb, setK8sMetallb] = useState<MetalLBOptions>({ enabled: false, mode: 'l2', addresses: 16, demo: true, bfd: false });
   // OpenShift
   const [os, setOs] = useState<OsDraft>(defaultOsDraft);
   const patchOs = useCallback((p: Partial<OsDraft>) => setOs((cur) => ({ ...cur, ...p })), []);
@@ -176,6 +178,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       password: password || null,
       ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
       keyboard: defaultKeyboard(),
+      kubeadm: type === 'kubeadm' ? { metallb: k8sMetallb } : null,
     };
     setBusy(true);
     setError(null);
@@ -317,6 +320,8 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
           </GridItem>
           </>}
         </Grid>
+
+        {type === 'kubeadm' && <MetalLBFields prefix="k8s" value={k8sMetallb} onChange={setK8sMetallb} />}
 
         {isOpenShift && (
           <>
