@@ -83,20 +83,20 @@ const PfOptions: React.FC<{ pf: SriovPF; helperOk: boolean; onDone: () => void; 
   };
   const disabled = !helperOk || busy !== null;
   return (
-    <Flex direction={{ default: 'column' }} spaceItems={{ default: 'spaceItemsXs' }}>
-      <Tooltip content="Restore this VF count and the VF options when the host boots (vm-manager-sriov.service, /etc/vm-manager/sriov.conf)">
+    <div style={{ display: 'grid', rowGap: 8, minWidth: 190 }}>
+      <div><Tooltip content="Restore this VF count and the VF options when the host boots (vm-manager-sriov.service, /etc/vm-manager/sriov.conf)">
         <Switch id={`persist-${pf.name}`} label="Keep across reboots" isChecked={pf.persistent} isDisabled={disabled}
           onChange={(_e, v) => update('persist', { persistent: v })} />
-      </Tooltip>
-      <Tooltip content="trust on: the guest may change its VF's MAC and turn on promiscuous / all-multicast (bonding, OpenShift, VRRP)">
+      </Tooltip></div>
+      <div><Tooltip content="trust on: the guest may change its VF's MAC and turn on promiscuous / all-multicast (bonding, OpenShift, VRRP)">
         <Switch id={`trust-${pf.name}`} label="VF trust" isChecked={pf.trust === true} isDisabled={disabled}
           onChange={(_e, v) => update('trust', { trust: v })} />
-      </Tooltip>
-      <Tooltip content="MAC anti-spoofing: drops frames whose source MAC isn't the VF's. Turn off for bonding / failover MAC moves">
+      </Tooltip></div>
+      <div><Tooltip content="MAC anti-spoofing: drops frames whose source MAC isn't the VF's. Turn off for bonding / failover MAC moves">
         <Switch id={`spoofchk-${pf.name}`} label="Spoof checking" isChecked={pf.spoofchk !== false} isDisabled={disabled}
           onChange={(_e, v) => update('spoofchk', { spoofchk: v })} />
-      </Tooltip>
-    </Flex>
+      </Tooltip></div>
+    </div>
   );
 };
 
