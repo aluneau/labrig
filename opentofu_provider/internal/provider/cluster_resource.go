@@ -253,6 +253,8 @@ func (r *clusterResource) waitIdle(ctx context.Context, id string) error {
 	timeout := clusterTimeout
 	if c, err := r.get(ctx, id); err == nil && c.Type == "openshift" {
 		timeout = openshiftTimeout
+	} else if err == nil && c.Spec["disconnected"] == true {
+		timeout = 2 * time.Hour // the first registry setup downloads mirror-registry (~1.3 GB) on the router
 	}
 	return Poll(ctx, 10*time.Second, timeout, func() (bool, error) {
 		c, err := r.get(ctx, id)
