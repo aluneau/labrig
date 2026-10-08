@@ -356,10 +356,13 @@ class ELRouterBackend(RouterBackend):
                 " && systemctl restart chronyd; }; true; }")
 
     def apply_command(self, spec: GroupSpec) -> str:
-        base = (f"{self.ntp_command(spec)}; if ! {{ {v6.apply_command(spec)}; }}; then echo 'IPv6 setup failed' >&2; exit 1; fi; "
+        # IPv6 (router_ipv6) first: dnsmasq needs the LAN's IPv6 address; a failure fails the apply at the end
+        # (no `exit`: the first boot runs this inside cloud-init's runcmd script)
+        base = (f"{self.ntp_command(spec)}; v6fail=; {{ {v6.apply_command(spec)}; }} || v6fail=1; "
                 "restorecon -R /etc/dnsmasq.d /etc/nftables 2>/dev/null; "
                 f"nft -f {NFT_CONF} && systemctl stop dnsmasq && {{ sh {PRUNE_LEASES} || true; }}; "
-                "systemctl start dnsmasq && systemctl is-active dnsmasq")
+                "systemctl start dnsmasq && systemctl is-active dnsmasq"
+                " && { test -z \"$v6fail\" || { echo 'IPv6 setup failed on the router' >&2; false; }; }")
         base += " && " + self._wg_apply(spec)
         if spec.router.bgp is not None:
             base += " && " + self._bgp_apply(spec)
@@ -441,7 +444,7 @@ class ELRouterBackend(RouterBackend):
             "systemctl enable nftables && systemctl restart nftables",
             "systemctl enable dnsmasq && systemctl restart dnsmasq",
             self.ntp_command(spec),
-            *([f"{self.apply_command(spec)} || true"] if spec.load_balancers or self._wg(spec) or self._bgp(spec) else []),
+            *([f"{self.apply_command(spec)} || true"] if spec.load_balancers or self._wg(spec) or self._bgp(spec) or spec.ipv6_prefix() else []),
             f"mkdir -p {STATE_DIR}",
             f"if systemctl is-active -q dnsmasq; then touch {STATE_DIR}/ready; "
             f"else systemctl status dnsmasq > {STATE_DIR}/failed 2>&1; fi",
