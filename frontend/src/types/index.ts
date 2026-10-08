@@ -1057,6 +1057,7 @@ export interface GroupSpec {
   load_balancers?: LoadBalancerSpec[];
   owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
   dhcp_hosts?: GroupDHCPHost[];
+  template?: TemplateRef | null; // set when created from a customer-case template
 }
 
 export interface GroupHostInfo {
@@ -1166,4 +1167,102 @@ export interface SriovPF {
 export interface SriovStatus {
   iommu: { enabled: boolean; groups: number; message?: string | null };
   pfs: SriovPF[];
+}
+
+// Customer-case templates (docs/templates.md)
+
+export interface TemplateRef {
+  id: string;
+  title?: string | null;
+  case?: string | null;
+  params: Record<string, unknown>;
+  guide?: string | null;
+  created_at?: string | null;
+}
+
+export type TemplateParamType = 'string' | 'int' | 'bool' | 'choice' | 'cloud_image' | 'cidr';
+
+export interface TemplateParam {
+  name: string;
+  label?: string | null;
+  type: TemplateParamType;
+  required: boolean;
+  default?: unknown;
+  help?: string | null;
+  pattern?: string | null;
+  choices: unknown[];
+  min?: number | null;
+  max?: number | null;
+}
+
+export interface TemplateResources {
+  vcpus: number;
+  memory_mb: number;
+  disk_gb: number;
+}
+
+export interface TemplateInfo {
+  id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  requires: string[];
+  resources: TemplateResources;
+  params: TemplateParam[];
+  heavy: boolean;
+  has_cluster: boolean;
+  cluster_type?: string | null;
+  custom: boolean;
+  author?: string | null;
+}
+
+export interface TemplateDetail extends TemplateInfo {
+  name: string;
+  group: Record<string, unknown>;
+  cluster?: Record<string, unknown> | null;
+  guide: string;
+  yaml: string;
+}
+
+export interface TemplateList {
+  templates: TemplateInfo[];
+  errors: { file: string; error: string }[];
+}
+
+export interface TemplateEstimate {
+  vcpus: number;
+  memory_mb: number;
+  disk_gb: number;
+  host_memory_free_mb?: number | null;
+  fits: boolean;
+  detail: string[];
+}
+
+export interface TemplateRender {
+  ok: boolean;
+  params: Record<string, unknown>;
+  group?: GroupSpec | null;
+  cluster?: Record<string, unknown> | null;
+  yaml: string;
+  guide: string;
+  hcl: string;
+  errors: string[];
+  warnings: string[];
+  estimate: TemplateEstimate | Record<string, never>;
+}
+
+export interface TemplateCreated {
+  group_id: number;
+  group_name: string;
+  task_id: number;
+  cluster_task_id?: number | null;
+}
+
+export interface TemplateSave {
+  group_id: number;
+  id: string;
+  title: string;
+  summary?: string;
+  tags?: string[];
+  guide?: string | null;
 }

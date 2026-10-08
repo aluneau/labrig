@@ -1,0 +1,46 @@
+id: basic-lab
+title: Basic lab
+summary: A router (DHCP, DNS, NAT) and two Debian machines on a private network with their own DNS zone.
+tags: [basic, dns, dhcp]
+requires: []
+resources: {vcpus: 3, memory_mb: 2560, disk_gb: 30}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$',
+     help: 'Used in the group name (c<case>-lab) and its DNS zone'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: image, label: Members cloud image, type: cloud_image, default: debian-13}
+  - {name: memory, label: Memory per member (MiB), type: int, default: 1024, min: 512, max: 16384}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: keyboard, label: Console keyboard layout, type: string, pattern: '^[a-z]{2,10}$',
+     help: 'e.g. fr, de, us (empty: the image default)'}
+name: "c{{case}}-lab"
+group:
+  cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}", keyboard: "{{keyboard}}"}
+  members:
+    - {name: web1, image: "{{image}}", memory: "{{memory}}"}
+    - {name: db1, image: "{{image}}", memory: "{{memory}}"}
+guide: |
+  # Case {{case}}: basic lab
+
+  A starting point to reproduce a customer issue on two machines that see each other by name.
+
+  ## What is in the lab
+  - Network **{{cidr}}** (isolated), DNS zone **{{domain}}**
+  - Router `router.{{domain}}` (**{{ip:1}}**): DHCP with static leases, DNS for the zone (other names are
+    forwarded upstream), NAT to the internet
+  - `web1.{{domain}}` and `db1.{{domain}}`: user `admin`, the password you chose
+
+  ## Steps
+  1. Wait until the group is **running** (the router's first boot installs packages: a few minutes).
+  2. Open a member console from the **Members** tab and log in as `admin`.
+  3. Reproduce the customer's setup on top (packages, configuration files, services).
+
+  ## Checks
+  - `ip -4 addr` shows the address listed on the Members tab
+  - `getent hosts db1.{{domain}}` answers on `web1` (the router's DNS)
+  - `curl -sI https://deb.debian.org` works (NAT through the router)
+
+  ## Next
+  Add DNS records on the **Network & DNS** tab (applied live), more members on **Members**, or open
+  **Remote access** to reach the lab from your laptop. When done, **Delete** removes every VM of the lab.
