@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -231,7 +231,9 @@ export const clusterApi = {
   operators: (id: number) => request<InstalledOperator[]>(`/clusters/${id}/openshift/operators`),
   packageManifests: (id: number) => request<PackageManifest[]>(`/clusters/${id}/openshift/packagemanifests`),
   addAddon: (id: number, data: AddonRequest) => post<Task>(`/clusters/${id}/openshift/addons`, data),
-  metallb: (id: number) => request<MetalLBScenario>(`/clusters/${id}/openshift/metallb`),
+  metallb: (id: number) => request<MetalLBScenario>(`/clusters/${id}/metallb`),
+  setMetallb: (id: number, data: MetalLBOptions) =>
+    request<Task>(`/clusters/${id}/metallb`, { method: 'PUT', body: JSON.stringify(data) }),
 };
 
 export const openshiftApi = {

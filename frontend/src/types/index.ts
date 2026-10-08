@@ -351,6 +351,7 @@ export interface ClusterCreate {
   ssh_keys?: string[];
   keyboard?: string | null;
   openshift?: OpenShiftOptions | null; // type 'openshift' (counts and sizes follow the topology)
+  kubeadm?: KubeadmOptions | null; // type 'kubeadm': MetalLB
 }
 
 export interface ClusterNode {
@@ -422,7 +423,13 @@ export interface MetalLBOptions {
   mode?: 'l2' | 'bgp'; // l2: pool in the group network, ARP; bgp: a /27 outside it, announced to the router
   addresses: number; // L2 pool size (2-64); BGP pools are a /27
   demo: boolean;
+  bfd?: boolean; // bgp: BFD on the router + a MetalLB BFDProfile (sub-second failover)
   pool?: string | null; // assigned: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
+}
+
+/** type 'kubeadm': MetalLB installed by the app */
+export interface KubeadmOptions {
+  metallb: MetalLBOptions;
 }
 
 export type OdfProfile = 'lab' | 'lean';
@@ -530,7 +537,10 @@ export interface MetalLBEndpoint {
 export interface MetalLBScenario {
   enabled: boolean;
   mode?: 'l2' | 'bgp' | string;
-  bgp_peers?: { node: string; ip?: string | null; state: string }[]; // bgp: each node's session with the router
+  bgp_peers?: { node: string; ip?: string | null; state: string; bfd?: string | null }[]; // bgp: each node's session with the router
+  bfd?: boolean; // bgp: BFD on the router (BGPPeer with a BFDProfile)
+  state?: string | null; // kubeadm: last apply (pending | installing | done | error)
+  message?: string | null;
   bgp_nexthops?: string[]; // bgp: nodes the router sends the service IP to (ECMP)
   pool?: string | null;
   service_ip?: string | null;
@@ -850,6 +860,31 @@ export interface BGPSpec {
   neighbors?: BGPNeighbor[];
   announce_ranges?: BGPAnnounceRange[];
   maximum_paths?: number;
+  bfd?: BFDSpec | null;
+}
+
+/** BFD on the router's BGP sessions: a dead peer is detected in detect_multiplier x interval */
+export interface BFDSpec {
+  enabled: boolean;
+  detect_multiplier: number;
+  receive_interval: number; // ms
+  transmit_interval: number; // ms
+}
+
+export interface BFDPeer {
+  peer: string;
+  name?: string | null;
+  status: string; // up | down | init | adm-down
+  uptime_seconds?: number | null;
+  downtime_seconds?: number | null;
+  diagnostic?: string | null;
+  detect_multiplier?: number | null;
+  receive_interval?: number | null;
+  transmit_interval?: number | null;
+  remote_receive_interval?: number | null;
+  remote_transmit_interval?: number | null;
+  remote_detect_multiplier?: number | null;
+  detect_ms?: number | null; // how long the router waits before declaring the peer down
 }
 
 export interface BGPSettings {
@@ -861,6 +896,7 @@ export interface BGPSettings {
   maximum_paths?: number | null;
   announce_ranges?: BGPAnnounceRange[] | null;
   neighbors?: BGPNeighbor[] | null;
+  bfd?: BFDSpec | null;
 }
 
 export interface BGPSession {
@@ -874,6 +910,7 @@ export interface BGPSession {
   prefixes_received?: number | null;
   dynamic: boolean;
   description?: string | null;
+  bfd_status?: string | null; // BFD session with that peer, null = no BFD
 }
 
 export interface BGPRoute {
@@ -898,6 +935,8 @@ export interface BGPStatus {
   router_error?: string | null;
   frr_version?: string | null;
   sessions: BGPSession[];
+  bfd?: BFDSpec | null;
+  bfd_peers?: BFDPeer[];
   routes: BGPRoute[];
 }
 
@@ -914,6 +953,7 @@ export interface TopologyMachine {
   fqdn?: string | null;
   state: string;
   bgp_state?: string | null;
+  bfd_state?: string | null; // BFD session with the router (up / down), when BFD is on
   bgp_prefixes: string[];
   l2_announces: string[];
 }

@@ -119,6 +119,20 @@ class BGPAnnounceRange(BaseModel):
         return _ipv4_net(v, "Announce range")
 
 
+class BFDSpec(BaseModel):
+    """BFD on the router's BGP sessions (FRR bfdd): a peer that stops answering is declared down after
+    detect_multiplier x the negotiated interval (default 3 x 200 ms = 0.6 s) instead of the BGP hold
+    time (30 s), and its routes are withdrawn at once. Peers must run BFD too (FRR `neighbor X bfd`,
+    MetalLB BFDProfile)."""
+    enabled: bool = True
+    detect_multiplier: int = Field(3, ge=2, le=255)
+    receive_interval: int = Field(200, ge=10, le=60000)    # ms
+    transmit_interval: int = Field(200, ge=10, le=60000)   # ms
+
+    def detect_ms(self) -> int:
+        return self.detect_multiplier * max(self.receive_interval, self.transmit_interval)
+
+
 class BGPSpec(BaseModel):
     """The router runs FRR (bgpd): every machine of the group network may open a BGP session to the
     router's LAN address (dynamic neighbors, `listen` + `peer_asn`), plus explicit `neighbors`.
@@ -131,6 +145,10 @@ class BGPSpec(BaseModel):
     neighbors: List[BGPNeighbor] = []
     announce_ranges: List[BGPAnnounceRange] = []
     maximum_paths: int = Field(8, ge=1, le=64)
+    bfd: Optional[BFDSpec] = None
+
+    def bfd_on(self) -> Optional[BFDSpec]:
+        return self.bfd if self.bfd is not None and self.bfd.enabled else None
 
     def check(self, cidr: str, wg_subnet: Optional[str]) -> None:
         net = ipaddress.IPv4Network(cidr)
@@ -817,6 +835,24 @@ class BGPSettings(BaseModel):
     maximum_paths: Optional[int] = Field(None, ge=1, le=64)
     announce_ranges: Optional[List[BGPAnnounceRange]] = None
     neighbors: Optional[List[BGPNeighbor]] = None
+    bfd: Optional[BFDSpec] = None
+
+
+class BFDPeer(BaseModel):
+    """A BFD session of the router (`show bfd peers json`)"""
+    peer: str
+    name: Optional[str] = None
+    status: str                         # up | down | init | adm-down
+    uptime_seconds: Optional[int] = None
+    downtime_seconds: Optional[int] = None
+    diagnostic: Optional[str] = None    # why it last went down, e.g. "control detection time expired"
+    detect_multiplier: Optional[int] = None
+    receive_interval: Optional[int] = None         # ms, ours
+    transmit_interval: Optional[int] = None
+    remote_receive_interval: Optional[int] = None  # ms, the peer's
+    remote_transmit_interval: Optional[int] = None
+    remote_detect_multiplier: Optional[int] = None
+    detect_ms: Optional[int] = None     # how long the router waits before declaring the peer down
 
 
 class BGPSession(BaseModel):
@@ -830,6 +866,7 @@ class BGPSession(BaseModel):
     prefixes_received: Optional[int] = None
     dynamic: bool = False               # accepted through the listen range
     description: Optional[str] = None
+    bfd_status: Optional[str] = None    # BFD session with that peer (up / down / init), None = no BFD
 
 
 class BGPNextHop(BaseModel):
@@ -862,6 +899,8 @@ class BGPStatus(BaseModel):
     frr_version: Optional[str] = None
     sessions: List[BGPSession] = []
     routes: List[BGPRoute] = []
+    bfd: Optional[BFDSpec] = None
+    bfd_peers: List[BFDPeer] = []
 
 
 # Topology view (GET /groups/{id}/topology): everything the diagram needs, live
@@ -879,6 +918,7 @@ class TopologyMachine(BaseModel):
     fqdn: Optional[str] = None
     state: str = "missing"
     bgp_state: Optional[str] = None  # its BGP session with the router, if any
+    bfd_state: Optional[str] = None  # its BFD session with the router (up / down), if BFD is on
     bgp_prefixes: List[str] = []      # prefixes the router routes to it (learned by BGP)
     l2_announces: List[str] = []      # service IPs it answers ARP for (MetalLB L2)
 

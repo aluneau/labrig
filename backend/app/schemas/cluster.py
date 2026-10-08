@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.openshift import OpenShiftOptions
+from app.schemas.openshift import MetalLBOptions, OpenShiftOptions
 
 # Accepted by the API; k3s and kubeadm are implemented (cluster_drivers.DRIVERS)
 CLUSTER_TYPES = ["k3s", "kubeadm", "openshift"]
@@ -14,6 +14,12 @@ class NodeResources(BaseModel):
     memory: int = Field(2048, ge=512)  # MiB
     vcpu: int = Field(2, ge=1, le=64)
     disk_size: int = Field(20, ge=5, le=2048)  # GiB
+
+
+class KubeadmOptions(BaseModel):
+    """type "kubeadm": MetalLB installed by the app (upstream manifests, FRR mode), same lab as OpenShift's:
+    pool from the group (l2) or a BGP announce range of the router (bgp, + BFD), hello demo"""
+    metallb: MetalLBOptions = MetalLBOptions()
 
 
 class ClusterCreate(BaseModel):
@@ -53,6 +59,8 @@ class ClusterCreate(BaseModel):
     # type "openshift": version, topology (sno / compact / ha), storage, operators, SR-IOV, MetalLB.
     # ctlplanes / workers / ctlplane / worker sizes follow the topology (workers: ha only).
     openshift: Optional[OpenShiftOptions] = None
+    # type "kubeadm": MetalLB (docs/bgp.md)
+    kubeadm: Optional[KubeadmOptions] = None
 
 
 class ClusterScale(BaseModel):
