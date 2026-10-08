@@ -404,6 +404,31 @@ class TemplateService:
         return {"group": group, "cluster": cluster, "guide": guide, "errors": errors}
 
     @staticmethod
+    def _guide_for(data: TemplateFile, values: Dict[str, Any], group: Dict[str, Any]) -> str:
+        """The guide for an edited spec: group / domain / ip:N follow the edited group"""
+        spec = GroupSpec.model_validate(group)
+        cidr_params = {p.name for p in data.params if p.type == "cidr"}
+        src = PLACEHOLDER.fullmatch(str(data.group.get("cidr") or "").strip())
+        scope = dict(values, group=spec.name, domain=spec.domain)
+        if src and src.group(1) in scope:
+            scope[src.group(1)] = spec.cidr
+
+        def lookup(k: str) -> Any:
+            if ":" in k:
+                base, n = k.split(":", 1)
+                if base == "ip":
+                    return _nth_ip(spec.cidr, int(n))
+                if base in cidr_params and scope.get(base) not in (None, "auto"):
+                    return _nth_ip(scope[base], int(n))
+            if k in scope:
+                return scope[k]
+            raise KeyError(k)
+        try:
+            return substitute(data.guide, lookup, values, conditions=False)
+        except TemplateError:
+            return data.guide
+
+    @staticmethod
     def _cluster_request(cluster: Dict[str, Any], group_id: Optional[int] = None) -> ClusterCreate:
         """The template's cluster block -> ClusterCreate. `image` (a cloud image name such as debian-13)
         is an extension: resolved to cloud_image_id at creation."""
@@ -457,6 +482,7 @@ class TemplateService:
                 result["yaml"] = edited
                 return result
             errors += self._validate(group, cluster)
+            guide = self._guide_for(data, values, group) if not errors else guide
         else:
             errors += doc["errors"]
         result.update(group=group, cluster=cluster, guide=guide)
@@ -689,7 +715,9 @@ class TemplateService:
         from app.services.group_service import group_service
         spec_model = GroupSpec.model_validate(group.spec)
         ref = spec_model.template
-        spec = group_service.export_yaml(group)["spec"]
+        # only what differs from the defaults (a readable file)
+        spec = GroupSpec.model_validate(group_service.export_yaml(group)["spec"]).model_dump(
+            mode="json", exclude_defaults=True)
         net = ipaddress.IPv4Network(spec["cidr"])
         old_name = spec["name"]
         spec.pop("template", None)
@@ -743,7 +771,7 @@ class TemplateService:
             "id": body.id, "title": body.title, "summary": body.summary or f"Saved from lab group {old_name}",
             "tags": tags, "requires": [], "resources": {}, "params": [
                 {"name": "case", "label": "Case number", "type": "string", "required": True,
-                 "pattern": "^[0-9A-Za-z-]{1,12}$"},
+                 "pattern": "^[0-9a-z][0-9a-z-]{0,11}$"},
                 {"name": "cidr", "label": "Group subnet", "type": "cidr", "default": "auto",
                  "help": "auto = the first free /24"},
             ],
@@ -899,7 +927,7 @@ def to_hcl(group: Dict[str, Any], cluster: Optional[Dict[str, Any]], template: O
             lines.append("    }")
         if m.user_data:
             lines.append("    user_data = <<-EOT")
-            lines += ["      " + ln.replace("${", "$${") for ln in m.user_data.splitlines()]
+            lines += ["      " + ln.replace("${", "$${").replace("%{", "%%{") for ln in m.user_data.splitlines()]
             lines.append("    EOT")
         lines.append("  }")
     for h in spec.dhcp_hosts:
