@@ -7,6 +7,8 @@
 #   scripts/setup.sh --no-boot       # start libvirt and the service now, but don't enable them at boot
 #                                    # (e.g. a gaming PC: sudo systemctl start vm-manager when needed)
 #   scripts/setup.sh --wg-ports 51820-51869   # UDP ports opened for lab WireGuard (WG_HOST_PORTS), none = skip
+#   scripts/setup.sh --no-auth       # no login (AUTH_ENABLED=false in backend/.env): trusted single-user host only
+#   scripts/setup.sh --auth          # turn the login back on (the default for new installs)
 #
 # Supported: Arch (and derivatives like CachyOS/Manjaro), Fedora, RHEL / AlmaLinux / Rocky / CentOS Stream,
 # Debian / Ubuntu. Run it as the user who will use VM Manager; it calls sudo when needed.
@@ -19,8 +21,9 @@ INSTALL_SERVICE=1
 AT_BOOT=1
 SERVICE_NAME="vm-manager"
 WG_PORTS="51820-51869"
+AUTH=""  # "" = keep the current setting (on by default), on, off
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) LISTEN="$2"; shift 2 ;;
@@ -28,6 +31,8 @@ while [ $# -gt 0 ]; do
     --no-service) INSTALL_SERVICE=0; shift ;;
     --no-boot) AT_BOOT=0; shift ;;
     --wg-ports) WG_PORTS="$2"; shift 2 ;;
+    --no-auth) AUTH=off; shift ;;
+    --auth) AUTH=on; shift ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
@@ -142,6 +147,46 @@ $SUDO sh -c 'command -v dhcp_release' >/dev/null 2>&1 || warn "dhcp_release not 
 # polkitd picks up rule changes by itself; restart it only if it isn't running
 systemctl is-active --quiet polkit 2>/dev/null || $SUDO systemctl start polkit 2>/dev/null || true
 ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules"
+
+# ---------------------------------------------------------------------------
+step "Login (Linux accounts through PAM)"
+# /etc/pam.d/vm-manager: the distro's normal password stack (pam_unix, SSSD…) + account checks.
+# Group vm-manager: its members (and wheel / sudo, AUTH_ADMIN_GROUPS) may log in as admins.
+PAM_FILE=/etc/pam.d/vm-manager
+if [ -f "$PAM_FILE" ] && ! grep -q "Installed by VM Manager" "$PAM_FILE"; then
+  ok "$PAM_FILE exists and is not ours: kept"
+else
+  if [ -f /etc/pam.d/system-auth ]; then      # EL, Fedora, Arch
+    pam_stack=$'auth     include system-auth\naccount  include system-auth'
+  elif [ -f /etc/pam.d/common-auth ]; then    # Debian, Ubuntu
+    pam_stack=$'@include common-auth\n@include common-account'
+  else
+    pam_stack=$'auth     required pam_unix.so\naccount  required pam_unix.so'
+  fi
+  printf '#%%PAM-1.0\n# Installed by VM Manager (scripts/setup.sh): password check of the web UI login (docs/auth.md)\n%s\n' \
+    "$pam_stack" | $SUDO tee "$PAM_FILE.new" >/dev/null
+  $SUDO chmod 0644 "$PAM_FILE.new" && $SUDO mv -f "$PAM_FILE.new" "$PAM_FILE"
+  if command -v restorecon >/dev/null 2>&1; then $SUDO restorecon "$PAM_FILE"; fi
+  ok "PAM service $PAM_FILE"
+fi
+getent group vm-manager >/dev/null || { $SUDO groupadd --system vm-manager && ok "created group vm-manager"; }
+ENV_FILE="$APP_DIR/backend/.env"
+set_env() {  # set_env KEY VALUE: replace or append in backend/.env (kept by updates, not in git)
+  if [ -f "$ENV_FILE" ] && grep -q "^$1=" "$ENV_FILE"; then as_user sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+  else printf '%s=%s\n' "$1" "$2" | as_user tee -a "$ENV_FILE" >/dev/null; fi
+}
+case "$AUTH" in
+  on)  set_env AUTH_ENABLED true ;;
+  off) set_env AUTH_ENABLED false ;;
+esac
+if [ -f "$ENV_FILE" ] && grep -qiE '^AUTH_ENABLED=(false|0|no|off)' "$ENV_FILE"; then
+  AUTH_STATE=off
+  warn "login DISABLED (AUTH_ENABLED=false in $ENV_FILE): anyone reaching port $PORT manages this host's VMs"
+  [ "$LISTEN" = 127.0.0.1 ] || warn "and the app listens on $LISTEN: use --auth unless this network is trusted"
+else
+  AUTH_STATE=on
+  ok "login with Linux accounts: $TARGET_USER, and members of groups vm-manager, wheel, sudo"
+fi
 
 # ---------------------------------------------------------------------------
 step "Default network"
@@ -296,5 +341,13 @@ if [ "$INSTALL_SERVICE" = 1 ]; then
   echo "  Logs: journalctl -u $SERVICE_NAME -f      Stop: sudo systemctl stop $SERVICE_NAME"
 else
   echo "  Start it with: HOST=$LISTEN PORT=$PORT ./run.sh"
+fi
+if [ "$AUTH_STATE" = on ]; then
+  echo "  Log in with your Linux account ($TARGET_USER) and its password."
+  echo "  Other people: sudo usermod -aG vm-manager <user>   (read-only access: AUTH_VIEWER_GROUPS in backend/.env)"
+  echo "  API token for scripts / OpenTofu (or create one in the UI: user menu > API tokens):"
+  echo "    (cd $APP_DIR/backend && venv/bin/python -m app.cli token create --user $TARGET_USER --name opentofu)"
+else
+  echo "  No login (AUTH_ENABLED=false): turn it on with scripts/setup.sh --auth"
 fi
 echo "  First steps: Storage > Cloud images > Download, then Virtual machines > Create VM."
