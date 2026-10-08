@@ -22,6 +22,7 @@ class AuthSession(Base):
 class ApiToken(Base):
     """Bearer token of a user (scripts, OpenTofu). Shown once at creation, stored hashed."""
     __tablename__ = "api_tokens"
+    __table_args__ = {"sqlite_autoincrement": True}  # ids in the audit log are never reused
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(255), nullable=False, index=True)
