@@ -652,6 +652,9 @@ class GroupService:
         given = new.router.model_fields_set
         if "egress" not in given:
             new.router.egress = old.router.egress.model_copy(deep=True)
+        else:  # a cluster's temporary exemptions (nodes installing packages) are the app's
+            new.router.egress.exempt = ([e for e in new.router.egress.exempt if not e.owner]
+                                        + [e.model_copy() for e in old.router.egress.exempt if e.owner])
         if "registry" not in given:
             new.router.registry = old.router.registry.model_copy(deep=True)
         new.router.registry.hostname = old.router.registry.hostname

@@ -106,6 +106,9 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const [sshKeys, setSshKeys] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // kubeadm air gap
+  const [disconnected, setDisconnected] = useState(false);
+  const [mirrorImages, setMirrorImages] = useState('');
   // OpenShift
   const [os, setOs] = useState<OsDraft>(defaultOsDraft);
   const patchOs = useCallback((p: Partial<OsDraft>) => setOs((cur) => ({ ...cur, ...p })), []);
@@ -176,6 +179,9 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       password: password || null,
       ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
       keyboard: defaultKeyboard(),
+      disconnected: type === 'kubeadm' && disconnected,
+      mirror_images: type === 'kubeadm' && disconnected
+        ? mirrorImages.split('\n').map((i) => i.trim()).filter(Boolean) : [],
     };
     setBusy(true);
     setError(null);
@@ -317,6 +323,35 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
           </GridItem>
           </>}
         </Grid>
+
+        {type === 'kubeadm' && (
+          <FormGroup label="Air gap" fieldId="cl-disconnected">
+            <Checkbox id="cl-disconnected" isChecked={disconnected} onChange={(_e, v) => setDisconnected(v)}
+              label="Disconnected (mirror registry, no internet for the nodes)"
+              description={<>
+                The group router becomes the bastion: it runs a mirror registry
+                (registry.{pickedGroup ? pickedGroup.domain : domain}:8443, Quay; {autoGroup
+                  ? 'the router is created with 4 GiB RAM and a 60 GiB thin disk'
+                  : 'the router gets 4 GiB RAM (restarted once) and a 60 GiB thin disk if it has no registry yet'})
+                and copies the images the cluster needs (kubeadm&apos;s control plane images, Flannel, nginx:alpine
+                for a first test). The nodes pull through containerd mirrors (registry.k8s.io, docker.io, ghcr.io,
+                quay.io) and the group&apos;s egress is <b>blocked</b>: an image that isn&apos;t mirrored ends in
+                ImagePullBackOff, as at the customer. Packages are installed at first boot through a temporary
+                per-node exemption (the customer&apos;s golden image), removed before kubeadm runs. First time: 10-30 min
+                more (mirror-registry download). Create only.
+              </>} />
+            {disconnected && (
+              <FormGroup label="Extra images to mirror (one per line)" fieldId="cl-mirror-images" style={{ marginTop: 8 }}>
+                <TextArea id="cl-mirror-images" rows={2} value={mirrorImages} resizeOrientation="vertical"
+                  placeholder="docker.io/library/redis:7-alpine"
+                  onChange={(_e, v) => setMirrorImages(v)} />
+                <FormHelperText><HelperText><HelperTextItem>
+                  More can be mirrored later from the cluster page.
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            )}
+          </FormGroup>
+        )}
 
         {isOpenShift && (
           <>

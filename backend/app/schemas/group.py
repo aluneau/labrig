@@ -271,13 +271,27 @@ class VLANSpec(BaseModel):
     cidr: str
 
 
+class EgressExempt(BaseModel):
+    """A group address (or CIDR) that keeps going out when egress is blocked: e.g. a jump host, or a
+    disconnected cluster node installing its packages at first boot (owner "cluster:<name>", removed
+    by the app once the packages are in: it stands for the customer's golden image / package repo)."""
+    source: str
+    owner: Optional[str] = None
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, v: str) -> str:
+        return _ipv4_net(v, "Egress exempt source")
+
+
 class EgressSpec(BaseModel):
     """What the group's machines may reach outside the lab (forwarded traffic through the router).
     blocked: everything from the group network to the uplink side is refused except `allow` (e.g. a
-    customer proxy); the router itself (DNS forwarding, NTP, registry mirroring), WireGuard devices,
-    load balancers and BGP-announced addresses keep working. Applied live."""
+    customer proxy) and what `exempt` sources send; the router itself (DNS forwarding, NTP, registry
+    mirroring), WireGuard devices, load balancers and BGP-announced addresses keep working. Applied live."""
     mode: Literal["open", "blocked"] = "open"
     allow: List[str] = []  # CIDRs / addresses still reachable when blocked
+    exempt: List[EgressExempt] = []  # group sources still allowed out when blocked
 
     @field_validator("allow")
     @classmethod

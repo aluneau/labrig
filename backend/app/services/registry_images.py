@@ -231,6 +231,74 @@ def _copy_task(db: Session, task: Task, group_id: int, req_dict: Dict[str, Any],
     return {"image": dest, "uplink_image": f"{rs._hosts(spec)[1]}/{repo}:{tag}", "blobs": blobs}
 
 
+def copy_list(group: Group, pairs: List[Tuple[str, str]], progress: Any, label: str) -> List[str]:
+    """Blocking: `skopeo copy --all` of each (source, "repo:tag") pair on the router (detached unit
+    vmm-copy-<id>, polled). Images already in the registry are cheap (skopeo skips existing blobs).
+    `progress` = registry_service._Progress (cancellation + percent). Records the copies as added images
+    (source `label`). Returns the sources that failed (an empty list = all copied)."""
+    spec = _ready_spec(group)
+    rtr = rs._rtr(group)
+    host = rs._hosts(spec)[0]
+    copy_id = uuid.uuid4().hex[:12]
+    run_dir = f"{rr.DATA}/copies/{copy_id}"
+    auths = dict(rs._pull_auths())
+    auths.update(rs._auths(spec, group.name)["auths"])
+    from app.services.group_service import group_service
+    job = "".join(f"{src} {host}/{dest}\n" for src, dest in pairs)
+    group_service._agent_put(rtr, f"{run_dir}/job", job.encode())
+    result = rs._exec(rtr, f"umask 077 && mkdir -p /run/vmm-copy-{copy_id} && cat > /run/vmm-copy-{copy_id}/auth.json",
+                      input_data=json.dumps({"auths": auths}).encode())
+    if result["exitcode"] != 0:
+        raise RuntimeError(f"Could not write the copy credentials on the router: {result['stderr'].strip()}")
+    result = rs._exec(rtr, f"systemd-run --unit=vmm-copy-{copy_id} --collect /bin/bash {rr.SCRIPT} copylist {copy_id}")
+    if result["exitcode"] != 0:
+        rs._exec(rtr, f"rm -rf /run/vmm-copy-{copy_id}")
+        raise RuntimeError(f"Could not start skopeo on the router: {result['stderr'].strip()}")
+    deadline = time.monotonic() + COPY_TIMEOUT
+    lines: List[str] = []
+    while True:
+        try:
+            progress.check()
+        except RuntimeError:
+            rs._exec(rtr, f"systemctl stop vmm-copy-{copy_id} 2>/dev/null; true")
+            raise
+        try:
+            out = rs._exec(rtr, f"systemctl is-active -q vmm-copy-{copy_id} && echo ACTIVE; "
+                                f"echo \"RC=$(cat {run_dir}/rc 2>/dev/null)\"; "
+                                f"grep -a '^IMAGE ' {run_dir}/log 2>/dev/null; "
+                                f"tail -n 3 {run_dir}/log 2>/dev/null | grep -av '^IMAGE '", timeout=30)["stdout"]
+        except (libvirt.libvirtError, TimeoutError):
+            time.sleep(rs.POLL)
+            continue
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        done = [ln for ln in lines if ln.startswith("IMAGE ")]
+        current = pairs[len(done)][0] if len(done) < len(pairs) else ""
+        last = next((ln for ln in reversed(lines) if not ln.startswith(("RC=", "ACTIVE", "IMAGE "))), "")
+        progress(len(done) / max(len(pairs), 1),
+                 f"Mirroring images: {len(done)} / {len(pairs)}" + (f", {current}" if current else "")
+                 + (f" ({last.strip()[:80]})" if last and current else ""))
+        if not out.startswith("ACTIVE"):
+            rc = next((ln[3:] for ln in lines if ln.startswith("RC=")), "") or "1"
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError("skopeo copies still running after 2 h")
+        time.sleep(3)
+    rs._exec(rtr, f"rm -rf /run/vmm-copy-{copy_id}")
+    results = {}
+    for ln in lines:
+        parts = ln.split()
+        if ln.startswith("IMAGE ") and len(parts) >= 4:
+            results[parts[3]] = parts[2]
+    failed = [src for src, _ in pairs if results.get(src) != "0"]
+    if rc not in ("0", "2") and not results:
+        tail = "\n".join(lines[-8:])
+        raise RuntimeError(f"skopeo failed on the router ({rc}): {tail[-1500:]}")
+    _record_added(group.name, [dest for src, dest in pairs if src not in failed], label)
+    if not failed:
+        rs._exec(rtr, f"rm -rf {run_dir}")
+    return failed
+
+
 # ------------------------------------------------------------------ upload (archive pushed from the host)
 
 def upload_dir(group: Group) -> Path:

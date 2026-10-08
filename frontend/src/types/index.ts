@@ -351,6 +351,26 @@ export interface ClusterCreate {
   ssh_keys?: string[];
   keyboard?: string | null;
   openshift?: OpenShiftOptions | null; // type 'openshift' (counts and sizes follow the topology)
+  disconnected?: boolean; // kubeadm, create only: mirror registry on the router, egress blocked
+  mirror_images?: string[]; // disconnected: extra images mirrored at create
+}
+
+export interface MirroredImage {
+  source: string; // upstream reference, e.g. docker.io/library/nginx:alpine
+  mirror: string; // registry.<domain>:8443/docker/library/nginx:alpine
+}
+
+export interface ClusterRegistry {
+  url: string;
+  uplink_url?: string | null;
+  enabled: boolean;
+  egress: 'open' | 'blocked';
+  // kubeadm disconnected
+  images?: MirroredImage[];
+  failed?: string[];
+  kube_version?: string | null;
+  demo_image?: string | null;
+  exempt?: string[]; // node addresses still allowed out (package install in progress)
 }
 
 export interface ClusterNode {
@@ -387,8 +407,8 @@ export interface Cluster {
   task_progress?: number | null;
   has_kubeconfig: boolean;
   console_url?: string | null; // OpenShift web console
-  // OpenShift disconnected: the group's mirror registry and egress state
-  registry?: { url: string; uplink_url?: string | null; enabled: boolean; egress: 'open' | 'blocked' } | null;
+  // Disconnected (OpenShift / kubeadm): the group's mirror registry and egress state
+  registry?: ClusterRegistry | null;
   ctlplanes: number;
   workers: number;
   spec?: Record<string, any> | null;
@@ -734,6 +754,7 @@ export interface RouterSpec {
 export interface EgressSpec {
   mode: 'open' | 'blocked';
   allow?: string[]; // CIDRs / addresses still reachable when blocked
+  exempt?: { source: string; owner?: string | null }[]; // group sources still allowed out when blocked
 }
 
 /** Mirror registry (mirror-registry / Quay) on the group router */

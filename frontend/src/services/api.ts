@@ -222,6 +222,8 @@ export const clusterApi = {
   removeNode: (id: number, node: string) => del<Task>(`/clusters/${id}/nodes/${encodeURIComponent(node)}`),
   kubectl: (id: number, view: 'nodes' | 'pods') => request<ClusterCommandOutput>(`/clusters/${id}/kubectl/${view}`),
   /** Plain link: the backend sends it as an attachment named <cluster>-kubeconfig.yaml */
+  /** Disconnected kubeadm: copy more images into the group's mirror registry (task) */
+  mirrorImages: (id: number, images: string[]) => post<Task>(`/clusters/${id}/mirror`, { images }),
   kubeconfigUrl: (id: number) => `${API_BASE}/api/v1/clusters/${id}/kubeconfig`,
   // OpenShift
   installStatus: (id: number) => request<InstallStatus>(`/clusters/${id}/openshift/install-status`),

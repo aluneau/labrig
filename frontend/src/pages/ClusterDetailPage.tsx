@@ -46,6 +46,7 @@ import { ConsoleAccess, InstallPanel } from '../components/clusters/OpenShiftIns
 import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
 import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
+import { MirroredImages } from '../components/clusters/MirroredImages';
 
 const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
 const STORAGE_NAMES: Record<string, string> = { none: 'none', lvms: 'LVM Storage', odf: 'OpenShift Data Foundation' };
@@ -228,7 +229,7 @@ export const ClusterDetailPage: React.FC = () => {
             <Title headingLevel="h1">{cluster.name}</Title>
             <div style={{ marginTop: 8 }}>
               <ClusterStatus cluster={cluster} />
-              {isOpenShift && os.disconnected && (
+              {((isOpenShift && os.disconnected) || (!isOpenShift && cluster.spec?.disconnected)) && (
                 <Label id="cluster-disconnected" color="purple" isCompact style={{ marginLeft: 8 }}>disconnected</Label>
               )}
             </div>
@@ -409,6 +410,9 @@ export const ClusterDetailPage: React.FC = () => {
               </CardBody>
             </Card>
           </StackItem>
+          {!isOpenShift && cluster.spec?.disconnected && cluster.registry && (
+            <StackItem><MirroredImages cluster={cluster} onChanged={reload} /></StackItem>
+          )}
           {isOpenShift && install.status?.phase === 'ready' && (
             <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>
           )}

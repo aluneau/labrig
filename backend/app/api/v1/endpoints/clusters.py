@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
+from app.schemas.cluster import ClusterMirrorRequest
 from app.services.cluster_service import cluster_service
 
 router = APIRouter()
@@ -65,6 +66,13 @@ def add_workers(cluster_id: int, data: ClusterScale, db: Session = Depends(get_d
 def remove_node(cluster_id: int, node_name: str, db: Session = Depends(get_db)):
     """Drain and delete a worker from Kubernetes, then delete its VM"""
     return _bad_request(cluster_service.remove_node, db, _get(db, cluster_id), node_name)
+
+
+@router.post("/{cluster_id}/mirror", response_model=Task)
+def mirror_images(cluster_id: int, data: ClusterMirrorRequest, db: Session = Depends(get_db)):
+    """Disconnected kubeadm cluster: copy more images into the group's mirror registry (task). The list of
+    mirrored images is the cluster's `registry.images`."""
+    return _bad_request(cluster_service.mirror_images, db, _get(db, cluster_id), data.images)
 
 
 @router.get("/{cluster_id}/kubeconfig", response_class=PlainTextResponse)
