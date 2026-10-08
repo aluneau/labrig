@@ -55,7 +55,6 @@ def disk_info(disk: ET.Element) -> Dict[str, Any]:
         "format": driver.get("type") if driver is not None else None,
         "boot_order": int(boot.get("order")) if boot is not None and boot.get("order") else None,
         "alias": alias.get("name") if alias is not None else None,
-        "vlan": int(tag.get("id")) if tag is not None and (tag.get("id") or "").isdigit() else None,
     }
 
 

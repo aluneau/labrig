@@ -507,8 +507,9 @@ class SriovService:
             if num_vfs != pf["num_vfs"]:
                 busy = [vf["pci"] for vf in pf["vfs"] if vf["in_use"]]
                 if busy:
-                    raise ValueError(f"Can't change the VF count of {name}: VF {', '.join(busy)} is passed through "
-                                     f"to a running VM (stop the VMs using this pool first)")
+                    raise ValueError(f"Can't change the VF count of {name}: "
+                                     + (f"VF {busy[0]} is" if len(busy) == 1 else f"VFs {', '.join(busy)} are")
+                                     + " passed through to running VMs (stop the VMs using its pools first)")
                 run_helper(["sriov-set-numvfs", name, str(num_vfs)], timeout=120)
                 logger.info(f"Set {num_vfs} VFs on {name}")
         if trust is not None or spoofchk is not None:
@@ -545,10 +546,17 @@ class SriovService:
                              f"(SR-IOV) first")
         free = [vf for vf in pf["vfs"] if not vf["in_use"]]
         if len(free) < needed:
-            raise ValueError(f"No free VF in pool '{network}': {len(pf['vfs']) - len(free)} of {pf_name}'s "
-                             f"{len(pf['vfs'])} VFs are already passed through to running VMs"
-                             + (f" and this needs {needed}" if needed > 1 else "")
-                             + ". Raise the VF count on the Host page, or stop a VM using the pool")
+            used = len(pf["vfs"]) - len(free)
+            if not free:
+                what = f"No free VF in pool '{network}': all {len(pf['vfs'])} VFs of {pf_name} are"
+            else:
+                what = (f"Not enough free VFs in pool '{network}': this needs {needed}, {pf_name} has "
+                        f"{len(pf['vfs'])} VFs and {used}" + (" is" if used == 1 else " are"))
+            raise ValueError(what + " already passed through to running VMs. Raise the VF count on the Host "
+                                    "page (SR-IOV), or stop a VM using the pool"
+                             if used else
+                             f"Not enough VFs in pool '{network}': this needs {needed}, {pf_name} has only "
+                             f"{len(pf['vfs'])}. Raise the VF count on the Host page (SR-IOV)")
         usable = [vf for vf in free if not vf["group_others"]]
         if len(usable) < needed:
             vf = next(vf for vf in free if vf["group_others"])

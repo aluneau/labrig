@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -30,6 +31,7 @@ type nicModel struct {
 	MAC       types.String `tfsdk:"mac"`
 	LinkState types.String `tfsdk:"link_state"`
 	VF        types.Bool   `tfsdk:"vf"`
+	VLAN      types.Int64  `tfsdk:"vlan"`
 }
 
 func NewNicResource() resource.Resource { return &nicResource{} }
@@ -55,6 +57,8 @@ func (r *nicResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Description: "Fixed MAC; generated if unset."},
 			"link_state": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("up"),
 				Description: "up, or down (cable unplugged). Changed in place, live."},
+			"vlan": schema.Int64Attribute{Optional: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				Description: "SR-IOV VF pool networks only: VLAN tag the PF applies to this VF (overrides the pool's). Changing it recreates the NIC."},
 			"vf": schema.BoolAttribute{Computed: true, PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}, Description: "True when the NIC is an SR-IOV VF passed through from the host."},
 		},
 	}
@@ -79,6 +83,9 @@ func (r *nicResource) Create(ctx context.Context, req resource.CreateRequest, re
 		"model":      plan.Model.ValueString(),
 		"mac":        strPtr(plan.MAC),
 		"link_state": plan.LinkState.ValueString(),
+	}
+	if !plan.VLAN.IsNull() && !plan.VLAN.IsUnknown() {
+		body["vlan"] = plan.VLAN.ValueInt64()
 	}
 	var change apiDeviceChange
 	if err := r.client.Do(ctx, "POST", "/vms/"+plan.VMID.ValueString()+"/nics", body, &change); err != nil {
@@ -119,6 +126,11 @@ func (r *nicResource) refresh(ctx context.Context, m *nicModel, d diags) bool {
 		}
 		m.Network = strOrNull(nic.Network)
 		m.VF = types.BoolValue(nic.VF)
+		if nic.VLAN != nil {
+			m.VLAN = types.Int64Value(*nic.VLAN)
+		} else {
+			m.VLAN = types.Int64Null()
+		}
 		if nic.Model != nil {
 			m.Model = types.StringValue(*nic.Model)
 		} else if m.Model.IsNull() || m.Model.IsUnknown() {
@@ -154,7 +166,7 @@ func (r *nicResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	plan.ID, plan.MAC, plan.VF = state.ID, state.MAC, state.VF
+	plan.ID, plan.MAC, plan.VF, plan.VLAN = state.ID, state.MAC, state.VF, state.VLAN
 	body := map[string]any{}
 	if !plan.Network.Equal(state.Network) {
 		body["network"] = plan.Network.ValueString()
