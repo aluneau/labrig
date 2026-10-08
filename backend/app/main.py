@@ -19,7 +19,8 @@ from app.services.daemon_service import daemon_service, DaemonError
 from app.services.helper_service import HelperError
 from app.services.task_service import task_service
 from app.services.cluster_service import cluster_service
-from app.services import wireguard_service
+from app.services import wireguard_service, auth_service
+from app.auth_middleware import AuthMiddleware
 from app.services.wireguard_relay import relay
 from fastapi.concurrency import run_in_threadpool
 
@@ -33,6 +34,7 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
     init_db()
+    auth_service.log_startup()
     with SessionLocal() as db:
         task_service.mark_interrupted(db)
         # Clusters whose task died with the previous process: resume (OpenShift install) or report
@@ -79,6 +81,10 @@ app = FastAPI(
     version=settings.APP_VERSION,
     lifespan=lifespan,
 )
+
+# Every /api request / WebSocket needs a session cookie or an API token (docs/auth.md).
+# Added before CORS so CORS stays outermost (preflights and error responses keep their CORS headers).
+app.add_middleware(AuthMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

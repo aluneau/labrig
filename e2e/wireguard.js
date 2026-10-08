@@ -12,7 +12,7 @@
 //   ENDPOINT   the app host's address as the client reaches it (default: the server's default endpoint)
 // Creates and deletes the group GROUP (default e2e-wg-lab, VMs e2e-wg-lab-*). Needs ready Debian 13 and
 // AlmaLinux 9/10 cloud images. Budget: router 512 MiB + 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 

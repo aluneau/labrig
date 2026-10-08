@@ -5,7 +5,7 @@
 // kubectl still answers through haproxy), optional stop/start (STOPSTART=1), delete (cluster + group).
 // Creates and deletes real VMs + a group named e2e-e-kubeadm-ui (CLUSTER_NAME). ~5 GB RAM with 1+1.
 //   env: IMAGE ("debian 13" | "almalinux 9" | "almalinux 10"), CTLPLANES (1|3), WORKERS (1), KUBECTL
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

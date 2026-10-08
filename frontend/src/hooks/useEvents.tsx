@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { API_BASE } from '../services/api';
+import { API_BASE, UNAUTHORIZED_EVENT, authApi } from '../services/api';
 
 /** Event pushed by the backend on /api/v1/events (Server-Sent Events) */
 export interface LiveEvent {
@@ -31,19 +31,37 @@ export const EventsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const source = new EventSource(`${API_BASE}/api/v1/events`);
-    source.onopen = () => setConnected(true);
-    source.onerror = () => setConnected(false);
-    source.onmessage = (msg) => {
-      let event: LiveEvent;
-      try {
-        event = JSON.parse(msg.data);
-      } catch {
-        return;
-      }
-      handlers.current.forEach((handler) => handler(event));
+    let source: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let closed = false;
+    const open = () => {
+      source = new EventSource(`${API_BASE}/api/v1/events`);
+      source.onopen = () => setConnected(true);
+      source.onerror = () => {
+        setConnected(false);
+        // Network errors reconnect by themselves; an HTTP error (401: session expired) closes the source
+        if (source?.readyState !== EventSource.CLOSED || closed) return;
+        authApi.status().then((s) => {
+          if (s.enabled && !s.user) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+        }).catch(() => {});
+        retry = setTimeout(() => { if (!closed) open(); }, 5000);
+      };
+      source.onmessage = (msg) => {
+        let event: LiveEvent;
+        try {
+          event = JSON.parse(msg.data);
+        } catch {
+          return;
+        }
+        handlers.current.forEach((handler) => handler(event));
+      };
     };
-    return () => source.close();
+    open();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      source?.close();
+    };
   }, []);
 
   const value = useRef<EventsContextValue>({

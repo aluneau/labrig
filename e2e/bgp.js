@@ -14,7 +14,7 @@
 // Env: BASE_URL, CHROME_PATH, GROUP (default e2e-bgp), CIDR (10.42.73.0/24), CLIENT_VM (e2e-bgp-client),
 // ENDPOINT (host address as the client reaches it, default 192.168.122.1 = the default network's gateway),
 // REUSE=1 (group already exists and runs), KEEP=1. Budget: router 512 MiB + 3 x 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

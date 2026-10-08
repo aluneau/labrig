@@ -3,7 +3,7 @@
 // (what the user sees, with CSS scaling and anything layered on top). Several viewports / pixel ratios.
 // Creates (and deletes) e2e-f-console (Debian 13 cloud image, text console 1280x800) and e2e-f-console-iso
 // (netboot.xyz ISO: coloured VGA text mode 720x400), and the ISO e2e-f-netboot.iso if missing.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');

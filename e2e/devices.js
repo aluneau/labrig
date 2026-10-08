@@ -1,7 +1,7 @@
 // VM devices: hot-add / resize / detach a disk, insert an ISO, boot once from it, eject, boot order.
 // Creates (and deletes) the VM e2e-b-devices and the ISO e2e-b-netboot.iso (kept if it already existed).
 // Checks inside the guest over SSH (key generated on the fly), the console with screenshots.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

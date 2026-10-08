@@ -1167,3 +1167,34 @@ export interface SriovStatus {
   iommu: { enabled: boolean; groups: number; message?: string | null };
   pfs: SriovPF[];
 }
+
+// Authentication (backend schemas/auth.py)
+export type AuthRole = 'admin' | 'viewer';
+
+export interface AuthUser {
+  name: string;
+  role: AuthRole;
+  via: 'session' | 'token' | 'disabled';
+}
+
+export interface AuthStatus {
+  enabled: boolean;
+  user: AuthUser | null;
+  admin_groups: string[];
+  viewer_groups: string[];
+}
+
+export interface ApiToken {
+  id: number;
+  username: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+}
+
+export interface ApiTokenCreated extends ApiToken {
+  token: string;
+}

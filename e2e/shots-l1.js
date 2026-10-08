@@ -1,6 +1,6 @@
 // Screenshots of a nested host's SR-IOV views (Host card, VF pool network form, VM with a VF NIC).
 // BASE_URL = that host's app (e.g. an SSH tunnel), VM_ID = a VM with a VF NIC. Read-only: changes nothing.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const path = require('path');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

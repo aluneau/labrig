@@ -3,7 +3,7 @@
 // and a DNS record added live, and reaches the internet; stop / start the group; delete it.
 // Creates and deletes the group GROUP (default e2e-c-ui, VMs e2e-c-ui-*). Needs ready Debian 13 and
 // AlmaLinux 9/10 cloud images. Budget: router 1 GiB + 2 x 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

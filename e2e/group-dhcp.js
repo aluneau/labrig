@@ -6,7 +6,7 @@
 // current lease too". Finally the VM is stopped and its new dynamic lease released from its lease row.
 // Creates and deletes GROUP (default e2e-i-dhcp, VMs e2e-i-dhcp-*) and the VM OTHER (default e2e-i-other).
 // Needs ready Debian 13 and AlmaLinux 9/10 cloud images. Budget: 3 x 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

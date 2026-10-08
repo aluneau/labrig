@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import List
+from typing import List, Optional
 
 from app.config import settings
 
@@ -17,7 +17,7 @@ SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 SETUP_HINT = "re-run scripts/setup.sh to install it"
 
 # helper exit codes -> HTTP status
-_STATUS = {2: 400, 3: 501, 4: 404, 5: 500}
+_STATUS = {2: 400, 3: 501, 4: 404, 5: 500, 6: 401}
 
 
 class HelperError(Exception):
@@ -27,8 +27,8 @@ class HelperError(Exception):
         self.detail = detail
 
 
-def run_helper(args: List[str], timeout: int = 30) -> str:
-    """Run `helper <args>` as root and return its stdout"""
+def run_helper(args: List[str], timeout: int = 30, input: Optional[str] = None) -> str:
+    """Run `helper <args>` as root and return its stdout (`input`: written to its stdin, e.g. a password)"""
     if not os.path.isfile(settings.HELPER_PATH):
         raise HelperError(501, f"The privileged helper {settings.HELPER_PATH} is not installed: {SETUP_HINT}")
     if os.geteuid() == 0:
@@ -39,7 +39,10 @@ def run_helper(args: List[str], timeout: int = 30) -> str:
             raise HelperError(501, f"pkexec is not installed (polkit): {SETUP_HINT}")
         cmd = [pkexec, "--disable-internal-agent", settings.HELPER_PATH, *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        if input is None:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input)
     except subprocess.TimeoutExpired:
         raise HelperError(504, f"The privileged helper timed out ({' '.join(args[:1])})")
     if result.returncode == 0:
@@ -48,7 +51,8 @@ def run_helper(args: List[str], timeout: int = 30) -> str:
     message = err[-1] if err else f"exit code {result.returncode}"
     if message.startswith("error: "):
         message = message[len("error: "):]
-    logger.warning(f"helper {' '.join(args)} failed ({result.returncode}): {message}")
+    log = logger.info if result.returncode == 6 else logger.warning  # 6 = denied (e.g. wrong password)
+    log(f"helper {' '.join(args)} failed ({result.returncode}): {message}")
     if result.returncode in (126, 127):  # pkexec: not authorized / authentication failed
         raise HelperError(403, f"Not allowed to run the privileged helper ({message}). The polkit rule for "
                                f"org.vmmanager.helper may be missing: {SETUP_HINT}. The app's user must be in "

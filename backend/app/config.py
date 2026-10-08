@@ -63,8 +63,29 @@ class Settings(BaseSettings):
     # set to 0.0.0.0 to reach them from the LAN (they have no password).
     VNC_LISTEN: str = "127.0.0.1"
 
-    # CORS
+    # CORS (also the extra origins accepted on cookie-authenticated WebSockets / writes, e.g. the dev UI)
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+
+    # Authentication (docs/auth.md). Users = the host's Linux accounts, checked through PAM.
+    # false: no login at all (everyone is admin): only on a trusted machine / loopback.
+    AUTH_ENABLED: bool = True
+    # PAM service: /etc/pam.d/vm-manager (installed by setup.sh). If that file is missing, the app
+    # falls back to system-auth (EL, Arch) or common-auth (Debian) and logs a warning.
+    AUTH_PAM_SERVICE: str = "vm-manager"
+    # Tests only: run the PAM stack from this directory (pam_start_confdir, Linux-PAM >= 1.4)
+    AUTH_PAM_CONFDIR: str = ""
+    # Users other than the app's own account are checked by the root helper (pam_unix can't
+    # check another local user's password from a non-root process). false = in-process only.
+    AUTH_PAM_HELPER: bool = True
+    # Linux groups (comma-separated): members of AUTH_ADMIN_GROUPS manage everything, members of
+    # AUTH_VIEWER_GROUPS get read-only access. The account the app runs as is always admin.
+    AUTH_ADMIN_GROUPS: str = "vm-manager,wheel,sudo"
+    AUTH_VIEWER_GROUPS: str = ""
+    # Browser sessions: idle expiry (extended while used), capped at AUTH_SESSION_MAX_DAYS
+    AUTH_SESSION_HOURS: float = 12
+    AUTH_SESSION_MAX_DAYS: float = 7
+    # Secure flag on the session cookie: auto = when the request came over https
+    AUTH_COOKIE_SECURE: str = "auto"
 
 
 settings = Settings()
