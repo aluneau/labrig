@@ -195,10 +195,19 @@ def client_allowed_ips(spec: GroupSpec) -> List[str]:
     nets = [spec.cidr, wg.subnet]
     if spec.router.uplink_ip:
         nets.append(f"{spec.router.uplink_ip}/32")
+    v6 = spec.ipv6_prefix()
+    if v6:  # dual stack: the group /64 and the IPv6 tunnel
+        nets += [v6] + ([wg.subnet6] if wg.subnet6 else [])
     bgp = spec.router.bgp
     if bgp is not None and bgp.enabled:
-        nets += [r.prefix for r in bgp.announce_ranges]
+        nets += [r.prefix for r in bgp.announce_ranges if v6 or ":" not in r.prefix]
     return nets
+
+
+def peer_ip6(spec: GroupSpec, peer: WireGuardPeer) -> Optional[str]:
+    """The device's IPv6 tunnel address (groups with IPv6)"""
+    wg = spec.router.wireguard
+    return wg.ip6_of(peer.ip) if spec.ipv6_prefix() and wg is not None and wg.subnet6 else None
 
 
 def client_config(spec: GroupSpec, peer: WireGuardPeer, endpoint_host: str,
@@ -212,7 +221,7 @@ def client_config(spec: GroupSpec, peer: WireGuardPeer, endpoint_host: str,
         "[Interface]",
         f"PrivateKey = {private_key}" if private_key else
         f"# PrivateKey = <the private key of {peer.public_key}: add it here>",
-        f"Address = {peer.ip}/32",
+        f"Address = {', '.join([f'{peer.ip}/32'] + [f'{a}/128' for a in [peer_ip6(spec, peer)] if a])}",
         # wg-quick and NetworkManager treat a non-address DNS entry as a search domain
         f"DNS = {wg.router_ip()}, {spec.domain}",
         "",

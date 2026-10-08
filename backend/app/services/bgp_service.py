@@ -43,7 +43,8 @@ def used_networks(db: Session, group_id: Optional[int], name: Optional[str],
         if (router.get("wireguard") or {}).get("subnet"):
             used.append(ipaddress.IPv4Network(router["wireguard"]["subnet"]))
         for r in (_bgp_of(g.spec) or {}).get("announce_ranges") or []:
-            used.append(ipaddress.IPv4Network(r["prefix"]))
+            if ":" not in r["prefix"]:  # IPv6 ranges: ipv6_service
+                used.append(ipaddress.IPv4Network(r["prefix"]))
     return used
 
 
@@ -66,12 +67,12 @@ def assign(db: Session, spec: GroupSpec, old: Optional[BGPSpec], group_id: Optio
     wg = spec.router.wireguard
     if wg is not None and wg.subnet:
         used.append(ipaddress.IPv4Network(wg.subnet))
-    if not bgp.announce_ranges and (old is None or not old.enabled) and bgp.enabled:
+    if not [r for r in bgp.announce_ranges if ":" not in r.prefix] and (old is None or not old.enabled) and bgp.enabled:
         bgp.announce_ranges.append(BGPAnnounceRange(prefix=free_range(used + [ipaddress.IPv4Network(spec.cidr)]),
                                                     name="lab"))
     old_prefixes = {r.prefix for r in (old.announce_ranges if old else [])}
     for r in bgp.announce_ranges:
-        if r.prefix in old_prefixes:
+        if r.prefix in old_prefixes or ":" in r.prefix:  # IPv6 ranges are checked by ipv6_service
             continue
         clash = next((u for u in used if ipaddress.IPv4Network(r.prefix).overlaps(u)), None)
         if clash is not None:
@@ -85,17 +86,32 @@ def _uptime(peer: Dict[str, Any]) -> Optional[int]:
     return int(ms) // 1000 if isinstance(ms, (int, float)) and ms else None
 
 
+def _addr_key(value: str) -> Tuple[int, int]:
+    try:
+        addr = ipaddress.ip_address(value)
+        return addr.version, int(addr)
+    except ValueError:
+        return 9, 0
+
+
 def parse_summary(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """`show bgp summary json` -> sessions"""
-    af = data.get("ipv4Unicast") or data.get("ipv4") or {}
-    if not af and "peers" in data:
-        af = data
+    """`show bgp summary json` -> sessions (IPv4 unicast, then IPv6 unicast: MP-BGP, docs/ipv6.md)"""
+    families = [("ipv4", data.get("ipv4Unicast") or data.get("ipv4") or {}),
+                ("ipv6", data.get("ipv6Unicast") or data.get("ipv6") or {})]
+    if not families[0][1] and not families[1][1] and "peers" in data:
+        families = [("ipv4", data)]
     sessions = []
-    for ip, p in sorted((af.get("peers") or {}).items(), key=lambda kv: ipaddress.IPv4Address(kv[0])
-                        if _is_ipv4(kv[0]) else ipaddress.IPv4Address("255.255.255.255")):
+    for afi, af in families:
+        sessions += _sessions(afi, af)
+    return sessions
+
+
+def _sessions(afi: str, af: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sessions = []
+    for ip, p in sorted((af.get("peers") or {}).items(), key=lambda kv: _addr_key(kv[0])):
         state = p.get("state") or "unknown"
         sessions.append({
-            "peer": ip, "remote_as": p.get("remoteAs"), "state": state,
+            "peer": ip, "afi": afi, "remote_as": p.get("remoteAs"), "state": state,
             "established": state == "Established",
             "uptime": p.get("peerUptime"), "uptime_seconds": _uptime(p),
             "prefixes_received": p.get("pfxRcd", p.get("acceptedPrefixCount")) if state == "Established" else 0,
@@ -125,7 +141,7 @@ def parse_routes(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                     for h in e.get("nexthops") or [] if h.get("ip")]
             routes.append({"prefix": prefix, "installed": bool(e.get("installed")),
                            "selected": bool(e.get("selected")), "nexthops": hops})
-    routes.sort(key=lambda r: ipaddress.IPv4Network(r["prefix"]))
+    routes.sort(key=lambda r: (ipaddress.ip_network(r["prefix"]).version, ipaddress.ip_network(r["prefix"])))
     return routes
 
 
@@ -133,7 +149,8 @@ def read_status(vm_name: str) -> Tuple[Dict[str, Any], Optional[str]]:
     """Sessions + BGP routes of the routing table, read with vtysh on the router"""
     script = ("if ! systemctl is-active -q frr; then echo 'FRR is not running on the router' >&2; exit 3; fi; "
               "vtysh -c 'show bgp summary json' && echo " + SEPARATOR + " && vtysh -c 'show ip route bgp json'"
-              " && echo " + SEPARATOR + " && vtysh -c 'show version' | head -n 1")
+              " && echo " + SEPARATOR + " && vtysh -c 'show version' | head -n 1"
+              " && echo " + SEPARATOR + " && vtysh -c 'show ipv6 route bgp json'")
     try:
         result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", script], timeout=15)
     except (libvirt.libvirtError, TimeoutError, KeyError, ValueError) as e:
@@ -144,6 +161,7 @@ def read_status(vm_name: str) -> Tuple[Dict[str, Any], Optional[str]]:
     try:
         summary = json.loads(parts[0] or "{}")
         routes = json.loads(parts[1] or "{}") if len(parts) > 1 else {}
+        routes.update(json.loads(parts[3] or "{}") if len(parts) > 3 else {})
     except ValueError as e:
         return {}, f"Unexpected vtysh output: {e}"
     version = parts[2].strip() if len(parts) > 2 else None
@@ -154,7 +172,8 @@ def status(spec: GroupSpec, vm_name: str, running: bool) -> Dict[str, Any]:
     """GET /groups/{id}/bgp"""
     bgp = spec.router.bgp
     if bgp is None:
-        return {"configured": False, "enabled": False, "router_running": running, "router_ip": spec.router.ip}
+        return {"configured": False, "enabled": False, "router_running": running, "router_ip": spec.router.ip,
+                "router_ip6": spec.ip6_of(spec.router.ip)}
     live: Dict[str, Any] = {}
     error = None
     if running and bgp.enabled:
@@ -169,7 +188,9 @@ def status(spec: GroupSpec, vm_name: str, running: bool) -> Dict[str, Any]:
             h["name"] = names.get(h["ip"])
     return {
         "configured": True, "enabled": bgp.enabled, "asn": bgp.asn, "router_ip": spec.router.ip,
+        "router_ip6": spec.ip6_of(spec.router.ip),
         "listen": bgp.listen, "listen_range": spec.cidr if bgp.listen else None, "peer_asn": bgp.peer_asn,
+        "listen_range6": spec.ipv6_prefix() if bgp.listen else None,
         "maximum_paths": bgp.maximum_paths,
         "neighbors": [n.model_dump() for n in bgp.neighbors],
         "announce_ranges": [r.model_dump() for r in bgp.announce_ranges],
@@ -183,4 +204,6 @@ def _peer_names(spec: GroupSpec) -> Dict[str, str]:
     names = {m.ip: m.name for m in spec.members if m.ip}
     names.update({r.ip: r.name for r in spec.reservations})
     names.update({h.ip: h.hostname for h in spec.dhcp_hosts if h.hostname})
+    if spec.ipv6_prefix():  # dual stack: their paired IPv6 addresses too
+        names.update({spec.ip6_of(ip): name for ip, name in list(names.items())})
     return names

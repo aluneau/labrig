@@ -144,7 +144,8 @@ export const GroupDhcp: React.FC<{ group: GroupDetail; onDone: (msg: string) => 
       .catch(() => setInterfaces([]));
   }, [modal, group.network_id, groupMacs]);
 
-  const leaseByMac = new Map(group.leases.map((l) => [l.mac.toLowerCase(), l]));
+  const v4 = (l: GroupLease) => (l.family || 'ipv4') === 'ipv4';
+  const leaseByMac = new Map(group.leases.filter(v4).map((l) => [l.mac.toLowerCase(), l]));
   const toDeleteLease = toDelete ? leaseByMac.get(toDelete.mac) : undefined;
 
   return (
@@ -178,16 +179,17 @@ export const GroupDhcp: React.FC<{ group: GroupDetail; onDone: (msg: string) => 
         <Thead><Tr><Th>IP</Th><Th>MAC</Th><Th>Hostname</Th><Th>Type</Th><Th>VM</Th><Th>Expires</Th><Th screenReaderText="Actions" /></Tr></Thead>
         <Tbody>
           {group.leases.map((l) => (
-            <Tr key={l.mac + l.ip}>
-              <Td>{l.ip}</Td><Td>{l.mac}</Td><Td>{l.hostname || '—'}</Td>
+            <Tr key={l.mac + l.ip} data-family={l.family || 'ipv4'}>
+              <Td>{l.ip}{!v4(l) && <div style={{ fontSize: 12, color: 'var(--pf-v5-global--Color--200)' }} title={l.duid || ''}>DHCPv6{l.duid ? `, DUID ${l.duid}` : ''}</div>}</Td>
+              <Td>{l.mac || '—'}</Td><Td>{l.hostname || '—'}</Td>
               <Td>{l.kind === 'member' ? `member ${l.member}` : l.kind === 'reservation' ? 'reserved' : 'dynamic'}</Td>
               <Td>{l.vm_name ? `${l.vm_name}${l.vm_running ? '' : ' (off)'}` : '—'}</Td>
               <Td>{formatExpiry(l.expiry)}</Td>
               <Td isActionCell>
-                {l.kind === 'dynamic' && (
+                {v4(l) && l.kind === 'dynamic' && (
                   <Button variant="link" isInline onClick={() => setModal({ editing: null, prefill: l })}>Make static</Button>
                 )}
-                {!l.vm_running && (
+                {v4(l) && !l.vm_running && (
                   <Button variant="link" isInline isDanger style={{ marginLeft: 16 }} onClick={() => setToRelease(l)}>Release</Button>
                 )}
               </Td>

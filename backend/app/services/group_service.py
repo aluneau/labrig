@@ -38,6 +38,7 @@ from app.schemas.group import (
 )
 from app.services.cloud_image_service import cloud_image_service
 from app.services import bgp_service as bgps
+from app.services import ipv6_service
 from app.services import wireguard_service as wgs
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
 from app.services.task_service import task_service
@@ -243,6 +244,7 @@ class GroupService:
             if subnets is None:
                 subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
             bgps.assign(db, spec, existing.router.bgp if existing else None, group_id, subnets)
+        ipv6_service.assign(db, spec, existing, group_id)
 
         try:
             spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
@@ -426,6 +428,9 @@ class GroupService:
             return
         ci = member.cloud_init or spec.cloud_init
         image = self.resolve_image(db, member.image)
+        # dual stack: DHCPv6 + router advertisements on the member's NIC (otherwise vm_service's default)
+        network_config = (ipv6_service.member_network_config(member.mac, image.distribution)
+                          if spec.ipv6_prefix() else None)
         vm_service.create_vm(
             db,
             VMCreate(name=member_vm_name(spec.name, member.name), description=f"Member of lab group {spec.name}",
@@ -434,6 +439,7 @@ class GroupService:
                      cloudinit_keyboard=ci.keyboard, cloudinit_userdata=member.user_data,
                      network_name=network_name(spec.name), mac_address=member.mac, start=start),
             hostname=member.name, fqdn=f"{member.name}.{spec.domain}", metadata_xml=metadata_xml,
+            network_config=network_config,
         )
 
     def _wait_router(self, vm_name: str, timeout: float, on_wait: Optional[Callable[[], None]] = None) -> None:
@@ -654,6 +660,11 @@ class GroupService:
             new.router.egress = old.router.egress.model_copy(deep=True)
         if "registry" not in given:
             new.router.registry = old.router.registry.model_copy(deep=True)
+        # same for the network block (IPv6); its assigned prefix stays unless one is given
+        if "network" not in new.model_fields_set:
+            new.network = old.network.model_copy(deep=True)
+        if new.router.wireguard is not None and old.router.wireguard is not None:
+            new.router.wireguard.subnet6 = new.router.wireguard.subnet6 or old.router.wireguard.subnet6
         new.router.registry.hostname = old.router.registry.hostname
         new.router.registry.ca_pem = old.router.registry.ca_pem
         # WireGuard peers are added / removed through /wireguard/peers (devices hold their configs):
@@ -1133,12 +1144,14 @@ class GroupService:
         return {
             "configured": True, "enabled": wg.enabled, "listen_port": wg.listen_port, "host_port": wg.host_port,
             "subnet": wg.subnet, "router_tunnel_ip": wg.router_ip(), "public_key": wg.public_key,
+            "subnet6": wg.subnet6 if spec.ipv6_prefix() else None,
+            "router_tunnel_ip6": wg.router_ip6() if spec.ipv6_prefix() else None,
             "endpoint_host": host, "endpoint": f"{host}:{wg.host_port}" if wg.host_port else None,
             "client_allowed_ips": wgs.client_allowed_ips(spec) if wg.subnet else [],
             "relay_listening": listening, "relay_error": relay_error, "firewall": wgs.host_firewall(),
             "host_port_range": settings.WG_HOST_PORTS,
             "router_running": running, "router_error": router_error,
-            "peers": [{**p.model_dump(), **live.get(p.public_key, {})} for p in wg.peers],
+            "peers": [{**p.model_dump(), "ip6": wgs.peer_ip6(spec, p), **live.get(p.public_key, {})} for p in wg.peers],
         }
 
     # BGP (bgp_service: FRR on the router)
@@ -1255,7 +1268,7 @@ class GroupService:
             vm = vms.get(vm_name)
             live = states.get(vm_name)
             return {"name": name, "role": role, "hostname": name, "fqdn": f"{name}.{spec.domain}", "ip": ip,
-                    "mac": mac, "vm_id": vm.id if vm else None, "vm_name": vm_name,
+                    "ip6": spec.ip6_of(ip), "mac": mac, "vm_id": vm.id if vm else None, "vm_name": vm_name,
                     "vm_uuid": live["uuid"] if live else None, "state": live["state"] if live else "missing",
                     "image": m.image or self._source_label(m), "memory": m.memory, "vcpu": m.vcpu}
 
@@ -1275,7 +1288,7 @@ class GroupService:
             "status": group.status, "state": state, "error_message": group.error_message,
             "network_name": network_name(spec.name), "network_id": network.id if network else None,
             "router": router, "members": members, "member_count": len(members),
-            "hosts": [{"name": r.name, "ip": r.ip, "mac": r.mac, "owner": r.owner, "fqdn": f"{r.name}.{spec.domain}",
+            "hosts": [{"name": r.name, "ip": r.ip, "ip6": spec.ip6_of(r.ip), "mac": r.mac, "owner": r.owner, "fqdn": f"{r.name}.{spec.domain}",
                        "vm_id": vms[r.name].id if r.name in vms else None,
                        "state": states[r.name]["state"] if r.name in states else "missing"}
                       for r in spec.reservations],
@@ -1360,20 +1373,24 @@ class GroupService:
             raise LookupError(f"No reservation for {mac}")
         spec.dhcp_hosts = [h for h in spec.dhcp_hosts if h.mac != mac]
         group = self.update_group(db, group_id, spec)
-        if release_lease and any(lease["mac"] == mac for lease in self.leases(group)):
+        if release_lease and any(lease["mac"] == mac and lease.get("family", "ipv4") == "ipv4"
+                                 for lease in self.leases(group)):
             self.release_lease(db, group_id, mac, force=True)
         return group
 
     @staticmethod
-    def _read_leases(vm_name: str) -> List[Dict[str, Any]]:
-        """dnsmasq lease file on the router: '<expiry> <mac> <ip> <hostname|*> <client-id|*>'"""
+    def _read_leases(vm_name: str, spec: Optional[GroupSpec] = None) -> List[Dict[str, Any]]:
+        """dnsmasq lease file on the router: '<expiry> <mac> <ip> <hostname|*> <client-id|*>', then (DHCPv6)
+        'duid <server duid>' and '<expiry> <iaid> <ipv6> <hostname|*> <client duid>' (with `spec` only)"""
         out = libvirt_client.agent_exec(vm_name, "/bin/cat", [LEASES_FILE], timeout=5)["stdout"]
         leases = []
         for line in out.splitlines():
             parts = line.split()
-            if len(parts) >= 4 and ":" in parts[1] and "." in parts[2]:  # IPv4 leases only
+            if len(parts) >= 4 and ":" in parts[1] and "." in parts[2]:  # IPv4 leases
                 leases.append({"expiry": int(parts[0]), "mac": parts[1].lower(), "ip": parts[2],
                                "hostname": None if parts[3] == "*" else parts[3]})
+        if spec is not None:
+            leases += ipv6_service.parse_v6_leases(out, spec)
         return leases
 
     def leases(self, group: Group, running: Optional[bool] = None) -> List[Dict[str, Any]]:
@@ -1386,7 +1403,7 @@ class GroupService:
         if not running:
             return []
         try:
-            leases = self._read_leases(rtr)
+            leases = self._read_leases(rtr, spec)
         except (libvirt.libvirtError, TimeoutError, KeyError, ValueError):
             return []  # agent not ready / no lease file yet
         members = {m.mac: m.name for m in spec.members if m.mac}
@@ -1426,7 +1443,7 @@ class GroupService:
         spec = GroupSpec.model_validate(group.spec)
         rtr = router_vm_name(spec.name)
         with self._lock(group.name):
-            lease = next((le for le in self.leases(group) if le["mac"] == mac), None)
+            lease = next((le for le in self.leases(group) if le["mac"] == mac and le.get("family", "ipv4") == "ipv4"), None)
             if lease is None:
                 raise LookupError(f"No DHCP lease for {mac} on the router of group '{spec.name}'")
             logger.debug(f"Release {mac} on {rtr}: lease {lease}, force={force}")
@@ -1458,9 +1475,14 @@ class GroupService:
         model.owner = None
         if model.router.wireguard is not None:  # assigned on this host / by this router
             wg = model.router.wireguard
-            wg.public_key = wg.subnet = wg.host_port = None
+            wg.public_key = wg.subnet = wg.subnet6 = wg.host_port = None
             for peer in wg.peers:
                 peer.ip = None
+        if model.network.ipv6 is not None:  # the /64 was picked on this host
+            model.network.ipv6.prefix = None
+        if model.router.bgp is not None:  # IPv6 announce ranges too (re-assigned with the prefix)
+            model.router.bgp.announce_ranges = [r for r in model.router.bgp.announce_ranges
+                                                if ":" not in r.prefix or r.name != "lab6"]
         spec = model.model_dump(mode="json", exclude_none=True)
         return {"yaml": yaml.safe_dump(spec, sort_keys=False), "spec": spec}
 

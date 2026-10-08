@@ -38,7 +38,8 @@ def _announcing_node(cluster: Cluster) -> Optional[str]:
 
 def _in(ip: str, prefix: str) -> bool:
     try:
-        return ipaddress.IPv4Address(ip) in ipaddress.IPv4Network(prefix)
+        addr, net = ipaddress.ip_address(ip), ipaddress.ip_network(prefix)
+        return addr.version == net.version and addr in net
     except ValueError:
         return False
 
@@ -85,12 +86,13 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
 
     def machine(kind: str, name: str, vm_name: str, ip: Optional[str], mac: Optional[str], role: Optional[str],
                 cluster: Optional[str] = None, fqdn: Optional[str] = None) -> Dict[str, Any]:
-        s = sessions.get(ip or "")
+        ip6 = spec.ip6_of(ip)
+        s = sessions.get(ip or "") or sessions.get(ip6 or "")
         m = {"kind": kind, "name": name, "vm_name": vm_name, "vm_id": vm_ids.get(vm_name), "role": role,
-             "cluster": cluster, "ip": ip, "mac": mac, "fqdn": fqdn or f"{name}.{spec.domain}",
+             "cluster": cluster, "ip": ip, "ip6": ip6, "mac": mac, "fqdn": fqdn or f"{name}.{spec.domain}",
              "state": (states.get(vm_name) or {}).get("state", "missing"),
              "bgp_state": s["state"] if s else None,
-             "bgp_prefixes": [r["prefix"] for r in routes if any(h["ip"] == ip for h in r["nexthops"])],
+             "bgp_prefixes": [r["prefix"] for r in routes if any(h["ip"] in (ip, ip6) for h in r["nexthops"] if h["ip"])],
              "l2_announces": []}
         machines.append(m)
         return m
@@ -108,6 +110,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         machine("reservation", h.hostname or h.mac, vm, h.ip, h.mac, None)
     by_name = {m["name"]: m for m in machines}
     by_ip = {m["ip"]: m for m in machines if m["ip"]}
+    by_ip.update({m["ip6"]: m for m in machines if m.get("ip6")})
 
     vips: List[Dict[str, Any]] = []
     cluster_rows = []
@@ -154,7 +157,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
                      "via": [by_ip[h["ip"]]["name"] if h["ip"] in by_ip else h["ip"] for h in r["nexthops"]]})
 
     wgspec = spec.router.wireguard
-    roles = ["dhcp", "dns", "ntp"]
+    roles = ["dhcp", "dns", "ntp"] + (["ipv6"] if spec.ipv6_prefix() else [])
     if spec.uplink:
         roles.insert(2, "nat")
     if spec.load_balancers:
@@ -169,11 +172,11 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         roles.append("egress")  # lab machines can't reach the internet
     uplink_ips = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]] if router_running else []
     return {
-        "id": group.id, "name": spec.name, "cidr": spec.cidr, "domain": spec.domain,
+        "id": group.id, "name": spec.name, "cidr": spec.cidr, "ipv6_prefix": spec.ipv6_prefix(), "domain": spec.domain,
         "network_name": network_name(spec.name), "state": base["state"], "status": group.status,
         "router": {
             "name": rtr, "vm_id": base["router"]["vm_id"], "state": base["router"]["state"],
-            "lan_ip": spec.router.ip,
+            "lan_ip": spec.router.ip, "lan_ip6": spec.ip6_of(spec.router.ip),
             "uplink_ip": spec.router.uplink_ip or next((a.split("/")[0] for a in uplink_ips
                                                        if not _in(a.split("/")[0], spec.cidr)), None),
             "uplink_network": spec.uplink, "tunnel_ip": wgspec.router_ip() if wgspec and wgspec.enabled else None,
@@ -184,9 +187,10 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         },
         "wireguard": {
             "enabled": bool(wg.get("enabled")), "subnet": wg.get("subnet"), "router_ip": wg.get("router_tunnel_ip"),
+            "subnet6": wg.get("subnet6"), "router_ip6": wg.get("router_tunnel_ip6"),
             "host_port": wg.get("host_port"), "listen_port": wg.get("listen_port"), "endpoint": wg.get("endpoint"),
             "relay_listening": bool(wg.get("relay_listening")), "client_allowed_ips": wg.get("client_allowed_ips") or [],
-            "peers": [{"name": p["name"], "ip": p.get("ip"), "latest_handshake": p.get("latest_handshake"),
+            "peers": [{"name": p["name"], "ip": p.get("ip"), "ip6": p.get("ip6"), "latest_handshake": p.get("latest_handshake"),
                        "endpoint": p.get("endpoint")} for p in wg.get("peers") or []],
         },
         "bgp": bgp, "machines": machines, "clusters": cluster_rows, "vips": vips,

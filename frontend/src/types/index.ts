@@ -667,6 +667,7 @@ export interface LibvirtAction {
 export interface DNSRecord {
   name: string; // relative to the group domain ("api.ocp", "*.apps.ocp"), absolute if it ends with '.'
   a?: string | null;
+  aaaa?: string | null; // IPv6 (with or without a)
   cname?: string | null;
   owner?: string | null; // managed by the app (e.g. "cluster:k1"): read-only
 }
@@ -865,6 +866,7 @@ export interface BGPSettings {
 
 export interface BGPSession {
   peer: string;
+  afi?: 'ipv4' | 'ipv6' | string;
   name?: string | null;
   remote_as?: number | null;
   state: string;
@@ -888,8 +890,10 @@ export interface BGPStatus {
   enabled: boolean;
   asn?: number | null;
   router_ip?: string | null;
+  router_ip6?: string | null;
   listen: boolean;
   listen_range?: string | null;
+  listen_range6?: string | null;
   peer_asn?: number | null;
   maximum_paths?: number | null;
   neighbors: BGPNeighbor[];
@@ -910,6 +914,7 @@ export interface TopologyMachine {
   role?: string | null;
   cluster?: string | null;
   ip?: string | null;
+  ip6?: string | null;
   mac?: string | null;
   fqdn?: string | null;
   state: string;
@@ -948,6 +953,7 @@ export interface GroupTopology {
   id: number;
   name: string;
   cidr: string;
+  ipv6_prefix?: string | null;
   domain: string;
   network_name: string;
   state: string;
@@ -957,6 +963,7 @@ export interface GroupTopology {
     vm_id?: number | null;
     state: string;
     lan_ip?: string | null;
+    lan_ip6?: string | null;
     uplink_ip?: string | null;
     uplink_network?: string | null;
     tunnel_ip?: string | null;
@@ -970,13 +977,15 @@ export interface GroupTopology {
   wireguard: {
     enabled: boolean;
     subnet?: string | null;
+    subnet6?: string | null;
     router_ip?: string | null;
+    router_ip6?: string | null;
     host_port?: number | null;
     listen_port?: number | null;
     endpoint?: string | null;
     relay_listening: boolean;
     client_allowed_ips: string[];
-    peers: { name: string; ip?: string | null; latest_handshake?: number | null; endpoint?: string | null }[];
+    peers: { name: string; ip?: string | null; ip6?: string | null; latest_handshake?: number | null; endpoint?: string | null }[];
   };
   bgp: BGPStatus;
   machines: TopologyMachine[];
@@ -1001,6 +1010,7 @@ export interface WireGuardSpec {
   listen_port?: number; // on the router
   host_port?: number | null; // assigned: UDP port on the host
   subnet?: string | null; // assigned tunnel subnet
+  subnet6?: string | null; // assigned IPv6 tunnel /64 (groups with IPv6)
   public_key?: string | null; // the router's, read back from it
   peers?: WireGuardPeer[];
 }
@@ -1009,6 +1019,7 @@ export interface WireGuardPeerInfo {
   name: string;
   public_key: string;
   ip?: string | null;
+  ip6?: string | null;
   allowed_ips: string[];
   endpoint?: string | null;
   latest_handshake?: number | null; // epoch s, 0 = never
@@ -1022,7 +1033,9 @@ export interface WireGuardStatus {
   listen_port?: number | null;
   host_port?: number | null;
   subnet?: string | null;
+  subnet6?: string | null;
   router_tunnel_ip?: string | null;
+  router_tunnel_ip6?: string | null;
   public_key?: string | null;
   endpoint_host: string;
   endpoint?: string | null;
@@ -1057,11 +1070,24 @@ export interface GroupSpec {
   load_balancers?: LoadBalancerSpec[];
   owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
   dhcp_hosts?: GroupDHCPHost[];
+  network?: GroupNetworkSpec;
+}
+
+/** Dual stack (docs/ipv6.md): the group network also gets an IPv6 /64 */
+export interface IPv6Spec {
+  enabled?: boolean;
+  prefix?: string | null; // assigned /64 (ULA of IPV6_ULA_POOL) when unset
+  egress?: 'reject' | 'drop'; // IPv6 from the lab to outside it: fails at once, or hangs (dropped)
+}
+
+export interface GroupNetworkSpec {
+  ipv6?: IPv6Spec | null;
 }
 
 export interface GroupHostInfo {
   name: string;
   ip: string;
+  ip6?: string | null;
   mac: string;
   owner?: string | null;
   fqdn?: string | null;
@@ -1082,6 +1108,7 @@ export interface GroupMemberInfo {
   hostname?: string | null;
   fqdn?: string | null;
   ip?: string | null;
+  ip6?: string | null; // dual stack groups
   mac?: string | null;
   vm_id?: number | null;
   vm_name?: string | null;
@@ -1118,7 +1145,10 @@ export interface Group {
 
 export interface GroupLease {
   ip: string;
-  mac: string;
+  mac: string; // "" for a DHCPv6 lease whose MAC is unknown
+  family?: 'ipv4' | 'ipv6';
+  duid?: string | null;
+  iaid?: number | null;
   hostname?: string | null;
   expiry?: number | null;
   kind?: 'member' | 'reservation' | 'dynamic';
