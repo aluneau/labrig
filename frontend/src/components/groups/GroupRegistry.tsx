@@ -34,7 +34,7 @@ import { errorText } from '../../utils/format';
 import { GroupRegistryImages } from './GroupRegistryImages';
 
 const muted: React.CSSProperties = { fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' };
-const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/;
+const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(\/\d{1,3})?)$/;
 const VERSION_RE = /^4\.\d+\.\d+(-[a-z]+\.\d+)?$/;
 
 const stateColor = (state: string) =>

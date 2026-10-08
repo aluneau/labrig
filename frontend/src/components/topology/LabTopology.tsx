@@ -75,7 +75,7 @@ const ago = (epoch?: number | null) => {
 };
 const ROLE_LABEL: Record<string, string> = {
   dhcp: 'DHCP', dns: 'DNS', nat: 'NAT', ntp: 'NTP', lb: 'Load balancer', wireguard: 'WireGuard', bgp: 'BGP',
-  registry: 'Registry', egress: 'Internet blocked',
+  registry: 'Registry', egress: 'Internet blocked', ipv6: 'IPv6',
 };
 
 // ---------------------------------------------------------------- box contents
@@ -398,13 +398,13 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
   if (key === 'router') {
     return {
       title: `Router ${r.name} (${r.state})`,
-      text: `The lab's gateway, a small AlmaLinux VM with two network cards: eth0 on "${r.uplink_network}" (${r.uplink_ip || 'DHCP'}) towards the internet, eth1 on the lab network (${r.lan_ip}). Every lab machine sends traffic for other networks to ${r.lan_ip}. Hover its badges to see what else it does.`,
+      text: `The lab's gateway, a small AlmaLinux VM with two network cards: eth0 on "${r.uplink_network}" (${r.uplink_ip || 'DHCP'}) towards the internet, eth1 on the lab network (${r.lan_ip}${r.lan_ip6 ? `, ${r.lan_ip6}` : ''}). Every lab machine sends traffic for other networks to ${r.lan_ip}. Hover its badges to see what else it does.`,
     };
   }
   if (key === 'bus') {
     return {
       title: `Lab network ${t.cidr}`,
-      text: `One L2 segment ("${t.network_name}"), like a single switch: machines here talk to each other directly — ARP finds the MAC address behind an IP. Anything outside ${t.cidr} goes through the router at ${r.lan_ip}.`,
+      text: `One L2 segment ("${t.network_name}"), like a single switch: machines here talk to each other directly — ARP finds the MAC address behind an IP${t.ipv6_prefix ? ` (IPv6 ${t.ipv6_prefix}: neighbor discovery does the same)` : ''}. Anything outside ${t.cidr} goes through the router at ${r.lan_ip}.`,
     };
   }
   if (key.startsWith('badge:')) {
@@ -418,7 +418,8 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       wireguard: `The end of your laptop's tunnel: wg0 at ${r.tunnel_ip}. Packets from the tunnel are decrypted here and routed into the lab like any other.`,
       registry: `Mirror registry (Quay) at registry.${t.domain}: images copied from the internet by the router (oc-mirror) or pushed by you. Lab machines and clusters pull from it, even with internet blocked. Registry & egress tab.`,
       egress: `Disconnected lab: the router refuses what lab machines send towards the internet (connections fail at once). DNS, NTP, load balancers, the registry and WireGuard still work. Switch it in the Registry & egress tab.`,
-      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
+      ipv6: `Dual stack: the lab network also has ${t.ipv6_prefix}. The router (${r.lan_ip6}) sends router advertisements (default route) and hands out IPv6 addresses by DHCPv6: each machine gets the same host number as its IPv4 address, and an AAAA record. IPv6 stays inside the lab (the uplink is IPv4 only).`,
+      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr}${t.bgp.listen_range6 ? ` and ${t.bgp.listen_range6}` : ''} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
     };
     return { title: ROLE_LABEL[role] || role, text: texts[role] || '' };
   }
@@ -427,7 +428,7 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
     if (!m) return null;
     const what = m.kind === 'node' ? `${m.role === 'ctlplane' ? 'Control plane' : 'Worker'} node of cluster ${m.cluster}`
       : m.kind === 'member' ? 'Lab member' : 'A machine with a reserved address';
-    const parts = [`${what}, ${m.ip} (${m.fqdn}), ${m.state}.`];
+    const parts = [`${what}, ${m.ip}${m.ip6 ? ` and ${m.ip6}` : ''} (${m.fqdn}), ${m.state}.`];
     if (m.bgp_state) {
       parts.push(m.bgp_state === 'Established'
         ? `It has a BGP session with the router${m.bgp_prefixes.length ? ` and tells it "send traffic for ${m.bgp_prefixes.join(', ')} to me"` : ' but announces nothing'}.`

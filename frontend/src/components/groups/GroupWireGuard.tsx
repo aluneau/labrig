@@ -314,7 +314,7 @@ export const GroupWireGuard: React.FC<{ group: GroupDetail; onDone: (msg: string
         <DescriptionListGroup><DescriptionListTerm>Endpoint</DescriptionListTerm>
           <DescriptionListDescription>{status.endpoint} {relayLabel}</DescriptionListDescription></DescriptionListGroup>
         <DescriptionListGroup><DescriptionListTerm>Tunnel</DescriptionListTerm>
-          <DescriptionListDescription>{status.subnet} (router {status.router_tunnel_ip}, also the DNS server)</DescriptionListDescription></DescriptionListGroup>
+          <DescriptionListDescription>{status.subnet} (router {status.router_tunnel_ip}, also the DNS server){status.subnet6 && <div>IPv6 {status.subnet6} (router {status.router_tunnel_ip6})</div>}</DescriptionListDescription></DescriptionListGroup>
         <DescriptionListGroup><DescriptionListTerm>Routed to the lab</DescriptionListTerm>
           <DescriptionListDescription>{status.client_allowed_ips.join(', ')}</DescriptionListDescription></DescriptionListGroup>
         <DescriptionListGroup><DescriptionListTerm>Router</DescriptionListTerm>
@@ -344,7 +344,7 @@ export const GroupWireGuard: React.FC<{ group: GroupDetail; onDone: (msg: string
             return (
               <Tr key={p.name}>
                 <Td>{p.name}</Td>
-                <Td>{p.ip}</Td>
+                <Td>{p.ip}{p.ip6 && <div>{p.ip6}</div>}</Td>
                 <Td>{hs.fresh ? <Label color="green">{hs.text}</Label> : hs.text}</Td>
                 <Td>{p.rx_bytes !== undefined && p.rx_bytes !== null ? `${formatBytes(p.rx_bytes)} / ${formatBytes(p.tx_bytes)}` : '—'}</Td>
                 <Td><code style={{ fontSize: 12 }}>{p.public_key}</code></Td>
