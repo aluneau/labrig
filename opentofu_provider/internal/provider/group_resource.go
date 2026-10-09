@@ -59,6 +59,7 @@ type memberCloudInitModel struct {
 type dnsRecordModel struct {
 	Name  types.String `tfsdk:"name"`
 	A     types.String `tfsdk:"a"`
+	AAAA  types.String `tfsdk:"aaaa"`
 	CNAME types.String `tfsdk:"cname"`
 }
 
@@ -97,6 +98,26 @@ type groupModel struct {
 	BGPRange      types.String         `tfsdk:"bgp_announce_range"`
 	Egress        *egressModel         `tfsdk:"egress"`
 	Registry      *registryModel       `tfsdk:"registry"`
+	IPv6          *ipv6Model           `tfsdk:"ipv6"`
+	RouterIP6     types.String         `tfsdk:"router_ip6"`
+	MemberIP6s    types.Map            `tfsdk:"member_ip6s"`
+}
+
+// Dual stack group network (docs/ipv6.md)
+type ipv6Model struct {
+	Enabled types.Bool   `tfsdk:"enabled"`
+	Prefix  types.String `tfsdk:"prefix"`
+	Egress  types.String `tfsdk:"egress"`
+}
+
+type apiIPv6 struct {
+	Enabled bool    `json:"enabled"`
+	Prefix  *string `json:"prefix,omitempty"`
+	Egress  string  `json:"egress,omitempty"`
+}
+
+type apiGroupNetwork struct {
+	IPv6 *apiIPv6 `json:"ipv6"`
 }
 
 // Egress switch of the router (docs/disconnected.md)
@@ -169,6 +190,7 @@ type apiGroupMemberSpec struct {
 type apiDNSRecord struct {
 	Name  string  `json:"name"`
 	A     *string `json:"a,omitempty"`
+	AAAA  *string `json:"aaaa,omitempty"`
 	CNAME *string `json:"cname,omitempty"`
 	Owner *string `json:"owner,omitempty"`
 }
@@ -201,11 +223,13 @@ type apiGroupSpec struct {
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
 	DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
+	Network   *apiGroupNetwork     `json:"network,omitempty"` // omitted: the server keeps the stored one
 }
 
 type apiGroupMember struct {
 	Name  string  `json:"name"`
 	IP    *string `json:"ip"`
+	IP6   *string `json:"ip6"`
 	MAC   *string `json:"mac"`
 	VMID  *int64  `json:"vm_id"`
 	State string  `json:"state"`
@@ -238,6 +262,7 @@ type apiGroup struct {
 		} `json:"router"`
 		Members   []apiGroupMemberSpec `json:"members"`
 		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
+		Network   apiGroupNetwork      `json:"network"`
 	} `json:"spec"`
 }
 
@@ -289,6 +314,20 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"member_ips":    schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> IP."},
 			"member_macs":   schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> MAC."},
 			"member_vm_ids": schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> vmmanager VM id."},
+			"router_ip6":    schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "The router's IPv6 address (<prefix>::1) when ipv6 is enabled."},
+			"member_ip6s":   schema.MapAttribute{Computed: true, ElementType: types.StringType, Description: "Member name -> IPv6 address (ipv6 enabled)."},
+			"ipv6": schema.SingleNestedAttribute{Optional: true,
+				Description: "Dual stack (docs/ipv6.md): the group network also gets an IPv6 /64; the router sends router " +
+					"advertisements and serves DHCPv6, every machine gets <prefix>::<host number of its IPv4> and an AAAA record. " +
+					"Lab-internal (no IPv6 internet). Applied live. Omitted: left as it is on the server.",
+				Attributes: map[string]schema.Attribute{
+					"enabled": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true)},
+					"prefix": schema.StringAttribute{Optional: true, Computed: true,
+						PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+						Description:   "The /64 (default: a free /64 of the server's IPV6_ULA_POOL)."},
+					"egress": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("reject"),
+						Description: "IPv6 from the lab to outside it: reject (fails at once) or drop (hangs until timeouts)."},
+				}},
 			"wireguard": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
 				Description: "Remote access: WireGuard on the router, relayed from UDP wireguard_host_port of the host. Add devices " +
 					"with vmmanager_wireguard_peer. false after true disables it and keeps devices and keys. Applied live."},
@@ -373,6 +412,7 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				NestedObject: schema.NestedBlockObject{Attributes: map[string]schema.Attribute{
 					"name":  schema.StringAttribute{Required: true},
 					"a":     schema.StringAttribute{Optional: true},
+					"aaaa":  schema.StringAttribute{Optional: true, Description: "IPv6 address (with or without a)."},
 					"cname": schema.StringAttribute{Optional: true},
 				}},
 			},
@@ -400,7 +440,7 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 	}
 	s.Router.DNS.Records = []apiDNSRecord{}
 	for _, rec := range m.DNSRecords {
-		s.Router.DNS.Records = append(s.Router.DNS.Records, apiDNSRecord{Name: rec.Name.ValueString(), A: strPtr(rec.A), CNAME: strPtr(rec.CNAME)})
+		s.Router.DNS.Records = append(s.Router.DNS.Records, apiDNSRecord{Name: rec.Name.ValueString(), A: strPtr(rec.A), AAAA: strPtr(rec.AAAA), CNAME: strPtr(rec.CNAME)})
 	}
 	if ci := m.CloudInit; ci != nil {
 		if !ci.UserData.IsNull() {
@@ -439,6 +479,14 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 		if !e.Allow.IsNull() && !e.Allow.IsUnknown() {
 			e.Allow.ElementsAs(ctx, &s.Router.Egress.Allow, false)
 		}
+	}
+	if v := m.IPv6; v != nil {
+		ip := &apiIPv6{Enabled: v.Enabled.IsNull() || v.Enabled.IsUnknown() || v.Enabled.ValueBool(), Egress: v.Egress.ValueString()}
+		if !v.Prefix.IsNull() && !v.Prefix.IsUnknown() && v.Prefix.ValueString() != "" {
+			prefix := v.Prefix.ValueString()
+			ip.Prefix = &prefix
+		}
+		s.Network = &apiGroupNetwork{IPv6: ip}
 	}
 	if reg := m.Registry; reg != nil {
 		s.Router.Registry = &apiRegistry{Enabled: reg.Enabled.IsNull() || reg.Enabled.IsUnknown() || reg.Enabled.ValueBool(),
@@ -612,6 +660,7 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 	}
 	var members []groupMemberModel
 	ips, macs, vmIDs := map[string]string{}, map[string]string{}, map[string]string{}
+	ip6s := map[string]string{}
 	for _, s := range g.Spec.Members {
 		mm := groupMemberModel{
 			Name: types.StringValue(s.Name), Memory: types.Int64Value(s.Memory),
@@ -667,6 +716,9 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		if live.IP != nil {
 			ips[s.Name] = *live.IP
 		}
+		if live.IP6 != nil {
+			ip6s[s.Name] = *live.IP6
+		}
 		if live.MAC != nil {
 			macs[s.Name] = *live.MAC
 		}
@@ -680,7 +732,7 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		if rec.Owner != nil && *rec.Owner != "" {
 			continue // managed by the server (e.g. a kubeadm cluster's api / node records)
 		}
-		records = append(records, dnsRecordModel{Name: types.StringValue(rec.Name), A: strOrNull(rec.A), CNAME: strOrNull(rec.CNAME)})
+		records = append(records, dnsRecordModel{Name: types.StringValue(rec.Name), A: strOrNull(rec.A), AAAA: strOrNull(rec.AAAA), CNAME: strOrNull(rec.CNAME)})
 	}
 	m.DNSRecords = records
 	var hosts []groupDHCPHostModel
@@ -729,6 +781,15 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 			DiskGB: types.Int64Value(reg.DiskGB), MemoryMB: types.Int64Value(reg.MemoryMB), VCPUs: types.Int64Value(reg.VCPUs),
 			Hostname: strOrNull(reg.Hostname), CAPEM: strOrNull(reg.CAPEM)}
 	}
+	if v := g.Spec.Network.IPv6; m.IPv6 != nil && v != nil {
+		egress := v.Egress
+		if egress == "" {
+			egress = "reject"
+		}
+		m.IPv6 = &ipv6Model{Enabled: types.BoolValue(v.Enabled), Prefix: strOrNull(v.Prefix), Egress: types.StringValue(egress)}
+	}
+	m.RouterIP6 = strOrNull(g.Router.IP6)
+	m.MemberIP6s, _ = types.MapValueFrom(ctx, types.StringType, ip6s)
 	m.MemberIPs, _ = types.MapValueFrom(ctx, types.StringType, ips)
 	m.MemberMACs, _ = types.MapValueFrom(ctx, types.StringType, macs)
 	m.MemberVMIDs, _ = types.MapValueFrom(ctx, types.StringType, vmIDs)
