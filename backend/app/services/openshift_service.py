@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from app.config import settings
+from app.services import sshkey
 
 logger = logging.getLogger(__name__)
 
@@ -475,8 +476,8 @@ class OpenShiftService:
         """Per-cluster ed25519 key (sshKey in install-config: `core` on the nodes). Returns the public key."""
         key = directory / "id_ed25519"
         if not key.exists():
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"vm-manager@{directory.name}",
-                            "-f", str(key)], check=True, capture_output=True, timeout=30)
+            # pure Python: ssh-keygen runs SELinux-confined on EL and can't write in /var/lib/vm-manager
+            sshkey.write_keypair(key, f"vm-manager@{directory.name}")
         return (directory / "id_ed25519.pub").read_text().strip()
 
     @staticmethod
