@@ -8,6 +8,7 @@ reservations, and two VMs (`tofu-web` → .10, `tofu-db` → .11) reachable over
 make -C ../../../opentofu_provider install
 
 cp terraform.tfvars.example terraform.tfvars   # put your SSH public key in it
+export VMMANAGER_TOKEN=vmm_…   # API token (web UI: user menu > API tokens); not needed with AUTH_ENABLED=false
 tofu init
 tofu apply          # ~15 s when the image is already downloaded
 ssh admin@192.168.200.10

@@ -13,6 +13,8 @@ terraform {
   }
 }
 
+# Authentication: export VMMANAGER_TOKEN=<API token> (web UI: user menu > API tokens, or
+# backend/venv/bin/python -m app.cli token create --user $USER --name opentofu), or set token = "...".
 provider "vmmanager" {} # http://127.0.0.1:8000 (or $VMMANAGER_ENDPOINT)
 
 resource "vmmanager_cloud_image" "debian" {
