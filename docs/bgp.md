@@ -143,3 +143,4 @@ With IPv6 on in the group (docs/ipv6.md), FRR also runs `address-family ipv6 uni
 (peer group `LAB6`), an IPv6 announce range (`lab6`, a /64 of `IPV6_ULA_POOL`, accepted `le 128`). Members peering
 over a DHCPv6 address need `neighbor <router>::1 disable-connected-check` (the address is a /128). Example config and
 details: docs/ipv6.md.
+BFD covers the IPv4 sessions only: IPv6 sessions (`LAB6`, IPv6 neighbors) fall back to the BGP hold time.
