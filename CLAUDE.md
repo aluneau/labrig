@@ -55,7 +55,7 @@ docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, Me
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
@@ -110,8 +110,13 @@ e2e/                  Playwright browser tests against the real app (see below)
   read it from the saved config; `vf: true`). Debian/Ubuntu cloud-image VMs get a network-config with DHCP on
   every NIC (primary by MAC keeps the default route; EL's NetworkManager does it by itself).
 - **vIOMMU** = `<iommu model='intel'>` + `<ioapic driver='qemu'/>` (domain_xml.set_iommu), saved config only:
-  applies at the next cold start. Host SR-IOV state is read from sysfs (`sriov_service`); VF counts go through
-  the helper (`sriov-set-numvfs`). This rig has no IOMMU: test VF pools nested (docs/sriov.md).
+  applies at the next cold start. Host SR-IOV state is read from sysfs + `ip -j -d link` (`sriov_service`: readiness
+  checks with fix commands per distro, VF MAC/VLAN/trust/IOMMU group). Changes go through the helper (v3):
+  `sriov-set-numvfs`, `sriov-vf-options` (trust/spoofchk on every VF of a PF), `sriov-persist` (PF by PCI address in
+  `/etc/vm-manager/sriov.conf` + `vm-manager-sriov.service` running `helper sriov-restore` at boot). VF pools: `vlan`
+  on the network / NIC (`<vlan><tag>`, libvirt sets it with the MAC through the PF); `vm_service._start_vm` /
+  `add_nic` run `sriov_service.check_pool` first (plain-words: no free VF, shared IOMMU group, PF gone). This rig has
+  no IOMMU: test VF pools nested (docs/sriov.md §3, `e2e/sriov-real.js` with HOST_SH).
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
 - **Lab groups**: the `GroupSpec` (schemas/group.py) is the source of truth; `normalize()` assigns router
@@ -260,6 +265,7 @@ node groups.js                                                  # lab group: cre
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
+HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

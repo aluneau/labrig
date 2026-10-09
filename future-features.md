@@ -155,8 +155,13 @@ Design:
   nested (L2 on a VF of L1's igb). `vmmanager_nic`, `iommu` / `guest_kernel_args` on `vmmanager_vm`,
   `vmmanager_network` `mode = "hostdev"` (verified nested: VF pool on L1's igb + VM with a VF NIC, clean plan).
   docs/sriov.md has the OpenShift operator settings (82576 is not in OpenShift's supported list).
+- **Real hardware hardening (2026-10-09)**: Host page readiness checks with fixes (firmware DMAR/IVRS, kernel args per
+  distro, iommu=pt, interrupt remapping, vfio-pci, PF firmware VF limit, link, IOMMU group isolation per VF), VF trust /
+  spoofchk per PF, VF counts kept across reboots (`vm-manager-sriov.service`), VLAN tag on pools and VF NICs,
+  plain-words VF pool errors, `vmmanager_sriov_pf` + `vlan` attributes. Verified nested only; real NICs (ixgbe, i40e,
+  ice, mlx5) still to verify (docs/sriov.md §3).
 - **Not yet**: macvtap / bridge-type NICs (only libvirt networks), VLAN trunks on NICs, NIC options in group /
-  cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs), persisting VF counts from the UI,
+  cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs),
   `<driver queues>` (multiqueue) and NIC MTU.
 
 ### 1.7 Console fidelity (S) — ✅ done
