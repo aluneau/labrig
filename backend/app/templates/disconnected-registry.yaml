@@ -1,0 +1,60 @@
+id: disconnected-registry
+title: Disconnected network with a mirror registry
+summary: No internet for the lab machines (egress blocked on the router) and a Quay mirror registry on the router to copy the images they need.
+tags: [disconnected, registry, egress, air-gap]
+requires: [registry]
+heavy: true
+resources: {vcpus: 5, memory_mb: 9216, disk_gb: 120}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: egress, label: Lab egress, type: choice, choices: [blocked, open], default: blocked,
+     help: 'blocked: the machines reach nothing outside the lab (switchable later on the Registry & egress tab)'}
+  - {name: allow, label: Still reachable when blocked (CIDR), type: string, pattern: '^[0-9./]{7,18}$',
+     help: 'e.g. a customer proxy address; empty = nothing'}
+  - {name: disk_gb, label: Registry disk (GiB, thin), type: int, default: 100, min: 20, max: 2048}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-dc"
+group:
+  cidr: "{{cidr}}"
+  router:
+    egress:
+      mode: "{{egress}}"
+      allow:
+        - {_if: allow, value: "{{allow}}"}
+    registry: {enabled: true, disk_gb: "{{disk_gb}}"}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - {name: client1, image: debian-13, memory: 1024}
+guide: |
+  # Case {{case}}: disconnected network + mirror registry
+
+  **Customer symptom (typical):** "Pods can't pull images in our air-gapped site", "podman pull goes to
+  quay.io instead of the mirror", "x509: certificate signed by unknown authority" against the mirror.
+
+  ## What is in the lab
+  - Network **{{cidr}}**, egress **{{egress}}**: the router refuses forwarded traffic from the lab to the
+    outside (the router itself still reaches the internet to fill the registry)
+  - Mirror registry (Red Hat mirror-registry = Quay) on the router: `registry.{{domain}}:8443`, own CA,
+    thin disk of {{disk_gb}} GiB; the router has 8 GiB of RAM while it runs
+  - `client1.{{domain}}`: Debian, to test pulls
+
+  ## Steps
+  1. Wait for the group, then the **registry setup** task (download + install of Quay: ~5–10 min).
+  2. **Registry & egress** tab: copy an image in (e.g. `docker.io/library/nginx:latest`), or mirror an
+     OpenShift release / operators with oc-mirror.
+  3. On `client1`: `sudo apt-get install -y podman` fails (no egress): that's the point. Switch egress to
+     **open** for a moment on the tab to install tools, then block it again (applied live).
+  4. Trust the CA: download `ca.crt` from the tab into `/usr/local/share/ca-certificates/` and run
+     `update-ca-certificates`.
+
+  ## Checks
+  - `curl -sI https://quay.io` from client1 fails while egress is blocked
+  - `podman login registry.{{domain}}:8443` (credentials on the tab) then
+    `podman pull registry.{{domain}}:8443/<repo>:<tag>` works
+  - Without the CA: `x509: certificate signed by unknown authority` (the customer's error)
+
+  ## Things to try
+  - Add a `registries.conf` mirror for `docker.io` pointing at `registry.{{domain}}:8443` and pull by the
+    original name
+  - Put a proxy address in the egress allow list to reproduce a "proxy only" site

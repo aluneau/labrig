@@ -7,13 +7,14 @@ resources: {vcpus: 3, memory_mb: 2560, disk_gb: 30}
 params:
   - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
   - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
-  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
   - {name: proxy_user, label: Proxy username, type: string, default: proxyuser, pattern: '^[A-Za-z0-9._-]{1,64}$'}
   - {name: proxy_password, label: Proxy password, type: string, default: proxypass, pattern: '^[A-Za-z0-9._~!*+=,;-]{1,128}$'}
 name: "c{{case}}-proxy"
 group:
   name: "c{{case}}-proxy"
-  cidr: 10.42.241.0/24
+  cidr: "{{cidr}}"
   router:
     egress:
       mode: proxy
@@ -39,7 +40,7 @@ guide: |
 
   ## What the lab contains
   - Router: forwards nothing to the internet (direct connections are refused at once, like egress *blocked*) and
-    runs **squid** on `router.c{{case}}-proxy.lab:3128` (10.42.241.1:3128), basic auth `{{proxy_user}}`. HTTPS goes
+    runs **squid** on `router.c{{case}}-proxy.lab:3128` ({{ip:1}}:3128), basic auth `{{proxy_user}}`. HTTPS goes
     through CONNECT (no TLS interception). Registry & egress tab: URL, environment to copy, allowlist, auth.
   - `configured` and `bare` both got the proxy environment from cloud-init (`/etc/environment`,
     `/etc/profile.d/vmm-proxy.sh`, apt / dnf proxy): without it their first boot couldn't even install the guest
@@ -51,7 +52,7 @@ guide: |
   On a member (console, user admin):
   ```
   curl -sS -m 5 https://www.redhat.com -o /dev/null --noproxy '*'   # refused: no direct way out
-  curl -sS -m 10 -x http://10.42.241.1:3128 https://www.redhat.com -o /dev/null -w '%{http_code}\n'
+  curl -sS -m 10 -x http://{{ip:1}}:3128 https://www.redhat.com -o /dev/null -w '%{http_code}\n'
                                                                   # 407: the proxy wants credentials
   env | grep -i proxy; curl -sS https://www.redhat.com -o /dev/null -w '%{http_code}\n'   # 200 with the env
   ```

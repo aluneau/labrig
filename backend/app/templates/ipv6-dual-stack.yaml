@@ -7,11 +7,12 @@ resources: {vcpus: 3, memory_mb: 2048, disk_gb: 30}
 params:
   - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
   - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
-  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
 name: "c{{case}}-v6"
 group:
   name: "c{{case}}-v6"
-  cidr: 10.42.241.0/24
+  cidr: "{{cidr}}"
   network:
     # the lab /64 is assigned by the app (IPV6_ULA_POOL); IPv6 to anything outside the lab is dropped silently
     ipv6: {enabled: true, egress: drop}
@@ -20,7 +21,7 @@ group:
       records:
         # the customer's app: an A record that works and a AAAA record whose address is unreachable over IPv6
         # (a ULA outside the lab: same address family "label" as the clients' ULA, so it is tried first)
-        - {name: app, a: 10.42.241.80, aaaa: "fd00:bad:c0de::80"}
+        - {name: app, a: "{{ip:80}}", aaaa: "fd00:bad:c0de::80"}
   cloud_init: {username: admin, password: "{{password}}"}
   members:
     - {name: client, image: "{{image}}", memory: 1024}
@@ -28,7 +29,7 @@ group:
     - name: web
       image: "{{image}}"
       memory: 768
-      ip: 10.42.241.80
+      ip: "{{ip:80}}"
       role: app
       user_data: |
         #cloud-config
@@ -63,10 +64,10 @@ guide: |
   wait for the IPv6 connect to time out.
 
   ## What the lab contains
-  - A dual stack lab network: 10.42.241.0/24 + an IPv6 /64 (Network & DNS tab, *IPv6 (dual stack)*). The router
+  - A dual stack lab network: {{cidr}} + an IPv6 /64 (assigned per group) (Network & DNS tab, *IPv6 (dual stack)*). The router
     sends router advertisements (default route) and hands out IPv6 addresses by DHCPv6; every machine also has an
     AAAA record (`client.c{{case}}-v6.lab`).
-  - `app.c{{case}}-v6.lab`: A = 10.42.241.80 (`web`, HTTP on port 80, IPv4 only) and AAAA = `fd00:bad:c0de::80`,
+  - `app.c{{case}}-v6.lab`: A = {{ip:80}} (`web`, HTTP on port 80, IPv4 only) and AAAA = `fd00:bad:c0de::80`,
     an address outside the lab. The group's *IPv6 to outside the lab* is set to **hangs (dropped)**: the router drops
     those packets without an answer.
   - `client`: a plain dual stack machine.
@@ -77,7 +78,7 @@ guide: |
   getent ahosts app.c{{case}}-v6.lab         # the IPv6 address comes FIRST (glibc prefers ULA over IPv4)
   ip -6 addr; ip -6 route                    # an IPv6 address from DHCPv6 and a default route from the router's RAs
   curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_total}s\n' http://app.c{{case}}-v6.lab/
-                                             # 200 from 10.42.241.80 after ~0.2 s: happy eyeballs fell back to IPv4
+                                             # 200 from {{ip:80}} after ~0.2 s: happy eyeballs fell back to IPv4
   curl -6 -m 10 http://app.c{{case}}-v6.lab/ # hangs, times out: IPv6 is black-holed
   curl -4 http://app.c{{case}}-v6.lab/       # works
   time python3 -c "import urllib.request; urllib.request.urlopen('http://app.c{{case}}-v6.lab/', timeout=200)"
