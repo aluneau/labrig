@@ -162,6 +162,14 @@ e2e/                  Playwright browser tests against the real app (see below)
   `announce_ranges` / `neighbors` keeps the stored ones (OpenTofu sends `{enabled}` only). MetalLB `mode: bgp`
   (OpenShift): pool = owned /27 range, `BGPPeer` to the router LAN IP + `BGPAdvertisement`; switching modes removes the
   other mode's objects, re-creates the demo Service if its IP left the pool and moves `hello.<domain>`.
+  **BFD**: `router.bgp.bfd` (multiplier 3, 200 ms) = `bfdd=yes` + profile `vmm` + `neighbor … bfd profile vmm`; turning it
+  on/off restarts FRR (FRR 8.5's frr-reload mangled the config). Status `show bfd peers json` (`bfd_peers`,
+  `sessions[].bfd_status`). Measured failover: 27 s without BFD (hold time), 0.6 s with.
+  **MetalLB shared code** `services/metallb.py` (config/demo manifests, pools, live checks) used by OpenShift's add-on
+  (`AddonRunner(MetalLBClient)`, oc) and **kubeadm** (`kubeadm_metallb`: upstream v0.16.1 FRR mode applied with kubectl
+  through the guest agent, `spec.kubeadm.metallb` {enabled, mode, bfd, demo, pool, service_ip, state}); `GET/PUT
+  /clusters/{id}/metallb` for both types; `metallb.bfd` adds a BFDProfile (and BFD on the router). kubeadm control planes
+  are excluded from LB announcements (label), so next hops = workers.
 - **Disconnected labs** (docs/disconnected.md): `router.egress` (`mode` open|blocked, `allow` CIDRs) = nft forward rules on
   the router (blocked: LAN -> anything but lab / WG / BGP ranges / allow is rejected; `ct status dnat` accepted = podman
   published ports), live. `router.registry` (`enabled`, `port`, `disk_gb`, `memory_mb`, `vcpus`; assigned `hostname`,
@@ -290,6 +298,8 @@ CLIENT_SH="ssh client" node wireguard.js                        # remote access:
 node templates.js                                               # templates: gallery, wizard (YAML edit, OpenTofu, guide), Basic lab boots, Case guide tab, save-as-template round trip
 scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
+node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
+node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host

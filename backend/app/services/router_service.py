@@ -296,7 +296,16 @@ class ELRouterBackend(RouterBackend):
             # one profile for every session; peers negotiate (the slower of both sides wins)
             lines += ["bfd", f" profile {BFD_PROFILE}", f"  detect-multiplier {bfd.detect_multiplier}",
                       f"  receive-interval {bfd.receive_interval}", f"  transmit-interval {bfd.transmit_interval}",
-                      " exit", "exit", "!"]
+                      " exit"]
+            # Static BFD sessions with every known lab address: a dynamic (listen range) peer only gets one from
+            # bgpd once its BGP session is up, but FRR >= 10 keeps a `neighbor X bfd` session Idle until BFD is up:
+            # a rebooted member would never come back
+            known = sorted({m.ip for m in spec.members if m.ip} | {r.ip for r in spec.reservations}
+                           | {h.ip for h in spec.dhcp_hosts} | {n.ip for n in bgp.neighbors},
+                           key=ipaddress.IPv4Address)
+            for ip in known:
+                lines += [f" peer {ip} local-address {spec.router.ip}", f"  profile {BFD_PROFILE}", " exit"]
+            lines += ["exit", "!"]
         remote = str(bgp.peer_asn) if bgp.peer_asn else "external"
         lines += [f"router bgp {bgp.asn}",
                   f" bgp router-id {spec.router.ip}",
@@ -344,8 +353,9 @@ class ELRouterBackend(RouterBackend):
                 # the `bfd` block comes or goes (it dropped the prefix-list / route-maps: no session at all)
                 + (" && if ! grep -q '^bfdd=yes' /etc/frr/daemons; then"
                    " sed -i 's/^bfdd=.*/bfdd=yes/' /etc/frr/daemons && fresh=1; fi" if self._bgp(spec).bfd_on() else "")
-                + " && { had=$(vtysh -c 'show running-config' 2>/dev/null | grep -c '^bfd$');"
-                f" [ \"$had\" = {1 if self._bgp(spec).bfd_on() else 0} ] || fresh=1; }}" +
+                # any change of the bfd block (on/off, timers, static peers) restarts FRR
+                + f" && {{ sum=$(sed -n '/^bfd$/,/^exit$/p' {FRR_CONF} | md5sum | cut -c1-32);"
+                " [ \"$sum\" = \"$(cat /etc/frr/.vmm-bfd-sum 2>/dev/null)\" ] || { fresh=1; echo \"$sum\" > /etc/frr/.vmm-bfd-sum; }; }" +
                 f" && chown frr:frr {FRR_CONF} && chmod 640 {FRR_CONF}"
                 " && { restorecon -R /etc/frr 2>/dev/null; true; }"
                 " && systemctl enable -q frr"

@@ -354,8 +354,13 @@ idea as the live DHCP reservations, but with the router as the target.
 > WireGuard clients route the announce ranges. MetalLB `mode: bgp` for OpenShift (create or day-2 switch). Topology tab
 > (group + OpenShift cluster): zones laptop → host → router (role badges) → L2 segment → virtual IPs, tooltips,
 > legend, "Follow a packet" stepper, explainers. `vmmanager_group.bgp`, `vmmanager_cluster.openshift.metallb_mode`,
-> `e2e/bgp.js`. Not yet: inter-group BGP peering (§2.5), BFD, IPv6, a "BGP + MetalLB" kubeadm recipe automated
-> by the app (the BGP tab gives the manifests).
+> `e2e/bgp.js`. Not yet: inter-group BGP peering (§2.5), IPv6.
+>
+> **BFD + MetalLB for kubeadm — ✅ done** (2026-10, docs/bgp.md): `router.bgp.bfd` (FRR bfdd, BGP tab, BFD sessions in
+> `GET /groups/{id}/bgp` and Topology tooltips; failover 27 s → 0.6 s measured), MetalLB BFDProfile (OpenShift + kubeadm),
+> MetalLB installed by the app on kubeadm (`kubeadm.metallb`, create + day 2, MetalLB lab tab, shared `services/metallb.py`),
+> OpenTofu `vmmanager_cluster.kubeadm`, `bgp_bfd`, `openshift.metallb_bfd`; template `bgp-metallb-kubeadm`;
+> e2e `bgp-bfd.js`, `kubeadm-metallb.js`.
 
 ---
 
