@@ -12,6 +12,7 @@ import {
   ImageCopyRequest, RegistryImages, RegistryCredentials,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
   AuthStatus, ApiToken, ApiTokenCreated,
+  UpdateStatus,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
 } from '../types';
 
@@ -268,6 +269,10 @@ export const hostApi = {
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),
   updatePf: (pf: string, data: SriovPFUpdate) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  update: (refresh = false, channel?: string) =>
+    request<UpdateStatus>(`/hosts/update?refresh=${refresh}${channel ? `&channel=${channel}` : ''}`),
+  startUpdate: (version: string, channel: string) =>
+    post<{ started: boolean; message: string }>('/hosts/update', { version, channel }),
 };
 
 export const authApi = {

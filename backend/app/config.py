@@ -3,16 +3,37 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+ETC_ENV_FILE = Path("/etc/vm-manager/vm-manager.env")
+
+
+def _version() -> str:
+    """VERSION file of a release tarball, else the backend's pyproject version + "-dev" (a git checkout)"""
+    try:
+        return (ROOT_DIR / "VERSION").read_text().strip()
+    except OSError:
+        pass
+    try:
+        for line in (ROOT_DIR / "backend" / "pyproject.toml").read_text().splitlines():
+            if line.startswith("version = "):
+                return line.split('"')[1] + "-dev"
+    except (OSError, IndexError):
+        pass
+    return "0.0.0-dev"
+
+
 class Settings(BaseSettings):
     """Application settings (overridable via environment or backend/.env)"""
 
+    # /etc/vm-manager/vm-manager.env = config of a release install (docs/updates.md); backend/.env (a git
+    # checkout) wins when both exist
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parents[1] / ".env", env_file_encoding="utf-8"
+        env_file=(ETC_ENV_FILE, Path(__file__).resolve().parents[1] / ".env"), env_file_encoding="utf-8"
     )
 
     # App
     APP_NAME: str = "VM Manager"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = _version()
     DEBUG: bool = False
 
     # Server
@@ -25,6 +46,11 @@ class Settings(BaseSettings):
 
     # Built frontend served at / (cd frontend && npm run build)
     FRONTEND_DIR: Path = Path(__file__).resolve().parents[2] / "frontend" / "build"
+
+    # Updates from GitHub releases (docs/updates.md): repo owner/name, channel stable | nightly, check on/off
+    UPDATE_REPO: str = "aluneau/labrig"
+    UPDATE_CHANNEL: str = "stable"
+    UPDATE_CHECK: bool = True
 
     # libvirt
     LIBVIRT_URI: str = "qemu:///system"

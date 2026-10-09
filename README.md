@@ -70,11 +70,12 @@ CentOS Stream** 9 and 10, **Debian / Ubuntu**. Tested end to end on CachyOS, Alm
 enforcing, firewalld) and Debian 13 (ufw).
 
 ```bash
-# from a release tarball (web UI prebuilt, only Python needed on the host)
-tar xzf vm-manager-<version>.tar.gz && cd vm-manager-<version>
-scripts/setup.sh                 # then open http://127.0.0.1:8000
+# from GitHub releases, updatable in one command (recommended for hosts that only run it, docs/updates.md)
+curl -fLO https://raw.githubusercontent.com/aluneau/labrig/main/scripts/vm-manager-update
+sudo python3 vm-manager-update install -- --listen 0.0.0.0     # later: sudo vm-manager-update update
 
-# from a git checkout: same, Node.js 20+ is used once to build the UI
+# from a git checkout (development): Node.js 20+ is used once to build the UI; update = git pull + setup.sh
+scripts/setup.sh                 # then open http://127.0.0.1:8000
 ```
 
 `scripts/setup.sh` is idempotent (re-run it after an update). Run it as the user who will use VM Manager;

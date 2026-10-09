@@ -28,6 +28,11 @@ Fixed command whitelist, every argument validated here (never trust the caller):
       (/etc/pam.d/vm-manager, installed by setup.sh; never su/sudo whose pam_rootok would accept
       anyone when run as root). Needed because pam_unix can't check another local user's password
       from the app's non-root process. root (uid 0) is refused. Exit 6 = denied.
+  helper self-update <version> <stable|nightly>
+      Start /usr/local/sbin/vm-manager-update (root-owned, installed by setup.sh) detached in the transient unit
+      vm-manager-update.service (it restarts the app's service). It only installs the CURRENT latest release of
+      the channel from the repo set in /etc/vm-manager/update.conf (root-owned), and refuses when <version> is
+      not that release: the caller can't pick an older version or another source. Release installs only.
 
 Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed, 6 denied.
 """
@@ -40,7 +45,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-VERSION = "4"
+VERSION = "5"
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
@@ -481,7 +486,31 @@ def pam_auth(args):
     print("ok")
 
 
+UPDATER = "/usr/local/sbin/vm-manager-update"
+SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$")
+
+
+def self_update(args):
+    if len(args) != 2 or not SEMVER_RE.match(args[0]) or args[1] not in ("stable", "nightly"):
+        fail(2, "usage: self-update <version> <stable|nightly>")
+    st = os.stat(UPDATER) if os.path.exists(UPDATER) else None
+    if st is None or st.st_uid != 0 or st.st_mode & 0o022:
+        fail(3, f"{UPDATER} is missing or not root-owned: re-run scripts/setup.sh")
+    if not os.path.realpath("/opt/vm-manager/current").startswith("/opt/vm-manager/releases/"):
+        fail(2, "not a release install (/opt/vm-manager/current): update a git checkout with git pull")
+    if subprocess.run(["systemctl", "is-active", "--quiet", "vm-manager-update"]).returncode == 0:
+        fail(2, "an update is already running")
+    subprocess.run(["systemctl", "reset-failed", "vm-manager-update"], capture_output=True)
+    r = subprocess.run(["systemd-run", "--unit=vm-manager-update", "--description=VM Manager update",
+                        "--property=Type=exec", UPDATER, "update", "--channel", args[1], "--expect", args[0]],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        fail(5, (r.stderr or r.stdout).strip() or "systemd-run failed")
+    print("started")
+
+
 COMMANDS = {
+    "self-update": self_update,
     "version": lambda args: print(VERSION),
     "dhcp-release": dhcp_release,
     "sriov-set-numvfs": sriov_set_numvfs,

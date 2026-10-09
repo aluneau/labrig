@@ -1,0 +1,399 @@
+#!/usr/bin/python3 -I
+"""VM Manager installer / updater from GitHub releases (docs/updates.md). Runs as root; Python stdlib only.
+
+  vm-manager-update install [--channel stable|nightly] [--version X] [--user U] [--import-data DIR] [-- SETUP_ARGS]
+      Bootstrap a host: download the release, unpack it in /opt/vm-manager/releases/<version>, point
+      /opt/vm-manager/current at it, run its scripts/setup.sh --release (packages, libvirt, helper, PAM, venv,
+      systemd unit, data in /var/lib/vm-manager, config in /etc/vm-manager). SETUP_ARGS go to setup.sh
+      (e.g. -- --listen 0.0.0.0 --port 8000) and are kept for later updates. --import-data DIR copies the
+      backend/data and backend/.env of an existing git checkout DIR (DB, OpenShift files, settings).
+  vm-manager-update update [--channel C] [--version X] [--force]
+      Install the latest release of the channel (or X) next to the running one, run its setup.sh, refuse while
+      background tasks run (--force: go on, they are marked interrupted), switch `current`, restart the service,
+      check /health reports the new version, else switch back. Keeps the 3 newest releases.
+  vm-manager-update rollback       back to the previous release
+  vm-manager-update status | list | check [--channel C]
+
+Settings: /etc/vm-manager/update.conf (written by setup.sh --release): REPO, CHANNEL, SERVICE, USER, HOST, PORT,
+SETUP_ARGS. Log: /var/log/vm-manager-update.log.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+
+BASE = "/opt/vm-manager"
+RELEASES = f"{BASE}/releases"
+DOWNLOADS = f"{BASE}/downloads"
+CURRENT = f"{BASE}/current"
+PREVIOUS = f"{BASE}/previous"
+CONF = "/etc/vm-manager/update.conf"
+ENV_FILE = "/etc/vm-manager/vm-manager.env"
+LOG = "/var/log/vm-manager-update.log"
+KEEP = 3
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$")
+ASSET_RE = re.compile(r"^vm-manager-(.+)\.tar\.gz$")
+REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+DEFAULTS = {"REPO": "aluneau/labrig", "CHANNEL": "stable", "SERVICE": "vm-manager", "USER": "", "HOST": "127.0.0.1",
+            "PORT": "8000", "SETUP_ARGS": ""}
+
+
+class Fail(Exception):
+    pass
+
+
+def log(msg):
+    line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def read_kv(path):
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return out
+
+
+def conf():
+    c = dict(DEFAULTS)
+    c.update(read_kv(CONF))
+    if not REPO_RE.match(c["REPO"]):
+        raise Fail(f"invalid REPO in {CONF}: {c['REPO']!r}")
+    return c
+
+
+def version_key(v):
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-(.*))?$", v or "")
+    if not m:
+        return (0, 0, 0, 0, "")
+    a, b, c, pre = m.groups()
+    return (int(a), int(b), int(c), 0 if pre else 1, pre or "")
+
+
+def http_get(url, accept="application/vnd.github+json"):
+    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "vm-manager-update"})
+    try:
+        return urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        raise Fail(f"{url}: HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise Fail(f"{url}: {e.reason}") from None
+
+
+def resolve(repo, channel, version=None):
+    """-> {version, tarball_url, sha256_url, notes_url}"""
+    api = f"https://api.github.com/repos/{repo}/releases"
+    if version:
+        rels = json.load(http_get(f"{api}?per_page=100"))
+    elif channel == "nightly":
+        rels = [json.load(http_get(f"{api}/tags/nightly"))]
+    else:
+        rels = [json.load(http_get(f"{api}/latest"))]
+    for rel in rels:
+        assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets") or []}
+        for name, url in assets.items():
+            m = ASSET_RE.match(name)
+            if not m or not VERSION_RE.match(m.group(1)):
+                continue
+            if version and m.group(1) != version:
+                continue
+            if name + ".sha256" not in assets:
+                raise Fail(f"release {rel.get('tag_name')} has no {name}.sha256")
+            return {"version": m.group(1), "tarball": url, "sha256": assets[name + ".sha256"],
+                    "page": rel.get("html_url")}
+    raise Fail(f"no release {version or channel} with a vm-manager-<version>.tar.gz in {repo}")
+
+
+def download(rel):
+    os.makedirs(DOWNLOADS, mode=0o755, exist_ok=True)
+    path = os.path.join(DOWNLOADS, f"vm-manager-{rel['version']}.tar.gz")
+    expected = http_get(rel["sha256"], accept="application/octet-stream").read().decode().split()[0].lower()
+    if not re.match(r"^[0-9a-f]{64}$", expected):
+        raise Fail("malformed .sha256 file")
+    if not (os.path.exists(path) and sha256(path) == expected):
+        log(f"downloading {rel['tarball']}")
+        tmp = path + ".part"
+        with http_get(rel["tarball"], accept="application/octet-stream") as r, open(tmp, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        if sha256(tmp) != expected:
+            os.unlink(tmp)
+            raise Fail("checksum mismatch: download refused")
+        os.replace(tmp, path)
+    log(f"checksum ok ({expected[:16]}…)")
+    return path
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def unpack(tarball, version):
+    dest = os.path.join(RELEASES, version)
+    if os.path.isfile(os.path.join(dest, "VERSION")):
+        log(f"{dest} already unpacked")
+        return dest
+    os.makedirs(RELEASES, mode=0o755, exist_ok=True)
+    tmp = dest + ".unpack"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    top = f"vm-manager-{version}"
+    with tarfile.open(tarball) as tar:
+        members = []
+        for m in tar.getmembers():
+            name = os.path.normpath(m.name)
+            if name.startswith(("/", "..")) or not (name == top or name.startswith(top + "/")):
+                raise Fail(f"unexpected path in the tarball: {m.name}")
+            if m.issym() or m.islnk():
+                target = os.path.normpath(os.path.join(os.path.dirname(name), m.linkname))
+                if m.linkname.startswith("/") or not target.startswith(top):
+                    raise Fail(f"unsafe link in the tarball: {m.name} -> {m.linkname}")
+            elif not (m.isfile() or m.isdir()):
+                raise Fail(f"unexpected entry in the tarball: {m.name}")
+            m.uid = m.gid = 0
+            m.uname = m.gname = "root"
+            m.mode &= 0o755
+            members.append(m)
+        tar.extractall(tmp, members=members)
+    os.rename(os.path.join(tmp, top), dest)
+    os.rmdir(tmp)
+    with open(os.path.join(dest, "VERSION")) as f:
+        if f.read().strip() != version:
+            raise Fail(f"{dest}/VERSION doesn't say {version}")
+    log(f"unpacked in {dest}")
+    return dest
+
+
+def current_version():
+    try:
+        return os.path.basename(os.path.realpath(CURRENT)) if os.path.islink(CURRENT) else None
+    except OSError:
+        return None
+
+
+def switch(link, version):
+    tmp = link + ".new"
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    os.symlink(os.path.join("releases", version), tmp)
+    os.replace(tmp, link)
+
+
+def running_tasks():
+    url = read_kv(ENV_FILE).get("DATABASE_URL", "")
+    if not url.startswith("sqlite:///"):
+        return 0
+    path = url[len("sqlite:///"):]
+    if not os.path.exists(path):
+        return 0
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        n = con.execute("select count(*) from tasks where status in ('pending', 'running')").fetchone()[0]
+        con.close()
+        return n
+    except sqlite3.Error:
+        return 0
+
+
+def run_setup(release, c, extra=()):
+    args = [os.path.join(release, "scripts", "setup.sh"), "--release", "--user", c["USER"]]
+    args += shlex.split(c["SETUP_ARGS"]) + list(extra)
+    log("running " + " ".join(shlex.quote(a) for a in args))
+    with open(LOG, "a") as logf:
+        p = subprocess.run(args, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    if p.returncode != 0:
+        raise Fail(f"setup.sh failed (exit {p.returncode}), see {LOG}")
+
+
+def healthy(c, version, timeout=120):
+    host = c["HOST"] if c["HOST"] not in ("0.0.0.0", "::", "") else "127.0.0.1"
+    url = f"http://{host}:{c['PORT']}/health"
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            data = json.load(urllib.request.urlopen(url, timeout=3))
+            if data.get("version") == version:
+                return True
+        except (OSError, ValueError):
+            pass
+        time.sleep(2)
+    return False
+
+
+def restart(c):
+    subprocess.run(["systemctl", "restart", c["SERVICE"]], check=False)
+
+
+def prune():
+    cur, prev = current_version(), (os.path.basename(os.path.realpath(PREVIOUS)) if os.path.islink(PREVIOUS) else None)
+    vers = sorted((v for v in os.listdir(RELEASES) if VERSION_RE.match(v)), key=version_key, reverse=True)
+    for v in vers[KEEP:]:
+        if v in (cur, prev):
+            continue
+        shutil.rmtree(os.path.join(RELEASES, v), ignore_errors=True)
+        try:
+            os.unlink(os.path.join(DOWNLOADS, f"vm-manager-{v}.tar.gz"))
+        except OSError:
+            pass
+        log(f"removed old release {v}")
+
+
+def activate(c, version, rollback_to):
+    """Switch current to version, restart, health check; switch back on failure"""
+    if rollback_to:
+        switch(PREVIOUS, rollback_to)
+    switch(CURRENT, version)
+    log(f"current -> {version}, restarting {c['SERVICE']}")
+    restart(c)
+    if healthy(c, version):
+        log(f"{version} is up")
+        return
+    if not rollback_to:
+        raise Fail(f"{version} did not come up (journalctl -u {c['SERVICE']})")
+    log(f"{version} did not come up: rolling back to {rollback_to}")
+    switch(CURRENT, rollback_to)
+    restart(c)
+    raise Fail(f"update to {version} failed, back on {rollback_to}"
+               + ("" if healthy(c, rollback_to) else f" (which isn't healthy either: journalctl -u {c['SERVICE']})"))
+
+
+def cmd_install(a):
+    c = conf()
+    if a.user:
+        c["USER"] = a.user
+    if not c["USER"]:
+        c["USER"] = os.environ.get("SUDO_USER") or ""
+    if not c["USER"] or c["USER"] == "root":
+        raise Fail("run with sudo from the account that will run the app, or pass --user NAME")
+    if current_version():
+        raise Fail(f"already installed ({current_version()}): use update")
+    rel = resolve(c["REPO"], a.channel or c["CHANNEL"], a.version)
+    release = unpack(download(rel), rel["version"])
+    switch(CURRENT, rel["version"])
+    extra = list(a.setup_args)
+    if a.import_data:
+        extra += ["--import-data", os.path.abspath(a.import_data)]
+    c["SETUP_ARGS"] = " ".join(shlex.quote(x) for x in a.setup_args)
+    c["CHANNEL"] = a.channel or c["CHANNEL"]
+    run_setup(release, {**c, "SETUP_ARGS": ""}, extra + ["--channel", c["CHANNEL"], "--repo", c["REPO"]])
+    log(f"installed {rel['version']}")
+
+
+def cmd_update(a):
+    c = conf()
+    if not current_version():
+        raise Fail("not a release install (no /opt/vm-manager/current): use install, or git pull in a checkout")
+    channel = a.channel or c["CHANNEL"]
+    rel = resolve(c["REPO"], channel, a.version)
+    if a.expect and rel["version"] != a.expect:
+        raise Fail(f"the latest {channel} release is {rel['version']}, not {a.expect}: refused")
+    cur = current_version()
+    if rel["version"] == cur and not a.force:
+        log(f"already on {cur}")
+        return
+    log(f"update {cur} -> {rel['version']} ({channel})")
+    release = unpack(download(rel), rel["version"])
+    n = running_tasks()
+    if n and not a.force:
+        raise Fail(f"{n} background task(s) running (downloads, cluster installs…): retry later or use --force")
+    run_setup(release, c, ["--no-restart", "--channel", channel, "--repo", c["REPO"]])
+    activate(c, rel["version"], cur if cur != rel["version"] else None)
+    prune()
+
+
+def cmd_rollback(a):
+    c = conf()
+    prev = os.path.basename(os.path.realpath(PREVIOUS)) if os.path.islink(PREVIOUS) else None
+    cur = current_version()
+    if not prev or not os.path.isdir(os.path.join(RELEASES, prev)) or prev == cur:
+        raise Fail("no previous release to roll back to")
+    log(f"rollback {cur} -> {prev}")
+    run_setup(os.path.join(RELEASES, prev), c, ["--no-restart"])
+    activate(c, prev, cur)
+
+
+def cmd_status(a):
+    c = conf()
+    print(f"current:  {current_version() or '(not a release install)'}")
+    if os.path.islink(PREVIOUS):
+        print(f"previous: {os.path.basename(os.path.realpath(PREVIOUS))}")
+    print(f"repo:     {c['REPO']} ({c['CHANNEL']})")
+    print(f"service:  {c['SERVICE']} as {c['USER'] or '?'} on {c['HOST']}:{c['PORT']}")
+
+
+def cmd_list(a):
+    cur = current_version()
+    for v in sorted((v for v in os.listdir(RELEASES) if VERSION_RE.match(v)), key=version_key, reverse=True) \
+            if os.path.isdir(RELEASES) else []:
+        print(("* " if v == cur else "  ") + v)
+
+
+def cmd_check(a):
+    c = conf()
+    rel = resolve(c["REPO"], a.channel or c["CHANNEL"])
+    cur = current_version()
+    print(f"latest {a.channel or c['CHANNEL']}: {rel['version']} ({rel['page']}); running: {cur or '?'}")
+    sys.exit(0 if rel["version"] != cur else 1)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="vm-manager-update", description="Install / update VM Manager from GitHub releases")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    i = sub.add_parser("install")
+    i.add_argument("--channel", choices=["stable", "nightly"])
+    i.add_argument("--version")
+    i.add_argument("--user")
+    i.add_argument("--import-data")
+    i.add_argument("setup_args", nargs="*")
+    u = sub.add_parser("update")
+    u.add_argument("--channel", choices=["stable", "nightly"])
+    u.add_argument("--version")
+    u.add_argument("--expect")
+    u.add_argument("--force", action="store_true")
+    sub.add_parser("rollback")
+    sub.add_parser("status")
+    sub.add_parser("list")
+    ch = sub.add_parser("check")
+    ch.add_argument("--channel", choices=["stable", "nightly"])
+    a = p.parse_args()
+    for v in (getattr(a, "version", None), getattr(a, "expect", None)):
+        if v and not VERSION_RE.match(v):
+            p.error(f"invalid version {v!r}")
+    if a.cmd not in ("status", "list", "check") and os.geteuid() != 0:
+        p.error("run as root (sudo)")
+    try:
+        {"install": cmd_install, "update": cmd_update, "rollback": cmd_rollback, "status": cmd_status,
+         "list": cmd_list, "check": cmd_check}[a.cmd](a)
+    except Fail as e:
+        log(f"error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

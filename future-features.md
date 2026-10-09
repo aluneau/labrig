@@ -529,6 +529,32 @@ the router keeps its uplink, so no uplink-less group is needed). Not in v1: OKD,
 
 ---
 
+## 3.5 Releases and updates from GitHub (2026-10-09) — ✅ built (docs/updates.md)
+
+Goal: develop on the rig (git checkout), host the app elsewhere and pull new versions from GitHub in one command
+(or one button), without touching running labs.
+
+- **Releases**: tag `vX.Y.Z` -> GitHub Actions (`.github/workflows/release.yml`) runs the checks, builds the
+  tarball with `scripts/package.sh` (UI prebuilt) + `.sha256`, publishes a GitHub Release. Every push to `main`
+  refreshes a rolling `nightly` pre-release (version `X.Y.Z-nightly.<date>.<sha>`). `ci.yml` runs the checks on
+  every push / PR (check-python, import, check-templates, tsc + build, go vet).
+- **Install layout ("release mode")**: `/opt/vm-manager/releases/<ver>/` (code + its own venv, root-owned),
+  `/opt/vm-manager/current` -> the running release (the systemd unit runs from it), data in `/var/lib/vm-manager`
+  (DATA_DIR, DB; owned by the service user), config in `/etc/vm-manager/vm-manager.env` (read by Settings next
+  to `backend/.env`). A git checkout (the rig) keeps working as before ("checkout mode": `git pull` + `setup.sh`).
+- **Updater** `vm-manager-update` (python3 stdlib, root, `/usr/local/sbin`): `install` (bootstrap a host from
+  GitHub), `update [--version X] [--channel stable|nightly] [--force]`, `rollback`, `list`, `status`, `check`.
+  update = resolve release (GitHub API) -> download + sha256 -> unpack -> new release's `setup.sh --release`
+  (venv, packages, helper/polkit/PAM, unit; no restart) -> refuse while tasks run (unless --force) -> switch
+  `current` -> restart -> health check on `/health` (version) -> automatic rollback if unhealthy -> keep 3 releases.
+  `install --import-data <checkout>` copies an existing checkout's `backend/data` + `.env`.
+- **App**: version in `/health` and the UI; `GET /hosts/update` = current / latest / release notes / mode
+  (GitHub checked at most every 6 h, `UPDATE_REPO`, `UPDATE_CHANNEL`, `UPDATE_CHECK`); Host page card
+  "Version and updates" with the command, and an **Update now** button for admins = helper action
+  `self-update <version>` -> `systemd-run` detached updater (survives the service restart), progress in the log.
+- Labs are not affected by an update (libvirt holds them); the WireGuard relay pauses during the restart.
+- Later: signed tarballs (minisign), an RPM in COPR for EL hosts (`dnf upgrade`).
+
 ## 4. Suggested order
 
 Done so far (2026-10): all of §1, groups v1 (+ reservations, custom members), k3s and kubeadm clusters.

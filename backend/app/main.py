@@ -131,7 +131,7 @@ app.include_router(api_router, prefix="/api/v1")
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": settings.APP_VERSION}
 
 
 # Serve the built frontend (npm run build) from the same origin, if present

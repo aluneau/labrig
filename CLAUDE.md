@@ -67,6 +67,7 @@ docs/disconnected.md  egress switch + mirror registry on the router (mirror-regi
 docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
+docs/updates.md       release installs (/opt/vm-manager), vm-manager-update, GitHub releases (CI, nightly), Host page Update now
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
@@ -286,6 +287,13 @@ e2e/                  Playwright browser tests against the real app (see below)
   (containerd.io from Docker's repo, kube* from pkgs.k8s.io, EL SELinux permissive), then guest-exec runs
   `kubeadm init` (v1beta4 config, app token + certificate key, SANs = uplink/router IP + api names),
   Flannel, `kubeadm join` (`--node-name`: EL hostnames are FQDNs; control planes one at a time).
+
+- **Releases / updates** (docs/updates.md): checkout mode (the rig, `git pull`) vs release mode
+  (`/opt/vm-manager/releases/<ver>` + `current` symlink, data `/var/lib/vm-manager`, config `/etc/vm-manager/vm-manager.env`
+  read by Settings before `backend/.env`). `scripts/vm-manager-update` (root, stdlib) install/update/rollback: GitHub
+  release tarball + `.sha256` -> unpack -> `setup.sh --release --no-restart` -> switch -> restart -> `/health` version
+  check -> rollback. `APP_VERSION` = tarball `VERSION` file, else pyproject + `-dev`. Helper `self-update` (v5) only runs
+  the channel's latest release. `.github/workflows`: ci.yml (checks), release.yml (tag vX.Y.Z = stable, main = `nightly`).
 
 ## Portability rules (learned from installing on Arch, Alma 9/10, Debian 13)
 

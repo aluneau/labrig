@@ -1477,3 +1477,29 @@ export interface TemplateSave {
   tags?: string[];
   guide?: string | null;
 }
+
+// Version and updates from GitHub releases (GET /hosts/update, docs/updates.md)
+export interface UpdateRelease {
+  version: string;
+  tag?: string | null;
+  notes: string;
+  url?: string | null;
+  published_at?: string | null;
+  prerelease: boolean;
+}
+
+export interface UpdateStatus {
+  version: string; // running
+  mode: 'release' | 'checkout';
+  channel: 'stable' | 'nightly';
+  repo: string;
+  check_enabled: boolean;
+  latest: UpdateRelease | null;
+  available: boolean;
+  error: string | null;
+  checked_at: number | null;
+  can_update: boolean; // release install: the Update now button works
+  updating: boolean;
+  command: string; // how to update by hand
+  log: string;
+}

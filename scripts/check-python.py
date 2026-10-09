@@ -8,7 +8,7 @@
   lazily, so these import fine there but raise NameError on 3.9-3.13 (class bodies and function
   signatures are evaluated at definition time). `X | None` in annotations is also flagged on 3.9.
 
-Usage: scripts/check-python.py [paths...]   (default: backend/app scripts/vm-manager-helper)
+Usage: scripts/check-python.py [paths...]   (default: backend/app scripts/vm-manager-helper scripts/vm-manager-update)
 """
 import ast
 import io
@@ -17,7 +17,7 @@ import sys
 import tokenize
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT = [ROOT / "backend" / "app", ROOT / "scripts" / "vm-manager-helper"]
+DEFAULT = [ROOT / "backend" / "app", ROOT / "scripts" / "vm-manager-helper", ROOT / "scripts" / "vm-manager-update"]
 
 
 def files(paths):

@@ -10,6 +10,10 @@ from app.services.daemon_service import daemon_service
 from app.services.host_service import host_service
 from app.services.sriov_service import sriov_service
 from app.services.task_service import task_service
+from app.services import update_service
+from app.services.helper_service import HelperError
+from pydantic import BaseModel
+from typing import Optional
 
 router = APIRouter()
 
@@ -94,3 +98,25 @@ def set_sriov_num_vfs(pf: str, data: SriovNumVfs):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class UpdateRequest(BaseModel):
+    version: str
+    channel: Optional[str] = None
+
+
+@router.get("/update")
+def get_update(refresh: bool = False, channel: Optional[str] = None):
+    """Running version, install mode, latest GitHub release of the channel (docs/updates.md)"""
+    return update_service.status(refresh=refresh, channel=channel)
+
+
+@router.post("/update")
+def post_update(data: UpdateRequest):
+    """Update now (release installs): runs vm-manager-update detached through the privileged helper"""
+    try:
+        return update_service.start_update(data.version, data.channel or "stable")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HelperError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)

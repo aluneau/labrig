@@ -1,0 +1,59 @@
+# Release tarballs for `vm-manager-update` (docs/updates.md):
+#  - tag vX.Y.Z      -> GitHub Release "vX.Y.Z" with vm-manager-X.Y.Z.tar.gz (+ .sha256)
+#  - push to main    -> rolling pre-release "nightly" with vm-manager-<pyproject>-nightly.<date>.<sha>.tar.gz
+name: Release
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: version
+        id: v
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' backend/pyproject.toml)
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            v="${GITHUB_REF_NAME#v}"
+            [ "$v" = "$base" ] || { echo "tag $v != backend/pyproject.toml version $base"; exit 1; }
+          else
+            v="$base-nightly.$(date -u +%Y%m%d%H%M).$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: tarball
+        run: |
+          scripts/package.sh "${{ steps.v.outputs.version }}"
+          cd dist && sha256sum "vm-manager-${{ steps.v.outputs.version }}.tar.gz" > "vm-manager-${{ steps.v.outputs.version }}.tar.gz.sha256"
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          files="dist/vm-manager-$v.tar.gz dist/vm-manager-$v.tar.gz.sha256"
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            gh release create "$GITHUB_REF_NAME" $files --title "VM Manager $v" --generate-notes --verify-tag
+          else
+            gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
+            git push origin :refs/tags/nightly 2>/dev/null || true
+            gh release create nightly $files --prerelease --target "$GITHUB_SHA" --title "Nightly $v" \
+              --notes "Built from main at $GITHUB_SHA. Install: sudo vm-manager-update update --channel nightly"
+          fi

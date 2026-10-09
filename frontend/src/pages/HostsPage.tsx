@@ -20,6 +20,7 @@ import { formatBytes } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
 import { LibvirtCard } from '../components/host/LibvirtCard';
 import { SriovCard } from '../components/host/SriovCard';
+import { UpdateCard } from '../components/host/UpdateCard';
 import { useLibvirt } from '../hooks/useLibvirt';
 
 const Item: React.FC<{ term: string; children: React.ReactNode }> = ({ term, children }) => (
@@ -39,6 +40,7 @@ export const HostsPage: React.FC = () => {
       <PageHeader title="Host" />
       <PageSection>
         <div style={{ marginBottom: 16 }}><LibvirtCard /></div>
+        <div style={{ marginBottom: 16 }}><UpdateCard /></div>
       </PageSection>
       {running && <HostDetails />}
     </>

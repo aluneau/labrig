@@ -9,6 +9,8 @@
 #   scripts/setup.sh --wg-ports 51820-51869   # UDP ports opened for lab WireGuard (WG_HOST_PORTS), none = skip
 #   scripts/setup.sh --no-auth       # no login (AUTH_ENABLED=false in backend/.env): trusted single-user host only
 #   scripts/setup.sh --auth          # turn the login back on (the default for new installs)
+# Release installs (/opt/vm-manager, docs/updates.md) run it through `vm-manager-update install|update`, which
+# adds --release [--user U] [--no-restart] [--import-data DIR] [--channel C] [--repo OWNER/NAME].
 #
 # Supported: Arch (and derivatives like CachyOS/Manjaro), Fedora, RHEL / AlmaLinux / Rocky / CentOS Stream,
 # Debian / Ubuntu. Run it as the user who will use VM Manager; it calls sudo when needed.
@@ -22,8 +24,14 @@ AT_BOOT=1
 SERVICE_NAME="vm-manager"
 WG_PORTS="51820-51869"
 AUTH=""  # "" = keep the current setting (on by default), on, off
+RELEASE=0          # code in /opt/vm-manager/releases/<ver>, data /var/lib/vm-manager, config /etc/vm-manager
+RESTART=1
+USER_OPT=""
+IMPORT_DATA=""
+CHANNEL="stable"
+REPO="aluneau/labrig"
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) LISTEN="$2"; shift 2 ;;
@@ -33,6 +41,12 @@ while [ $# -gt 0 ]; do
     --wg-ports) WG_PORTS="$2"; shift 2 ;;
     --no-auth) AUTH=off; shift ;;
     --auth) AUTH=on; shift ;;
+    --release) RELEASE=1; shift ;;
+    --no-restart) RESTART=0; shift ;;
+    --user) USER_OPT="$2"; shift 2 ;;
+    --import-data) IMPORT_DATA="$2"; shift 2 ;;
+    --channel) CHANNEL="$2"; shift 2 ;;
+    --repo) REPO="$2"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
@@ -52,10 +66,27 @@ else
   SUDO="sudo"
   TARGET_USER="$(id -un)"
 fi
+[ -n "$USER_OPT" ] && TARGET_USER="$USER_OPT"
+id "$TARGET_USER" >/dev/null 2>&1 || die "user $TARGET_USER does not exist"
 TARGET_GROUP="$(id -gn "$TARGET_USER")"
+BASE=/opt/vm-manager
+if [ "$RELEASE" = 1 ]; then
+  case "$APP_DIR" in "$BASE"/releases/*) ;; *) die "--release: run from $BASE/releases/<version> (vm-manager-update does it)" ;; esac
+  [ "$TARGET_USER" != root ] || die "--release: the service must not run as root (--user NAME)"
+  RUN_DIR="$BASE/current"            # the systemd unit follows the symlink: an update = switch + restart
+  ENV_FILE=/etc/vm-manager/vm-manager.env
+  DATA=/var/lib/vm-manager
+else
+  RUN_DIR="$APP_DIR"
+  ENV_FILE="$APP_DIR/backend/.env"
+fi
 # enable_now <unit>: start a unit, and enable it at boot unless --no-boot
 enable_now() { if [ "$AT_BOOT" = 1 ]; then $SUDO systemctl enable --now "$1"; else $SUDO systemctl start "$1"; fi; }
-as_user() { if [ "$(id -un)" = "$TARGET_USER" ]; then "$@"; else $SUDO -u "$TARGET_USER" "$@"; fi; }
+as_user() {  # run as the app's user (from root: runuser; vm-manager-update runs setup.sh as root)
+  if [ "$(id -un)" = "$TARGET_USER" ]; then "$@"
+  elif [ "$(id -u)" -eq 0 ]; then runuser -u "$TARGET_USER" -- "$@"
+  else $SUDO -u "$TARGET_USER" "$@"; fi
+}
 virsh_root() { $SUDO virsh -q -c qemu:///system "$@"; }
 
 # ---------------------------------------------------------------------------
@@ -146,7 +177,11 @@ $SUDO sh -c 'command -v pkexec' >/dev/null 2>&1 || warn "pkexec not found: DHCP 
 $SUDO sh -c 'command -v dhcp_release' >/dev/null 2>&1 || warn "dhcp_release not found: DHCP lease release will not work"
 # polkitd picks up rule changes by itself; restart it only if it isn't running
 systemctl is-active --quiet polkit 2>/dev/null || $SUDO systemctl start polkit 2>/dev/null || true
-ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules"
+# Updater from GitHub releases (docs/updates.md): `sudo vm-manager-update update`, or the Host page's
+# "Update now" through the helper (self-update), which only runs this root-owned copy
+$SUDO install -o root -g root -m 0755 "$APP_DIR/scripts/vm-manager-update" /usr/local/sbin/vm-manager-update
+if command -v restorecon >/dev/null 2>&1; then $SUDO restorecon /usr/local/sbin/vm-manager-update; fi
+ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules, /usr/local/sbin/vm-manager-update"
 
 # ---------------------------------------------------------------------------
 step "Login (Linux accounts through PAM)"
@@ -170,11 +205,39 @@ else
   ok "PAM service $PAM_FILE"
 fi
 getent group vm-manager >/dev/null || { $SUDO groupadd --system vm-manager && ok "created group vm-manager"; }
-ENV_FILE="$APP_DIR/backend/.env"
-set_env() {  # set_env KEY VALUE: replace or append in backend/.env (kept by updates, not in git)
-  if [ -f "$ENV_FILE" ] && grep -q "^$1=" "$ENV_FILE"; then as_user sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
-  else printf '%s=%s\n' "$1" "$2" | as_user tee -a "$ENV_FILE" >/dev/null; fi
+# set_env KEY VALUE: replace or append in the config (backend/.env of a checkout, /etc/vm-manager/vm-manager.env
+# of a release install: kept by updates, not in git). Release: root-owned, readable by the service's group.
+if [ "$RELEASE" = 1 ]; then
+  env_run() { $SUDO "$@"; }
+  $SUDO install -d -m 0755 /etc/vm-manager
+  [ -f "$ENV_FILE" ] || { $SUDO install -m 0640 -g "$TARGET_GROUP" /dev/null "$ENV_FILE"; ok "created $ENV_FILE"; }
+else
+  env_run() { as_user "$@"; }
+fi
+set_env() {
+  if [ -f "$ENV_FILE" ] && grep -q "^$1=" "$ENV_FILE"; then env_run sed -i "s|^$1=.*|$1=$2|" "$ENV_FILE"
+  else printf '%s=%s\n' "$1" "$2" | env_run tee -a "$ENV_FILE" >/dev/null; fi
 }
+if [ "$RELEASE" = 1 ]; then
+  # Data outside the code (kept across updates): DB, OpenShift files, registry credentials…
+  $SUDO install -d -m 0750 -o "$TARGET_USER" -g "$TARGET_GROUP" "$DATA"
+  if [ -n "$IMPORT_DATA" ]; then
+    [ -d "$IMPORT_DATA/backend" ] || die "--import-data $IMPORT_DATA: not a VM Manager checkout (no backend/)"
+    if [ -e "$DATA/vmanager.db" ]; then
+      warn "$DATA already has a database: --import-data skipped"
+    else
+      [ -d "$IMPORT_DATA/backend/data" ] && $SUDO cp -a "$IMPORT_DATA/backend/data/." "$DATA/"
+      $SUDO chown -R "$TARGET_USER:$TARGET_GROUP" "$DATA"
+      if [ -f "$IMPORT_DATA/backend/.env" ]; then
+        grep -vE '^(DATABASE_URL|DATA_DIR|FRONTEND_DIR)=' "$IMPORT_DATA/backend/.env" | $SUDO tee -a "$ENV_FILE" >/dev/null
+      fi
+      ok "imported $IMPORT_DATA/backend/data and .env into $DATA, $ENV_FILE"
+    fi
+  fi
+  $SUDO grep -q '^DATA_DIR=' "$ENV_FILE" 2>/dev/null || set_env DATA_DIR "$DATA"
+  $SUDO grep -q '^DATABASE_URL=' "$ENV_FILE" 2>/dev/null || set_env DATABASE_URL "sqlite:///$DATA/vmanager.db"
+  $SUDO chown root:"$TARGET_GROUP" "$ENV_FILE" && $SUDO chmod 0640 "$ENV_FILE"
+fi
 case "$AUTH" in
   on)  set_env AUTH_ENABLED true ;;
   off) set_env AUTH_ENABLED false ;;
@@ -267,18 +330,26 @@ fi
 # ---------------------------------------------------------------------------
 step "Python environment"
 VENV="$APP_DIR/backend/venv"
+# A release's files are root-owned (the service user only reads them): its venv is built as root
+if [ "$RELEASE" = 1 ]; then code_run() { $SUDO "$@"; }; else code_run() { as_user "$@"; }; fi
 if [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c 'import libvirt' 2>/dev/null; then
   ok "reusing $VENV"
 else
-  rm -rf "$VENV"
+  code_run rm -rf "$VENV"
   # system site packages: use the distro's libvirt bindings (no compiler / headers needed)
-  as_user "$PYTHON" -m venv --system-site-packages "$VENV"
+  code_run "$PYTHON" -m venv --system-site-packages "$VENV"
   ok "created $VENV"
 fi
-grep -v '^libvirt-python' "$APP_DIR/backend/requirements.txt" > "$APP_DIR/backend/.requirements-pip.txt"
-as_user "$VENV/bin/pip" install -q --disable-pip-version-check -r "$APP_DIR/backend/.requirements-pip.txt"
-rm -f "$APP_DIR/backend/.requirements-pip.txt"
-(cd "$APP_DIR/backend" && as_user "$VENV/bin/python" -c 'import app.main') || die "backend does not import, see the error above"
+grep -v '^libvirt-python' "$APP_DIR/backend/requirements.txt" | code_run tee "$APP_DIR/backend/.requirements-pip.txt" >/dev/null
+code_run "$VENV/bin/pip" install -q --disable-pip-version-check -r "$APP_DIR/backend/.requirements-pip.txt"
+code_run rm -f "$APP_DIR/backend/.requirements-pip.txt"
+if [ "$RELEASE" = 1 ]; then
+  code_run "$VENV/bin/python" -m compileall -q "$APP_DIR/backend/app" >/dev/null || true
+  (cd "$APP_DIR/backend" && as_user env PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c 'import app.main') \
+    || die "backend does not import, see the error above"
+else
+  (cd "$APP_DIR/backend" && as_user "$VENV/bin/python" -c 'import app.main') || die "backend does not import, see the error above"
+fi
 ok "backend dependencies installed"
 
 # ---------------------------------------------------------------------------
@@ -308,7 +379,7 @@ Group=$TARGET_GROUP
 SupplementaryGroups=libvirt
 # Started through /bin/sh: with SELinux (RHEL/Fedora), systemd itself may not access files in a
 # home directory, but the service process it starts may.
-ExecStart=/bin/sh -c 'cd "$APP_DIR/backend" && exec "$VENV/bin/python" -m uvicorn app.main:app --host $LISTEN --port $PORT --timeout-graceful-shutdown 3'
+ExecStart=/bin/sh -c 'cd "$RUN_DIR/backend" && exec "$RUN_DIR/backend/venv/bin/python" -m uvicorn app.main:app --host $LISTEN --port $PORT --timeout-graceful-shutdown 3'
 Restart=on-failure
 RestartSec=3
 
@@ -320,6 +391,18 @@ EOF
     $SUDO systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
   else
     $SUDO systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+  if [ "$RELEASE" = 1 ]; then
+    # settings of later updates (vm-manager-update reads them back)
+    args="--listen $LISTEN --port $PORT --wg-ports $WG_PORTS"; [ "$AT_BOOT" = 1 ] || args="$args --no-boot"
+    printf 'REPO=%s\nCHANNEL=%s\nSERVICE=%s\nUSER=%s\nHOST=%s\nPORT=%s\nSETUP_ARGS=%s\n' \
+      "$REPO" "$CHANNEL" "$SERVICE_NAME" "$TARGET_USER" "$LISTEN" "$PORT" "$args" | $SUDO tee /etc/vm-manager/update.conf >/dev/null
+    $SUDO chmod 0644 /etc/vm-manager/update.conf
+    ok "/etc/vm-manager/update.conf ($REPO, channel $CHANNEL)"
+  fi
+  if [ "$RESTART" = 0 ]; then
+    ok "unit written, not restarted (--no-restart: vm-manager-update switches the release and restarts)"
+    exit 0
   fi
   $SUDO systemctl restart "$SERVICE_NAME"
   host="$LISTEN"; [ "$host" = 0.0.0.0 ] && host=127.0.0.1
@@ -346,8 +429,9 @@ if [ "$AUTH_STATE" = on ]; then
   echo "  Log in with your Linux account ($TARGET_USER) and its password."
   echo "  Other people: sudo usermod -aG vm-manager <user>   (read-only access: AUTH_VIEWER_GROUPS in backend/.env)"
   echo "  API token for scripts / OpenTofu (or create one in the UI: user menu > API tokens):"
-  echo "    (cd $APP_DIR/backend && venv/bin/python -m app.cli token create --user $TARGET_USER --name opentofu)"
+  echo "    (cd $RUN_DIR/backend && venv/bin/python -m app.cli token create --user $TARGET_USER --name opentofu)"
 else
   echo "  No login (AUTH_ENABLED=false): turn it on with scripts/setup.sh --auth"
 fi
+[ "$RELEASE" = 1 ] && echo "  Updates: sudo vm-manager-update update   (or Host page > Version and updates; config $ENV_FILE)"
 echo "  First steps: Storage > Cloud images > Download, then Virtual machines > Create VM."
