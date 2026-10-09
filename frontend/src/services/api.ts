@@ -10,7 +10,7 @@ import {
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
-  VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
+  VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
   AuthStatus, ApiToken, ApiTokenCreated,
 } from '../types';
 
@@ -261,6 +261,8 @@ export const hostApi = {
   sriov: () => request<SriovStatus>('/hosts/sriov'),
   setNumVfs: (pf: string, numVfs: number) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),
+  updatePf: (pf: string, data: SriovPFUpdate) =>
+    request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify(data) }),
 };
 
 export const authApi = {

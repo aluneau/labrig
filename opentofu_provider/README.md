@@ -49,6 +49,7 @@ Computed: `id`, `path`, `size`. An already downloaded image is adopted. Download
 | `dhcp_start`, `dhcp_end` | optional | server picks the whole subnet if unset |
 | `autostart` | `true` | |
 | `dhcp_hosts` | optional set of `{mac, ip, name}` | static reservations, applied live |
+| `vlan` | optional, replace | `hostdev` only: VLAN tag (1-4094) the PF sets on every VF of the pool |
 
 Computed: `id`, `bridge`, `active`. Settings changes restart the network. Switching to/from `hostdev`, or a pool's
 `forward_dev`, replaces the network. VMs get a VF with a `vmmanager_nic` on the pool (see `docs/sriov.md`).
@@ -89,11 +90,26 @@ detaches it and deletes the volume.
 | `model` | `virtio`, replace | `virtio`, `e1000e`, `igb` (emulated SR-IOV, 7 VFs), `e1000`, `rtl8139`; ignored on VF pools |
 | `mac` | generated, replace | |
 | `link_state` | `up`, in place | `down` = cable unplugged (live) |
+| `vlan` | optional, replace | VF pool NICs only: VLAN tag of this VF (overrides the pool's) |
 
 Computed: `id` (`<vm_id>/<mac>`), `vf` (an SR-IOV VF from a VF pool network). Hot-plugged when the VM runs;
 destroy hot-unplugs it. A separate resource (like `vmmanager_disk`) rather than blocks on `vmmanager_vm`, so
 adding / removing a NIC never touches the VM (whose hardware attributes force a replacement). Example:
 `examples/opentofu/sriov`.
+
+### `vmmanager_sriov_pf`
+Host SR-IOV settings of one physical function (see GET /api/v1/hosts/sriov), applied by the privileged helper.
+
+| Argument | | |
+|---|---|---|
+| `name` | required, replace | PF interface, e.g. `ens1f0` |
+| `num_vfs` | required, in place | refused while one of its VFs is in a running VM |
+| `trust` | `false`, in place | VF trust on every VF (guest may change MAC / promiscuous: bonding, OpenShift) |
+| `spoofchk` | `true`, in place | MAC anti-spoofing on every VF |
+| `persistent` | `false`, in place | restore count + options at host boot (`vm-manager-sriov.service`) |
+
+Computed: `id` (= name), `pci`, `driver`, `total_vfs`. Destroy sets 0 VFs and turns persistence off. Import by PF name.
+Example: `examples/opentofu/sriov-pool` (PF + VLAN pool + VM with a VF NIC).
 
 ### `vmmanager_group`
 A lab group: isolated network `vmm-g-<name>`, router VM `<name>-rtr` (DHCP, DNS, NAT), members `<name>-<member>`.

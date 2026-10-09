@@ -34,7 +34,7 @@ Recipes:
 | Customer case | Spec |
 |---|---|
 | Fully disconnected site | `egress: {mode: blocked}` + registry |
-| Only a proxy goes out | `egress: {mode: blocked, allow: ["192.168.122.10/32"]}` + a proxy VM on the `default` network (squid), cluster `proxy:` settings pointing at it |
+| Only a proxy goes out | `egress: {mode: proxy}`: squid on the router itself (allowlist, auth; docs/router-cases.md), or `{mode: blocked, allow: ["192.168.122.10/32"]}` + your own proxy VM on the `default` network; cluster `proxy:` settings pointing at it |
 | Internal mirror + some direct access (e.g. a Git server) | `allow` its address |
 | "It worked until the firewall change" | install open, then switch to blocked day-2 and watch what breaks |
 

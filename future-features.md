@@ -20,6 +20,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
+| Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
 | Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
 | CI, per-group resource budget | open (§4) |
 
@@ -156,8 +157,13 @@ Design:
   nested (L2 on a VF of L1's igb). `vmmanager_nic`, `iommu` / `guest_kernel_args` on `vmmanager_vm`,
   `vmmanager_network` `mode = "hostdev"` (verified nested: VF pool on L1's igb + VM with a VF NIC, clean plan).
   docs/sriov.md has the OpenShift operator settings (82576 is not in OpenShift's supported list).
+- **Real hardware hardening (2026-10-09)**: Host page readiness checks with fixes (firmware DMAR/IVRS, kernel args per
+  distro, iommu=pt, interrupt remapping, vfio-pci, PF firmware VF limit, link, IOMMU group isolation per VF), VF trust /
+  spoofchk per PF, VF counts kept across reboots (`vm-manager-sriov.service`), VLAN tag on pools and VF NICs,
+  plain-words VF pool errors, `vmmanager_sriov_pf` + `vlan` attributes. Verified nested only; real NICs (ixgbe, i40e,
+  ice, mlx5) still to verify (docs/sriov.md §3).
 - **Not yet**: macvtap / bridge-type NICs (only libvirt networks), VLAN trunks on NICs, NIC options in group /
-  cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs), persisting VF counts from the UI,
+  cluster specs (e.g. workers with an igb NIC for SR-IOV operator labs),
   `<driver queues>` (multiqueue) and NIC MTU.
 
 ### 1.7 Console fidelity (S) — ✅ done
@@ -330,6 +336,14 @@ idea as the live DHCP reservations, but with the router as the target.
 - **Customer-case templates**: a library of specs (`templates/*.yaml`) such as "split DNS",
   "BGP + MetalLB", "proxy-only egress", "MTU 1400 path", "disconnected (no uplink) + mirror registry".
   You'd pick a template, fill in a case number, and press Create.
+
+> **Router primitives for customer cases — ✅ done** (2026-10, docs/router-cases.md): `router.dns.zones` (conditional
+> forwarding to a member's own resolver / an address, + `stop_rebind`, `no_negcache`, `cache_size`), egress mode
+> `proxy` (blocked + squid on the router: allowlist, basic auth, CONNECT ports; members get the proxy environment),
+> `network.mtu` (libvirt `<mtu>`, router LAN, DHCP option 26) and `router.path` (narrow hop MTU on the router,
+> dropped ICMP frag-needed, MSS clamping). UI (Network & DNS, Registry & egress), topology badges, OpenTofu
+> (`dns_zone`, `egress.proxy`, `mtu`, `path`), templates `split-dns`, `proxy-only-egress`, `mtu-1400`,
+> e2e `router-cases.js`. Not done: TLS-intercepting proxy (ssl_bump + own CA), IPv6 MTU.
 
 > **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the
 > group CIDR, AS 64512 ← 64513, announce ranges from `BGP_ANNOUNCE_POOL` filtered `le 32`, ECMP over ports), live

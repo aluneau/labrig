@@ -85,9 +85,11 @@ def get_sriov():
 
 @router.put("/sriov/{pf}", response_model=SriovPF)
 def set_sriov_num_vfs(pf: str, data: SriovNumVfs):
-    """Create / remove VFs on a PF (privileged helper; not persistent across host reboots)"""
+    """VF count, VF options (trust / spoofchk on every VF) and persistence across host reboots of a PF
+    (privileged helper)"""
     try:
-        return sriov_service.set_num_vfs(pf, data.num_vfs)
+        return sriov_service.update_pf(pf, num_vfs=data.num_vfs, persistent=data.persistent, trust=data.trust,
+                                       spoofchk=data.spoofchk)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

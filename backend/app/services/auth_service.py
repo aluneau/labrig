@@ -31,6 +31,7 @@ SESSION_COOKIE = "vmm_session"
 CSRF_HEADER = "x-vmm-request"  # required on writes that don't use a Bearer token
 TOKEN_PREFIX = "vmm_"
 ROLES = ("admin", "viewer")
+HELPER_MIN_VERSION = 4  # scripts/vm-manager-helper with `pam-auth`
 
 
 @dataclass
@@ -303,6 +304,12 @@ def log_startup() -> None:
     missing = [g for g in _split(settings.AUTH_ADMIN_GROUPS) + _split(settings.AUTH_VIEWER_GROUPS)
                if not _group_exists(g)]
     helper = "helper for other local users" if _helper_usable() else "in-process only"
+    if _helper_usable() and not settings.AUTH_PAM_CONFDIR:
+        from app.services.sriov_service import sriov_service
+        version = sriov_service.helper_version() or 0
+        if version < HELPER_MIN_VERSION:
+            logger.warning(f"The privileged helper is version {version}: logins of local users other than "
+                           f"{service_user()} need version {HELPER_MIN_VERSION} (pam-auth). Re-run scripts/setup.sh")
     logger.info(f"Authentication: Linux accounts via PAM service '{service}' ({helper}); admin = {service_user()} "
                 f"+ groups [{settings.AUTH_ADMIN_GROUPS}], viewer = groups [{settings.AUTH_VIEWER_GROUPS}]"
                 + (f"; groups not found on this host: {', '.join(missing)}" if missing else ""))

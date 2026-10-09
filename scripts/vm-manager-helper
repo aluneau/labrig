@@ -12,6 +12,17 @@ Fixed command whitelist, every argument validated here (never trust the caller):
       Set the number of SR-IOV VFs of a physical function (sysfs sriov_numvfs). The interface must be
       a PCI device with sriov_totalvfs >= n; changing a non-zero count goes through 0 (kernel rule).
       Refused while one of its VFs is bound to vfio-pci (likely passed through to a running VM).
+      Re-applies the PF's stored VF options (trust / spoofchk) to the new VFs, and updates the stored
+      count when the PF is persistent.
+  helper sriov-vf-options <interface> trust <on|off> spoofchk <on|off>
+      Apply `ip link set <pf> vf N trust .. spoofchk ..` to every VF of the PF and store the options in
+      /etc/vm-manager/sriov.conf (re-applied whenever VFs are re-created, and at boot when persistent).
+  helper sriov-persist <interface> <on|off>
+      on: store the PF's current VF count (keyed by PCI address) in /etc/vm-manager/sriov.conf and enable
+      vm-manager-sriov.service, which runs `helper sriov-restore` at boot. off: forget it (the unit is
+      disabled and removed once no PF is persistent).
+  helper sriov-restore
+      Re-create the stored VF counts and options of persistent PFs (run by vm-manager-sriov.service).
   helper pam-auth <user>            (password on stdin)
       Check a Linux account's password + account state through PAM, service "vm-manager" ONLY
       (/etc/pam.d/vm-manager, installed by setup.sh; never su/sudo whose pam_rootok would accept
@@ -20,14 +31,16 @@ Fixed command whitelist, every argument validated here (never trust the caller):
 
 Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed, 6 denied.
 """
+import errno
 import ipaddress
+import json
 import os
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-VERSION = "3"
+VERSION = "4"
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
@@ -36,6 +49,10 @@ BRIDGE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,127}[$]?$")
 PAM_SERVICE = "vm-manager"
+PCI_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+SRIOV_CONF = "/etc/vm-manager/sriov.conf"
+SRIOV_UNIT = "vm-manager-sriov.service"
+SRIOV_UNIT_PATH = "/etc/systemd/system/" + SRIOV_UNIT
 
 
 def fail(code, message):
@@ -109,44 +126,275 @@ def dhcp_release(args):
     print(f"released {ip} ({mac}) on {bridge}")
 
 
-def sriov_set_numvfs(args):
-    if len(args) != 2:
-        fail(2, "usage: sriov-set-numvfs <interface> <n>")
-    iface, count = args
+def _pf_device(iface):
+    """sysfs PCI device directory of an SR-IOV capable PF network interface (validated), or fail"""
     if not IFACE_RE.match(iface) or iface in (".", ".."):
         fail(2, f"invalid interface name {iface!r}")
-    if not count.isdigit() or len(count) > 4:
-        fail(2, f"invalid VF count {count!r}")
-    count = int(count)
     device = os.path.realpath(f"/sys/class/net/{iface}/device")
     if not device.startswith("/sys/devices/pci") or not os.path.isfile(os.path.join(device, "sriov_totalvfs")):
         fail(4, f"{iface} is not an SR-IOV capable PCI network interface")
+    return device
 
-    def read(name):
-        with open(os.path.join(device, name)) as f:
-            return int(f.read().strip() or 0)
 
-    total, current = read("sriov_totalvfs"), read("sriov_numvfs")
-    if count > total:
-        fail(2, f"{iface} supports at most {total} VFs")
-    if count == current:
-        print(f"{iface}: {count} VFs")
-        return
-    for entry in os.listdir(device):
-        if entry.startswith("virtfn"):
-            driver = os.path.join(device, entry, "driver")
-            if os.path.islink(driver) and os.path.basename(os.readlink(driver)) == "vfio-pci":
-                fail(5, f"VF {os.path.basename(os.readlink(os.path.join(device, entry)))} of {iface} is bound to "
-                        f"vfio-pci (passed through to a VM?): stop the VMs using it first")
+def _read_int(device, name):
+    with open(os.path.join(device, name)) as f:
+        return int(f.read().strip() or 0)
+
+
+def _load_conf():
     try:
+        with open(SRIOV_CONF) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {"pfs": {}}
+    except (OSError, ValueError) as e:
+        fail(5, f"cannot read {SRIOV_CONF}: {e}")
+    pfs = data.get("pfs") if isinstance(data, dict) else None
+    if not isinstance(pfs, dict):
+        return {"pfs": {}}
+    # Keep only well-formed entries (the file is root-owned, but never trust it blindly)
+    clean = {}
+    for pci, entry in pfs.items():
+        if not PCI_RE.match(str(pci)) or not isinstance(entry, dict):
+            continue
+        item = {"iface": str(entry.get("iface") or "")[:15], "persistent": entry.get("persistent") is True}
+        num = entry.get("num_vfs")
+        if isinstance(num, int) and not isinstance(num, bool) and 0 <= num <= 4096:
+            item["num_vfs"] = num
+        for key in ("trust", "spoofchk"):
+            if isinstance(entry.get(key), bool):
+                item[key] = entry[key]
+        clean[pci] = item
+    return {"pfs": clean}
+
+
+def _restorecon(*paths):
+    tool = which("restorecon")
+    if tool:
+        subprocess.run([tool, *paths], capture_output=True, env={"PATH": PATH}, timeout=20)
+
+
+def _save_conf(conf):
+    os.makedirs(os.path.dirname(SRIOV_CONF), mode=0o755, exist_ok=True)
+    tmp = SRIOV_CONF + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(conf, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, SRIOV_CONF)
+    _restorecon(os.path.dirname(SRIOV_CONF), SRIOV_CONF)
+
+
+def _systemctl(*args):
+    tool = which("systemctl")
+    if tool is None:
+        fail(3, "systemctl not found: VF persistence needs systemd")
+    result = subprocess.run([tool, *args], capture_output=True, text=True, env={"PATH": PATH, "LC_ALL": "C"},
+                            timeout=60)
+    if result.returncode != 0:
+        fail(5, f"systemctl {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
+
+
+def _apply_vf_options(iface, device, entry):
+    """`ip link set <pf> vf N trust .. spoofchk ..` on every VF; returns error strings (not fatal)"""
+    args = []
+    if "trust" in entry:
+        args += ["trust", "on" if entry["trust"] else "off"]
+    if "spoofchk" in entry:
+        args += ["spoofchk", "on" if entry["spoofchk"] else "off"]
+    if not args:
+        return []
+    tool = which("ip")
+    if tool is None:
+        return ["the ip tool (iproute2) is not installed"]
+    errors = []
+    for n in range(_read_int(device, "sriov_numvfs")):
+        result = subprocess.run([tool, "link", "set", "dev", iface, "vf", str(n), *args], capture_output=True,
+                                text=True, env={"PATH": PATH, "LC_ALL": "C"}, timeout=20)
+        if result.returncode != 0:
+            errors.append(f"vf {n}: {(result.stderr or result.stdout).strip()}")
+    return errors
+
+
+def _numvfs_error(iface, e):
+    if e.errno == errno.ENOMEM:
+        return (f"the kernel could not allocate PCI resources for the VFs of {iface} (MMIO / bus numbers): enable "
+                f"SR-IOV in the server firmware (BIOS 'SR-IOV Global Enable'), or add pci=realloc to the kernel "
+                f"command line, then reboot")
+    if e.errno == errno.EBUSY:
+        return f"the VFs of {iface} are busy (used by a VM or a driver): stop what uses them first"
+    if e.errno in (errno.EOPNOTSUPP, errno.ENOENT, errno.EINVAL, errno.EIO):
+        return (f"the {iface} driver refused the VF count ({e.strerror}): the NIC firmware may have SR-IOV "
+                f"disabled or fewer VFs enabled (Mellanox: mstconfig -d <pci> set SRIOV_EN=1 NUM_OF_VFS=<n>; "
+                f"Intel: update the NVM), see dmesg")
+    return f"cannot set sriov_numvfs on {iface}: {e.strerror or e}"
+
+
+def _write_numvfs(iface, device, count):
+    """Set sriov_numvfs (through 0: kernel rule); returns an error string or None"""
+    try:
+        current = _read_int(device, "sriov_numvfs")
+        if current == count:
+            return None
         if current and count:
             with open(os.path.join(device, "sriov_numvfs"), "w") as f:
                 f.write("0")
         with open(os.path.join(device, "sriov_numvfs"), "w") as f:
             f.write(str(count))
     except OSError as e:
-        fail(5, f"cannot set sriov_numvfs on {iface}: {e.strerror or e}")
+        return _numvfs_error(iface, e)
+    return None
+
+
+def sriov_set_numvfs(args):
+    if len(args) != 2:
+        fail(2, "usage: sriov-set-numvfs <interface> <n>")
+    iface, count = args
+    device = _pf_device(iface)
+    if not count.isdigit() or len(count) > 4:
+        fail(2, f"invalid VF count {count!r}")
+    count = int(count)
+    total = _read_int(device, "sriov_totalvfs")
+    if count > total:
+        fail(2, f"{iface} supports at most {total} VFs")
+    if count != _read_int(device, "sriov_numvfs"):
+        for entry in os.listdir(device):
+            if entry.startswith("virtfn"):
+                driver = os.path.join(device, entry, "driver")
+                if os.path.islink(driver) and os.path.basename(os.readlink(driver)) == "vfio-pci":
+                    fail(5, f"VF {os.path.basename(os.readlink(os.path.join(device, entry)))} of {iface} is "
+                            f"bound to vfio-pci (passed through to a VM?): stop the VMs using it first")
+        error = _write_numvfs(iface, device, count)
+        if error:
+            fail(5, error)
+    conf = _load_conf()
+    entry = conf["pfs"].get(os.path.basename(device))
+    warnings = []
+    if entry is not None:
+        warnings = _apply_vf_options(iface, device, entry)
+        if entry.get("persistent") and (entry.get("num_vfs") != count or entry.get("iface") != iface):
+            entry.update(num_vfs=count, iface=iface)
+            _save_conf(conf)
     print(f"{iface}: {count} VFs")
+    for w in warnings:
+        print(f"warning: {w}")
+
+
+def sriov_vf_options(args):
+    if len(args) != 5 or args[1] != "trust" or args[3] != "spoofchk" or args[2] not in ("on", "off") \
+            or args[4] not in ("on", "off"):
+        fail(2, "usage: sriov-vf-options <interface> trust <on|off> spoofchk <on|off>")
+    iface, trust, spoofchk = args[0], args[2], args[4]
+    device = _pf_device(iface)
+    conf = _load_conf()
+    entry = conf["pfs"].setdefault(os.path.basename(device), {"iface": iface, "persistent": False})
+    entry.update(iface=iface, trust=trust == "on", spoofchk=spoofchk == "on")
+    errors = _apply_vf_options(iface, device, entry)
+    _save_conf(conf)
+    if errors:
+        fail(5, f"the {iface} driver refused some VF options: {'; '.join(errors)}")
+    print(f"{iface}: VFs trust {trust}, spoofchk {spoofchk}")
+
+
+UNIT_TEMPLATE = """# Installed by the VM Manager helper (sriov-persist); removed when no PF is persistent any more.
+[Unit]
+Description=VM Manager: restore SR-IOV VF counts and VF options ({conf})
+After=systemd-udev-trigger.service systemd-modules-load.service
+Before=libvirtd.service virtqemud.service virtnetworkd.service virtnodedevd.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={helper} sriov-restore
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def sriov_persist(args):
+    if len(args) != 2 or args[1] not in ("on", "off"):
+        fail(2, "usage: sriov-persist <interface> <on|off>")
+    iface = args[0]
+    device = _pf_device(iface)
+    pci = os.path.basename(device)
+    conf = _load_conf()
+    if args[1] == "on":
+        entry = conf["pfs"].setdefault(pci, {})
+        entry.update(iface=iface, persistent=True, num_vfs=_read_int(device, "sriov_numvfs"))
+    elif pci in conf["pfs"]:
+        conf["pfs"][pci]["persistent"] = False
+        conf["pfs"][pci].pop("num_vfs", None)
+    _save_conf(conf)
+    if any(e.get("persistent") for e in conf["pfs"].values()):
+        helper = os.path.realpath(__file__)
+        st = os.stat(helper)
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            fail(5, f"{helper} must be root-owned and not writable by others to run at boot: re-run setup.sh")
+        unit = UNIT_TEMPLATE.format(conf=SRIOV_CONF, helper=helper)
+        current = None
+        if os.path.isfile(SRIOV_UNIT_PATH):
+            with open(SRIOV_UNIT_PATH) as f:
+                current = f.read()
+        if current != unit:
+            with open(SRIOV_UNIT_PATH, "w") as f:
+                f.write(unit)
+            os.chmod(SRIOV_UNIT_PATH, 0o644)
+            _restorecon(SRIOV_UNIT_PATH)
+            _systemctl("daemon-reload")
+        _systemctl("enable", SRIOV_UNIT)
+    elif os.path.isfile(SRIOV_UNIT_PATH):
+        _systemctl("disable", SRIOV_UNIT)
+        os.remove(SRIOV_UNIT_PATH)
+        _systemctl("daemon-reload")
+    entry = conf["pfs"].get(pci) or {}
+    if entry.get("persistent"):
+        print(f"{iface} ({pci}): {entry['num_vfs']} VFs, restored at boot by {SRIOV_UNIT}")
+    else:
+        print(f"{iface} ({pci}): not persistent")
+
+
+def sriov_restore(args):
+    import time
+    if args:
+        fail(2, "usage: sriov-restore")
+    conf = _load_conf()
+    failed = False
+    for pci, entry in sorted(conf["pfs"].items()):
+        if not entry.get("persistent") or "num_vfs" not in entry:
+            continue
+        device = f"/sys/bus/pci/devices/{pci}"
+        # The PF driver may still be probing (udev coldplug, firmware load): wait for its netdev, up to 90 s
+        deadline = time.monotonic() + 90
+        iface = None
+        while True:
+            try:
+                names = sorted(os.listdir(os.path.join(device, "net")))
+            except OSError:
+                names = []
+            if names and os.path.isfile(os.path.join(device, "sriov_numvfs")):
+                iface = names[0]
+                break
+            if time.monotonic() > deadline:
+                break
+            time.sleep(1)
+        if iface is None or not IFACE_RE.match(iface):
+            sys.stderr.write(f"error: {pci} ({entry.get('iface')}): no SR-IOV network interface after 90 s\n")
+            failed = True
+            continue
+        device = os.path.realpath(device)
+        count = min(entry["num_vfs"], _read_int(device, "sriov_totalvfs"))
+        error = _write_numvfs(iface, device, count)
+        if error:
+            sys.stderr.write(f"error: {error}\n")
+            failed = True
+            continue
+        for w in _apply_vf_options(iface, device, entry):
+            sys.stderr.write(f"warning: {iface} {w}\n")
+        print(f"{iface} ({pci}): {count} VFs")
+    if failed:
+        sys.exit(5)
 
 
 def pam_check(service, username, password):
@@ -238,6 +486,9 @@ COMMANDS = {
     "dhcp-release": dhcp_release,
     "sriov-set-numvfs": sriov_set_numvfs,
     "pam-auth": pam_auth,
+    "sriov-vf-options": sriov_vf_options,
+    "sriov-persist": sriov_persist,
+    "sriov-restore": sriov_restore,
 }
 
 

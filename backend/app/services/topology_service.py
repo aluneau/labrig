@@ -43,6 +43,16 @@ def _in(ip: str, prefix: str) -> bool:
         return False
 
 
+def _router_cases(spec: GroupSpec) -> Dict[str, Any]:
+    """Proxy / split DNS / MTU details for the router box (docs/router-cases.md)"""
+    from app.services import router_cases
+    return {"proxy_port": spec.router.egress.proxy.port if router_cases.proxy_enabled(spec) else None,
+            "dns_zones": [z.domain for z in spec.router.dns.zones],
+            "network_mtu": spec.network.mtu or router_cases.DEFAULT_MTU, "lan_mtu": router_cases.lan_mtu(spec),
+            "path_mtu": spec.router.path.mtu, "drop_frag_needed": spec.router.path.drop_frag_needed,
+            "clamp_mss": spec.router.path.clamp_mss}
+
+
 def topology(db: Session, group: Group) -> Dict[str, Any]:
     from app.services.group_service import group_service, member_vm_name, network_name, router_vm_name
     spec = GroupSpec.model_validate(group.spec)
@@ -167,6 +177,12 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         roles.append("registry")
     if spec.router.egress.mode == "blocked":
         roles.append("egress")  # lab machines can't reach the internet
+    if spec.router.egress.mode == "proxy":
+        roles.append("proxy")   # only through squid on the router
+    if spec.router.dns.zones:
+        roles.append("split-dns")
+    if spec.network.mtu or spec.router.path.mtu:
+        roles.append("mtu")
     uplink_ips = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]] if router_running else []
     return {
         "id": group.id, "name": spec.name, "cidr": spec.cidr, "domain": spec.domain,
@@ -180,6 +196,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             "roles": roles, "dhcp_range": f"{spec.dhcp.start} - {spec.dhcp.end}" if spec.dhcp else None,
             "dns_records": len(spec.router.dns.records), "dns_forwarders": spec.router.dns.forwarders,
             "load_balancers": [lb.model_dump() for lb in spec.load_balancers],
+            **_router_cases(spec),
             "config_applied": bool(group.config_applied),
         },
         "wireguard": {
