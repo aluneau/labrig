@@ -51,8 +51,12 @@ class Ctx:
             return r.json()
         return r.text
 
+    @property
+    def is_viewer(self) -> bool:
+        return self.user is not None and getattr(self.user, "role", "admin") != "admin"
+
     def require_admin(self) -> None:
-        if self.user is not None and getattr(self.user, "role", "admin") != "admin":
+        if self.is_viewer:
             raise ApiError("This tool needs an admin account (viewers are read-only)")
 
 
@@ -72,7 +76,8 @@ async def _find(ctx: Ctx, kind: str, ref: Ref) -> Dict[str, Any]:
     for item in items:
         if item.get("name") == ref:
             return item
-    names = ", ".join(sorted(i.get("name", "?") for i in items)) or "none"
+    names = sorted(i.get("name", "?") for i in items)
+    names = ", ".join(names[:40]) + (f" … ({len(names)} in all)" if len(names) > 40 else "") if names else "none"
     raise ApiError(f"No {kind[:-1]} named '{ref}' (existing: {names})")
 
 
@@ -186,7 +191,7 @@ async def api_request(ctx: Ctx, method: Literal["GET", "POST", "PUT", "PATCH", "
 
 @tool
 async def list_vms(ctx: Ctx) -> Any:
-    """List virtual machines (id, name, state, vCPUs, memory MiB, IPs, lab group)."""
+    """List virtual machines (id, name, state, vCPUs, memory MiB, description). IPs, disks, NICs: get_vm."""
     return [_brief_vm(v) for v in await ctx.api("GET", "/vms")]
 
 
@@ -213,7 +218,7 @@ async def create_vm(ctx: Ctx, name: str, cloud_image: Optional[Ref] = None, iso_
 
     Args:
         name: VM name
-        cloud_image: cloud image id or name (see list_cloud_images)
+        cloud_image: cloud image, e.g. 'debian-13' (distribution-version), its id or volume name (list_cloud_images)
         iso_path: ISO volume path to boot from (GET /storage/isos), instead of a cloud image
         memory_mb: memory in MiB
         vcpu: virtual CPUs
@@ -239,10 +244,13 @@ async def create_vm(ctx: Ctx, name: str, cloud_image: Optional[Ref] = None, iso_
 
 async def _cloud_image(ctx: Ctx, ref: Ref) -> Dict[str, Any]:
     images = await ctx.api("GET", "/storage/cloud-images")
-    for img in images:
-        if str(img.get("id")) == str(ref) or img.get("name") == ref:
+    want = str(ref).lower()
+    for img in images:  # same refs as group members: id, volume name or "<distribution>-<version>"
+        slug = f"{img.get('distribution')}-{img.get('version')}".lower()
+        if want in (str(img.get("id")), str(img.get("name", "")).lower(), slug):
             return img
-    raise ApiError(f"No cloud image '{ref}' (existing: {', '.join(i['name'] for i in images) or 'none'})")
+    known = ", ".join(f"{i.get('distribution')}-{i.get('version')}" for i in images) or "none"
+    raise ApiError(f"No cloud image '{ref}' (existing: {known})")
 
 
 @tool
@@ -289,15 +297,16 @@ async def add_disk(ctx: Ctx, vm: Ref, size_gb: int, bus: Literal["virtio", "sata
 
 
 @tool
-async def remove_disk(ctx: Ctx, vm: Ref, target: str) -> Any:
-    """Detach a disk from a VM (target as shown by get_vm, e.g. vdb). The volume itself is kept.
+async def remove_disk(ctx: Ctx, vm: Ref, target: str, delete_volume: bool = False) -> Any:
+    """Detach a disk from a VM (target as shown by get_vm, e.g. vdb). The boot disk can't be detached.
 
     Args:
         vm: VM name or id
         target: disk target, e.g. vdb
+        delete_volume: also delete the disk's volume (otherwise it stays in its storage pool)
     """
     v = await _find(ctx, "vms", vm)
-    return await ctx.api("DELETE", f"/vms/{v['id']}/disks/{target}")
+    return await ctx.api("DELETE", f"/vms/{v['id']}/disks/{target}", query={"delete_volume": delete_volume})
 
 
 @tool
@@ -463,7 +472,8 @@ async def get_group(ctx: Ctx, group: Ref, leases: bool = True) -> Any:
 async def create_group(ctx: Ctx, spec: Dict[str, Any]) -> Any:
     """Create a lab group from a full GroupSpec (runs as a task; follow it with wait_for_task).
     Call api_describe(path_contains='/groups', method='POST') for the exact schema. Minimal example:
-    {"name": "case123", "domain": "lab", "members": [{"name": "web", "image": "debian-13"}]}.
+    {"name": "case123", "cidr": "10.42.7.0/24", "domain": "lab", "members": [{"name": "web", "image": "debian-13"}]}
+    (cidr: a free /24, see list_groups / list_networks).
     Often easier: list_templates + create_from_template.
 
     Args:
@@ -753,8 +763,9 @@ async def list_cloud_images(ctx: Ctx) -> Any:
 
 @tool
 async def list_networks(ctx: Ctx) -> Any:
-    """libvirt networks (name, bridge, CIDR, forward mode, active). Group networks are vmm-g-<group>."""
-    return await ctx.api("GET", "/networks")
+    """libvirt networks (name, bridge, CIDR, forward mode, DHCP range, active). Group networks are vmm-g-<group>.
+    Full XML: api_request GET /networks/{id}."""
+    return [{k: v for k, v in n.items() if k != "xml_config"} for n in await ctx.api("GET", "/networks")]
 
 
 @tool
@@ -771,7 +782,7 @@ async def create_from_template(ctx: Ctx, template: str, params: Optional[Dict[st
 
     Args:
         template: template id (list_templates)
-        params: template parameters, e.g. {"group": "case42", "workers": 2}
+        params: template parameters (list_templates shows each template's), e.g. {"case": "42"}
         dry_run: only render / check
     """
     action = "render" if dry_run else "create"

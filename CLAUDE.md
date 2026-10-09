@@ -295,7 +295,10 @@ e2e/                  Playwright browser tests against the real app (see below)
 - **MCP** (docs/mcp.md): `/api/mcp` on the app's port, own JSON-RPC (no `mcp` SDK: Python >= 3.10). Tools call the
   REST API **in-process** (httpx ASGITransport) with the caller's Authorization header: never re-implement endpoint
   logic in a tool; `api_describe` / `api_request` expose every endpoint. `admin=True` tools (guest-agent exec/files,
-  ssh, kubectl, kubeadm files) call existing services directly. Viewers may POST /api/mcp (`MCP_PATH`).
+  ssh, kubectl, kubeadm files) call existing services directly and are hidden from viewers (unknown tool). Viewers may
+  POST /api/mcp (`MCP_PATH`). Errors: protocol = JSON-RPC error (unknown method -32601, unknown tool / params -32602),
+  tool failure or bad arguments = result with `isError` (the model reads it). Unsupported `MCP-Protocol-Version` header
+  -> 400: Claude Code probes a newer revision (`server/discover`) first and falls back to `initialize` on it.
 - **Releases / updates** (docs/updates.md): checkout mode (the rig, `git pull`) vs release mode
   (`/opt/vm-manager/releases/<ver>` + `current` symlink, data `/var/lib/vm-manager`, config `/etc/vm-manager/vm-manager.env`
   read by Settings before `backend/.env`). `scripts/vm-manager-update` (root, stdlib) install/update/rollback: GitHub
@@ -353,6 +356,7 @@ KUBECTL=… node clusters.js                                      # k3s: create,
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
+node mcp.js                                                     # MCP: JSON-RPC protocol/error checks, VM create + guest exec/files + disk via tools, delete
 node templates.js                                               # templates: gallery, wizard (YAML edit, OpenTofu, guide), Basic lab boots, Case guide tab, save-as-template round trip
 scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
