@@ -34,6 +34,8 @@ SECRET_READS_RE = re.compile(
     r"^/api/v1/(clusters/\d+/(kubeconfig|openshift/(credentials|ssh-key))"
     r"|groups/\d+/(registry/credentials|wireguard/peers/[^/]+/config))$")
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# MCP endpoint (JSON-RPC over POST): viewers may call it, each tool's API call is then checked with their role
+MCP_PATH = "/api/mcp"
 # Secrets inside ordinary JSON reads (group specs: members' login password, proxy credentials, raw cloud-init):
 # masked for viewers
 SECRET_KEYS = {"password", "user_data", "url_with_auth", "private_key", "kubeadmin_password", "token", "secret"}
@@ -144,7 +146,7 @@ class AuthMiddleware:
 
         if user is not None and user.role != "admin" and not public:
             writes = method not in SAFE_METHODS
-            if (writes and not VIEWER_WRITES_RE.match(path)) or SECRET_READS_RE.match(path):
+            if (writes and not VIEWER_WRITES_RE.match(path) and path != MCP_PATH) or SECRET_READS_RE.match(path):
                 return await self._deny(scope, receive, send, 403, "read-only account (viewer)")
 
         if (user is not None and user.role != "admin" and scope["type"] == "http" and method == "GET"

@@ -11,6 +11,7 @@ import {
   ClusterIcon,
   TopologyIcon,
   CatalogIcon,
+  AutomationIcon,
 } from '@patternfly/react-icons';
 
 const NAV_ITEMS = [
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { path: '/clusters', label: 'Clusters', icon: ClusterIcon },
   { path: '/hosts', label: 'Host', icon: ServerIcon },
   { path: '/tasks', label: 'Tasks', icon: TaskIcon },
+  { path: '/mcp', label: 'AI assistants (MCP)', icon: AutomationIcon },
 ];
 
 export const AppSidebar: React.FC = () => {

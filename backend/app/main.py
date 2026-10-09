@@ -21,6 +21,7 @@ from app.services.task_service import task_service
 from app.services.cluster_service import cluster_service
 from app.services import wireguard_service, auth_service
 from app.auth_middleware import AuthMiddleware
+from app.mcp.server import MCPEndpoint
 from app.services.wireguard_relay import relay
 from fastapi.concurrency import run_in_threadpool
 
@@ -127,6 +128,8 @@ async def privileged_error_handler(request: Request, exc):
 
 
 app.include_router(api_router, prefix="/api/v1")
+# MCP server for AI assistants (docs/mcp.md), same port and authentication as the API
+app.add_route("/api/mcp", MCPEndpoint(), methods=["GET", "POST", "DELETE"], include_in_schema=False)
 
 
 @app.get("/health")
