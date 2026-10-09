@@ -180,7 +180,9 @@ export const ClusterDetailPage: React.FC = () => {
   const [params, setParams] = useSearchParams();
   const tab = params.get('tab') || 'overview';
 
+  const deleted = React.useRef(false); // being deleted: no more reloads (404)
   const reload = useCallback(async () => {
+    if (deleted.current) return;
     try {
       setCluster(await clusterApi.get(clusterId));
       setLoadError(null);
@@ -194,7 +196,7 @@ export const ClusterDetailPage: React.FC = () => {
     const timer = setInterval(() => { if (!document.hidden) reload(); }, 30000);
     return () => clearInterval(timer);
   }, [reload]);
-  useLiveEvents(['cluster'], (e) => { if (e.id === clusterId) reload(); });
+  useLiveEvents(['cluster'], (e) => { if (e.id === clusterId && e.status !== 'deleted' && !deleted.current) reload(); });
   useLiveEvents(['task'], (e) => { if (e.target_type === 'cluster' && cluster && e.id === cluster.task_id) reload(); });
   useLiveEvents(['vm'], (e) => { if (cluster?.nodes.some((n) => n.name === e.name)) reload(); });
 
@@ -205,7 +207,7 @@ export const ClusterDetailPage: React.FC = () => {
     } catch (err) {
       setError(errorText(err));
     }
-    reload();
+    if (!deleted.current) reload();
   };
 
   const install = useInstallStatus(cluster);
@@ -471,7 +473,11 @@ export const ClusterDetailPage: React.FC = () => {
       </PageSection>
 
       <ConfirmModal title={`Delete cluster ${cluster.name}?`} isOpen={confirmDelete} confirmLabel="Delete"
-        onConfirm={() => run(async () => { await clusterApi.delete(cluster.id); navigate('/clusters'); })}
+        onConfirm={() => run(async () => {
+          deleted.current = true;
+          try { await clusterApi.delete(cluster.id); } catch (err) { deleted.current = false; throw err; }
+          navigate('/clusters');
+        })}
         onClose={() => setConfirmDelete(false)}>
         Deletes the {cluster.nodes.length} node VMs and their disks{clusterDeleteText(cluster)}.
       </ConfirmModal>
