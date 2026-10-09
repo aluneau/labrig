@@ -261,7 +261,7 @@ else
   ok "no ufw/firewalld active, nothing to do"
 fi
 if [ "$LISTEN" != 127.0.0.1 ] && [ "$LISTEN" != localhost ]; then
-  warn "listening on $LISTEN: open port $PORT/tcp in your firewall yourself. There is no login, use a trusted network only."
+  warn "listening on $LISTEN: open port $PORT/tcp in your firewall yourself (plain http: put an https reverse proxy in front for untrusted networks)."
 fi
 
 # ---------------------------------------------------------------------------

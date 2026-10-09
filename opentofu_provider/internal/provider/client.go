@@ -15,7 +15,9 @@ import (
 // Client is a minimal JSON client for the VM Manager REST API (/api/v1).
 type Client struct {
 	Endpoint string
-	HTTP     *http.Client
+	// API token (Authorization: Bearer), needed when the backend has authentication on
+	Token string
+	HTTP  *http.Client
 }
 
 // APIError carries the HTTP status and FastAPI's "detail" message.
@@ -33,11 +35,20 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }
 
-func NewClient(endpoint string) *Client {
+func NewClient(endpoint, token string) *Client {
 	return &Client{
 		Endpoint: strings.TrimRight(endpoint, "/"),
+		Token:    token,
 		HTTP:     &http.Client{Timeout: 5 * time.Minute},
 	}
+}
+
+// Send adds the token to req and sends it.
+func (c *Client) Send(req *http.Request) (*http.Response, error) {
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	return c.HTTP.Do(req)
 }
 
 // Do sends body as JSON (if non-nil) and decodes the response into out (if non-nil).
@@ -57,12 +68,20 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.Send(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach VM Manager at %s: %w", c.Endpoint, err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		hint := "set the provider's token (or $VMMANAGER_TOKEN): create one in the web UI (user menu > API tokens)"
+		if c.Token != "" {
+			hint = "the API token is invalid, expired or revoked"
+		}
+		return &APIError{Status: resp.StatusCode, Detail: detail(data) + ": " + hint}
+	}
 
 	if resp.StatusCode >= 400 {
 		return &APIError{Status: resp.StatusCode, Detail: detail(data)}
