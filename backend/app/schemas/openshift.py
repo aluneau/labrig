@@ -50,11 +50,17 @@ class OpenShiftOptions(BaseModel):
     topology: Literal["sno", "compact", "ha"] = "sno"
     storage: Literal["none", "lvms", "odf"] = "none"
     storage_disk_size: int = Field(100, ge=20, le=2048)  # GiB, extra disk per storage node (LVMS / ODF)
+    # ODF footprint: "lab" = small Ceph requests/limits, no object storage (NooBaa, RGW); "lean" = Red Hat sizing
+    odf_profile: Literal["lab", "lean"] = "lab"
     operators: List[OperatorRequest] = []
     sriov: SriovOptions = SriovOptions()
     metallb: MetalLBOptions = MetalLBOptions()
     # Stop offering updates (clusterversion channel cleared)
     disable_updates: bool = True
+    # Disconnected install (create time only, docs/disconnected.md): the group router runs a mirror
+    # registry filled by oc-mirror (release + the add-ons' operators + demo images), the group's egress is
+    # blocked before the nodes boot, the cluster pulls everything from the mirror (registry-only pull secret)
+    disconnected: bool = False
 
     @field_validator("operators")
     @classmethod

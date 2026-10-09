@@ -10,7 +10,8 @@ load balancer (haproxy). Topologies:
 | `compact` | 3 masters (schedulable) | 8 vCPU, 20 GiB, 120 GiB each | ODF possible on the masters. |
 | `ha` | 3 masters + N workers (≥ 2) | workers 4 vCPU, 12 GiB | Ingress on the workers. ODF needs ≥ 3 workers. |
 
-ODF adds 8 vCPU and 24 GiB to each storage node (resource profile `lean`). The app refuses a
+ODF adds to each storage node 2 vCPU and 6 GiB with `odf_profile: lab` (default), 8 vCPU and 24 GiB with
+`odf_profile: lean` (Red Hat sizing). A compact cluster with ODF lab = 3 × (8 vCPU, 26 GiB). The app refuses a
 cluster whose RAM doesn't fit next to the running VMs (no overcommit: an OOM-killed master corrupts etcd).
 
 ## Before the first cluster
@@ -64,7 +65,10 @@ Chosen at creation, or later from the cluster's *Operators* tab:
 - **LVMS** (`storage: lvms`): an extra disk per node (serial `vmm-storage`, `/dev/disk/by-id/virtio-vmm-storage`),
   `LVMCluster` -> default StorageClass `lvms-vg1`.
 - **ODF** (`storage: odf`): Local Storage Operator (`LocalVolumeSet` `localblock`) + ODF `StorageCluster`
-  (3 replicas, `lean`), default StorageClass `ocs-storagecluster-ceph-rbd`.
+  (3 replicas), default StorageClass `ocs-storagecluster-ceph-rbd`. `lab` footprint (default): small requests /
+  memory limits on mon / mgr / mds / OSD (the limit also sizes Ceph's caches), no NooBaa (`multiCloudGateway`
+  ignored) and no RGW (`cephObjectStores` ignored): block + CephFS, no S3. Not a supported sizing: functional labs.
+  `lean` = the `resourceProfile` as is, with object storage.
 - **SR-IOV** (`sriov.enabled`): every node gets a vIOMMU and igb NICs (emulated 82576, up to 7 VFs) on the
   group network. The SR-IOV Network Operator runs in dev mode (`DEV_MODE=TRUE`: igb is not in its
   supported NIC list), `SriovOperatorConfig` with `disableDrain` on SNO / compact, a policy
@@ -103,7 +107,17 @@ BGP mode: every node announces the service IP to the router, which routes it to 
 checks show each node's BGP session and the router's next hops; a stopped node's route disappears (≤ 30 s). The
 cluster's *Topology* tab follows a packet from the laptop to a pod in either mode.
 
-Not yet: OKD, disconnected installs, `platform: baremetal` with VIPs,
+## Disconnected installs
+
+**Disconnected** in the create dialog (`openshift.disconnected: true`, OpenTofu `disconnected = true`): the group
+router runs a mirror registry (`registry.<domain>:8443`, +8 GiB RAM / 4 vCPUs / 250 GiB thin disk), oc-mirror on
+the router copies the release, the add-ons' operators (with their dependencies) and the demo image into it, then
+the group's internet access is cut before the nodes boot. The cluster's pull secret holds the registry's
+credentials only, the release comes through `imageDigestSources`, OperatorHub shows the mirrored catalog only.
+First mirror: ~20+ GB, 30–90 min before the nodes are created. Details, day-2 operators and limits:
+[disconnected.md](disconnected.md#openshift).
+
+Not yet: OKD, `platform: baremetal` with VIPs,
 adding workers after install, upgrades from the app.
 
 ## OpenTofu

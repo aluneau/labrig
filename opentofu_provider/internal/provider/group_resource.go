@@ -28,6 +28,8 @@ var (
 const (
 	groupCreateTimeout = 25 * time.Minute // router first boot installs packages, then members
 	groupPowerTimeout  = 10 * time.Minute
+	// router restart + mirror-registry download (~1.3 GB) + Quay install
+	registrySetupTimeout = 60 * time.Minute
 )
 
 type groupResource struct{ client *Client }
@@ -93,6 +95,40 @@ type groupModel struct {
 	WGPublicKey   types.String         `tfsdk:"wireguard_public_key"`
 	BGP           types.Bool           `tfsdk:"bgp"`
 	BGPRange      types.String         `tfsdk:"bgp_announce_range"`
+	Egress        *egressModel         `tfsdk:"egress"`
+	Registry      *registryModel       `tfsdk:"registry"`
+}
+
+// Egress switch of the router (docs/disconnected.md)
+type egressModel struct {
+	Mode  types.String `tfsdk:"mode"`
+	Allow types.List   `tfsdk:"allow"`
+}
+
+// Mirror registry on the router (docs/disconnected.md)
+type registryModel struct {
+	Enabled  types.Bool   `tfsdk:"enabled"`
+	Port     types.Int64  `tfsdk:"port"`
+	DiskGB   types.Int64  `tfsdk:"disk_gb"`
+	MemoryMB types.Int64  `tfsdk:"memory_mb"`
+	VCPUs    types.Int64  `tfsdk:"vcpus"`
+	Hostname types.String `tfsdk:"hostname"`
+	CAPEM    types.String `tfsdk:"ca_pem"`
+}
+
+type apiEgress struct {
+	Mode  string   `json:"mode"`
+	Allow []string `json:"allow"`
+}
+
+type apiRegistry struct {
+	Enabled  bool    `json:"enabled"`
+	Port     int64   `json:"port,omitempty"`
+	DiskGB   int64   `json:"disk_gb,omitempty"`
+	MemoryMB int64   `json:"memory_mb,omitempty"`
+	VCPUs    int64   `json:"vcpus,omitempty"`
+	Hostname *string `json:"hostname,omitempty"`
+	CAPEM    *string `json:"ca_pem,omitempty"`
 }
 
 // apiBGP is the spec's router.bgp block. Only `enabled` is sent: the server keeps the announce
@@ -158,6 +194,9 @@ type apiGroupSpec struct {
 		} `json:"dns"`
 		WireGuard *apiWireGuard `json:"wireguard,omitempty"`
 		BGP       *apiBGP       `json:"bgp,omitempty"`
+		// omitted: the server keeps the stored blocks
+		Egress   *apiEgress   `json:"egress,omitempty"`
+		Registry *apiRegistry `json:"registry,omitempty"`
 	} `json:"router"`
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
@@ -194,6 +233,8 @@ type apiGroup struct {
 			} `json:"dns"`
 			WireGuard *apiWireGuard `json:"wireguard"`
 			BGP       *apiBGP       `json:"bgp"`
+			Egress    *apiEgress    `json:"egress"`
+			Registry  *apiRegistry  `json:"registry"`
 		} `json:"router"`
 		Members   []apiGroupMemberSpec `json:"members"`
 		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
@@ -263,6 +304,30 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"bgp_announce_range, the router routes them (ECMP). See docs/bgp.md. Applied live."},
 			"bgp_announce_range": schema.StringAttribute{Computed: true, PlanModifiers: keep,
 				Description: "Range the router accepts BGP routes for (a /27 of BGP_ANNOUNCE_POOL, assigned by the server)."},
+			"egress": schema.SingleNestedAttribute{Optional: true,
+				Description: "Internet access of the lab machines (docs/disconnected.md). mode = \"blocked\": the router refuses " +
+					"what the group network sends towards the internet / host networks, except allow; the router itself, DNS, NTP, " +
+					"load balancers, the registry and WireGuard keep working. Applied live. Omitted: left as it is on the server.",
+				Attributes: map[string]schema.Attribute{
+					"mode": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("open"),
+						Description: "open or blocked."},
+					"allow": schema.ListAttribute{Optional: true, ElementType: types.StringType,
+						Description: "CIDRs / addresses still reachable when blocked (e.g. a proxy)."},
+				}},
+			"registry": schema.SingleNestedAttribute{Optional: true,
+				Description: "Mirror registry on the router (mirror-registry / Quay, filled with oc-mirror v2): the router gets " +
+					"memory_mb / vcpus and a disk_gb thin disk (restarted once when enabled on an existing group). Apply waits " +
+					"until it is installed (~10-30 min). Omitted: left as it is on the server.",
+				Attributes: map[string]schema.Attribute{
+					"enabled":   schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true)},
+					"port":      schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(8443)},
+					"disk_gb":   schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(250), Description: "GiB (can grow, not shrink)."},
+					"memory_mb": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(8192), Description: "Router RAM while the registry is enabled."},
+					"vcpus":     schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(4)},
+					"hostname": schema.StringAttribute{Computed: true, PlanModifiers: keep,
+						Description: "registry.<domain> (served by the router's DNS); images are <hostname>:<port>/<path>."},
+					"ca_pem": schema.StringAttribute{Computed: true, PlanModifiers: keep, Description: "CA certificate of the registry (PEM)."},
+				}},
 		},
 		Blocks: map[string]schema.Block{
 			"member": schema.ListNestedBlock{
@@ -366,6 +431,19 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 	case !m.BGPRange.IsNull() && !m.BGPRange.IsUnknown():
 		s.Router.BGP = &apiBGP{Enabled: false} // was enabled: disable, keeping its settings
 	}
+	if e := m.Egress; e != nil {
+		s.Router.Egress = &apiEgress{Mode: e.Mode.ValueString(), Allow: []string{}}
+		if s.Router.Egress.Mode == "" {
+			s.Router.Egress.Mode = "open"
+		}
+		if !e.Allow.IsNull() && !e.Allow.IsUnknown() {
+			e.Allow.ElementsAs(ctx, &s.Router.Egress.Allow, false)
+		}
+	}
+	if reg := m.Registry; reg != nil {
+		s.Router.Registry = &apiRegistry{Enabled: reg.Enabled.IsNull() || reg.Enabled.IsUnknown() || reg.Enabled.ValueBool(),
+			Port: reg.Port.ValueInt64(), DiskGB: reg.DiskGB.ValueInt64(), MemoryMB: reg.MemoryMB.ValueInt64(), VCPUs: reg.VCPUs.ValueInt64()}
+	}
 	s.DHCPHosts = []apiGroupDHCPHost{}
 	for _, h := range m.DHCPHosts {
 		s.DHCPHosts = append(s.DHCPHosts, apiGroupDHCPHost{MAC: h.MAC.ValueString(), IP: h.IP.ValueString(), Hostname: strPtr(h.Hostname)})
@@ -415,6 +493,31 @@ func (r *groupResource) waitTask(ctx context.Context, taskID int64, timeout time
 	})
 }
 
+// waitRegistry waits until the router's mirror registry answers (setup task: restart, download, Quay install)
+func (r *groupResource) waitRegistry(ctx context.Context, id string) error {
+	return Poll(ctx, 10*time.Second, registrySetupTimeout, func() (bool, error) {
+		var st struct {
+			State   string  `json:"state"`
+			Message *string `json:"message"`
+			Setup   *int64  `json:"setup_task_id"`
+		}
+		if err := r.client.Do(ctx, "GET", "/groups/"+id+"/registry", nil, &st); err != nil {
+			return false, err
+		}
+		switch {
+		case st.State == "ready":
+			return true, nil
+		case st.State == "error" && st.Setup == nil:
+			msg := "registry setup failed"
+			if st.Message != nil {
+				msg = *st.Message
+			}
+			return false, fmt.Errorf("%s", msg)
+		}
+		return false, nil
+	})
+}
+
 func (r *groupResource) power(ctx context.Context, id string, running bool) error {
 	action := "stop"
 	if running {
@@ -451,6 +554,12 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 	if err := r.waitTask(ctx, created.TaskID, groupCreateTimeout); err != nil {
 		resp.Diagnostics.AddError("Group creation failed", err.Error())
 		return
+	}
+	if plan.Registry != nil && plan.Registry.Enabled.ValueBool() {
+		if err := r.waitRegistry(ctx, plan.ID.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Registry setup failed", err.Error())
+			return
+		}
 	}
 	if !plan.Running.ValueBool() {
 		if err := r.power(ctx, plan.ID.ValueString(), false); err != nil {
@@ -605,6 +714,21 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 			}
 		}
 	}
+	// egress / registry: only tracked when the config manages them (omitted = left to the UI / API)
+	if m.Egress != nil && g.Spec.Router.Egress != nil {
+		e := g.Spec.Router.Egress
+		allow := m.Egress.Allow
+		if len(e.Allow) > 0 || !allow.IsNull() {
+			allow, _ = types.ListValueFrom(ctx, types.StringType, e.Allow)
+		}
+		m.Egress = &egressModel{Mode: types.StringValue(e.Mode), Allow: allow}
+	}
+	if m.Registry != nil && g.Spec.Router.Registry != nil {
+		reg := g.Spec.Router.Registry
+		m.Registry = &registryModel{Enabled: types.BoolValue(reg.Enabled), Port: types.Int64Value(reg.Port),
+			DiskGB: types.Int64Value(reg.DiskGB), MemoryMB: types.Int64Value(reg.MemoryMB), VCPUs: types.Int64Value(reg.VCPUs),
+			Hostname: strOrNull(reg.Hostname), CAPEM: strOrNull(reg.CAPEM)}
+	}
 	m.MemberIPs, _ = types.MapValueFrom(ctx, types.StringType, ips)
 	m.MemberMACs, _ = types.MapValueFrom(ctx, types.StringType, macs)
 	m.MemberVMIDs, _ = types.MapValueFrom(ctx, types.StringType, vmIDs)
@@ -646,6 +770,13 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	if !plan.Running.Equal(state.Running) {
 		if err := r.power(ctx, id, plan.Running.ValueBool()); err != nil {
 			resp.Diagnostics.AddError("Cannot change group power state", err.Error())
+			return
+		}
+	}
+	if plan.Registry != nil && plan.Registry.Enabled.ValueBool() && plan.Running.ValueBool() &&
+		(state.Registry == nil || !state.Registry.Enabled.ValueBool() || state.Registry.CAPEM.IsNull()) {
+		if err := r.waitRegistry(ctx, id); err != nil {
+			resp.Diagnostics.AddError("Registry setup failed", err.Error())
 			return
 		}
 	}

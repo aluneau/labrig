@@ -8,7 +8,8 @@ import {
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
   InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
-  WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology,
+  WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
+  ImageCopyRequest, RegistryImages, RegistryCredentials,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
 } from '../types';
 
@@ -176,6 +177,32 @@ export const groupApi = {
   setBgp: (id: number, body: BGPSettings) =>
     request<BGPStatus>(`/groups/${id}/bgp`, { method: 'PUT', body: JSON.stringify(body) }),
   topology: (id: number) => request<GroupTopology>(`/groups/${id}/topology`),
+  registry: (id: number) => request<RegistryStatus>(`/groups/${id}/registry`),
+  registrySetup: (id: number) => post<{ task_id: number }>(`/groups/${id}/registry/setup`),
+  mirror: (id: number, body: MirrorRequest) => post<{ task_id: number }>(`/groups/${id}/registry/mirror`, body),
+  registryImages: (id: number) => request<RegistryImages>(`/groups/${id}/registry/images`),
+  copyImage: (id: number, body: ImageCopyRequest) => post<{ task_id: number }>(`/groups/${id}/registry/images`, body),
+  deleteImage: (id: number, ref: string) => del(`/groups/${id}/registry/images?ref=${encodeURIComponent(ref)}`),
+  registryCredentials: (id: number) => request<RegistryCredentials>(`/groups/${id}/registry/credentials`),
+  /** Stream an image archive to the registry (XHR for upload progress); resolves with the push task id */
+  uploadImage: (id: number, file: File, dest: { repo?: string; tag?: string }, onProgress: (fraction: number) => void) =>
+    new Promise<{ task_id: number }>((resolve, reject) => {
+      const q = new URLSearchParams({ filename: file.name });
+      if (dest.repo) q.set('repo', dest.repo);
+      if (dest.tag) q.set('tag', dest.tag);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_BASE}/api/v1/groups/${id}/registry/upload?${q}`);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = () => {
+        let body: { task_id?: number; detail?: unknown } = {};
+        try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+        if (xhr.status >= 200 && xhr.status < 300 && body.task_id) resolve({ task_id: body.task_id });
+        else reject(new Error(typeof body.detail === 'string' ? body.detail : `Upload failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('Upload failed (network error)'));
+      xhr.send(file);
+    }),
 };
 
 export const taskApi = {

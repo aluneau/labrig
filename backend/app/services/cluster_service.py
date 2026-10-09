@@ -249,6 +249,14 @@ class ClusterService:
                 lb = {"name": entry["name"], "port": entry["port"], "backends": entry["backends"],
                       "router_ip": (gspec.get("router") or {}).get("ip"),
                       "uplink_ip": (gspec.get("router") or {}).get("uplink_ip")}
+        registry = None
+        if group is not None and ((cluster.spec or {}).get("openshift") or {}).get("disconnected"):
+            router = (group.spec or {}).get("router") or {}
+            reg = router.get("registry") or {}
+            port = reg.get("port") or 8443
+            registry = {"url": f"registry.{group.domain}:{port}",
+                        "uplink_url": f"{router['uplink_ip']}:{port}" if router.get("uplink_ip") else None,
+                        "enabled": bool(reg.get("enabled")), "egress": (router.get("egress") or {}).get("mode", "open")}
         return {
             "id": cluster.id, "name": cluster.name, "type": cluster.type, "version": cluster.version,
             "network": cluster.network, "network_owned": bool(cluster.network_owned), "domain": cluster.domain,
@@ -263,6 +271,7 @@ class ClusterService:
             "console_url": (f"https://console-openshift-console.apps.{zone}"
                             if cluster.type == "openshift" and status in ("ready", "stopped", "starting", "stopping")
                             else None),
+            "registry": registry,
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
@@ -816,6 +825,29 @@ class ClusterService:
         db.commit()
         return task
 
+    def recover_interrupted(self, db: Session) -> None:
+        """At startup (after task_service.mark_interrupted): clusters left 'provisioning' by a task of the
+        previous process. An OpenShift install whose nodes already booted carries on in the nodes: follow it
+        again in a new task. Anything else can't be resumed: report it instead of 'provisioning' forever.
+        (starting / stopping are derived from the node states once no task runs.)"""
+        from app.services.openshift_installer import openshift_installer
+        for cluster in db.query(Cluster).filter(Cluster.status == "provisioning").all():
+            if task_service.is_running(cluster.task_id):
+                continue
+            task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
+            note = f" ({cluster.status_message})" if cluster.status_message else ""
+            if task is not None and task.type != "cluster_create":
+                # adding / removing a node of a working cluster: the cluster itself is still there
+                logger.warning(f"{task.name} was interrupted by a server restart")
+                self._set_status(db, cluster, "ready", f"{task.name} was interrupted by a server restart{note}")
+            elif cluster.type == "openshift" and openshift_installer.resumable(cluster):
+                logger.info(f"Resuming the interrupted install of cluster {cluster.name}")
+                self._run_task(db, cluster, "resume", "Resume install of", openshift_installer.resume)
+            else:
+                logger.warning(f"Cluster {cluster.name} was interrupted by a server restart")
+                self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "
+                                 "delete the cluster and create it again")
+
     def start_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
@@ -989,6 +1021,9 @@ class ClusterService:
                     group_service.delete_group(db, cluster.group_id, for_cluster=cluster.name)
             else:
                 try:
+                    if cluster.type == "openshift":
+                        from app.services.openshift_installer import openshift_installer
+                        openshift_installer.release_group(cluster, network)  # queued, applied by destroy()
                     network.destroy()  # only the cluster's reservations / records / load balancer
                 except (ValueError, RuntimeError) as e:
                     logger.warning(f"Could not remove cluster {cluster.name}'s entries from its group: {e}")

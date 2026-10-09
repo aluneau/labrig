@@ -226,6 +226,15 @@ class GroupService:
             elif m.source == "iso":
                 self.resolve_iso(db, m.iso)
 
+        reg = spec.router.registry
+        if existing is not None:
+            old_reg = existing.router.registry
+            reg.ca_pem = reg.ca_pem or old_reg.ca_pem
+            if reg.enabled and old_reg.disk_gb > reg.disk_gb and (old_reg.enabled or old_reg.hostname):
+                raise ValueError(f"The registry disk can't shrink ({old_reg.disk_gb} -> {reg.disk_gb} GiB)")
+        if reg.enabled or reg.hostname:
+            reg.hostname = f"registry.{spec.domain}"
+
         subnets = None
         if spec.router.wireguard is not None:
             subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
@@ -348,7 +357,11 @@ class GroupService:
             group.status, group.error_message = "ready", None
             db.commit()
             self._publish(group, "updated")
-            return {"group_id": group_id, "members": len(spec.members)}
+            result = {"group_id": group_id, "members": len(spec.members)}
+            if spec.router.registry.enabled:  # downloads + Quay install: its own task (~5-15 min)
+                from app.services import registry_service
+                result["registry_task_id"] = registry_service.start_setup(db, group).id
+            return result
         except Exception as e:
             db.rollback()
             group = self.get_group(db, group_id)
@@ -382,14 +395,21 @@ class GroupService:
         if spec.uplink:
             nics.append((spec.uplink, spec.router.uplink_mac))
         nics.append((network_name(spec.name), spec.router.lan_mac))
+        registry = spec.router.registry.enabled
         vm_service.create_vm(
             db,
+            # the mirror registry needs more RAM / vCPUs than a plain router (spec.router.registry)
             VMCreate(name=router_vm_name(spec.name), description=f"Router of lab group {spec.name}",
-                     memory=spec.router.memory, vcpu=spec.router.vcpu, disk_size=spec.router.disk_size,
-                     cloud_image_id=image.id, start=start),
+                     memory=spec.router.effective_memory(), vcpu=spec.router.effective_vcpu(),
+                     disk_size=spec.router.disk_size, cloud_image_id=image.id, start=start and not registry),
             hostname="router", user_data=rendered.user_data, network_config=rendered.network_config, nics=nics,
             metadata_xml=libvirt_client.group_metadata_xml(spec.name, "router", spec=spec.model_dump(mode="json")),
         )
+        if registry:
+            from app.services import registry_service
+            registry_service.ensure_router_disk(spec)
+            if start:
+                libvirt_client.start_vm(router_vm_name(spec.name))
 
     def _create_member(self, db: Session, spec: GroupSpec, member: MemberSpec, start: bool) -> None:
         metadata_xml = libvirt_client.group_metadata_xml(spec.name, member.role, member=member.name)
@@ -580,6 +600,7 @@ class GroupService:
             db.commit()
             # router first, so new members get their lease
             self.push_router_config(db, group)
+            self._registry_changed(db, group, old, spec)
             for m in added + [m for m in spec.members if m.name in replaced]:
                 try:
                     self._create_member(db, spec, m, start=router_running)
@@ -595,6 +616,19 @@ class GroupService:
             wgs.reconcile(db)
             self._publish(group, "updated")
         return group
+
+    @staticmethod
+    def _registry_changed(db: Session, group: Group, old: GroupSpec, new: GroupSpec) -> Optional[Task]:
+        """Router resources / registry disk follow spec.router.registry; enabling it starts the setup
+        task (which restarts the router when it needs more RAM)"""
+        if old.router.registry == new.router.registry and not new.router.registry.enabled:
+            return None
+        from app.services import registry_service
+        registry_service.ensure_router_disk(new)
+        reg_old, reg_new = old.router.registry, new.router.registry
+        if reg_new.enabled and (not reg_old.enabled or reg_new.port != reg_old.port):
+            return registry_service.start_setup(db, group)
+        return None
 
     @staticmethod
     def _keep_owned(old: GroupSpec, new: GroupSpec) -> GroupSpec:
@@ -613,6 +647,15 @@ class GroupService:
                              + [p for p in old.address_pools if p.owner])
         new.owner = old.owner
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
+        # egress / registry blocks left out (older clients) keep the stored ones; the registry's
+        # read-back fields are the app's
+        given = new.router.model_fields_set
+        if "egress" not in given:
+            new.router.egress = old.router.egress.model_copy(deep=True)
+        if "registry" not in given:
+            new.router.registry = old.router.registry.model_copy(deep=True)
+        new.router.registry.hostname = old.router.registry.hostname
+        new.router.registry.ca_pem = old.router.registry.ca_pem
         # WireGuard peers are added / removed through /wireguard/peers (devices hold their configs):
         # a spec replacing the group keeps them, and the router's key / assigned subnet and port
         if new.router.wireguard is not None and old.router.wireguard is not None:
@@ -705,6 +748,18 @@ class GroupService:
                 self.push_router_config(db, group)
         self.pin_uplink(db, group)
         return group
+
+    def restart_router(self, db: Session, group: Group, timeout: float = ROUTER_RESTART_TIMEOUT) -> None:
+        """Clean shutdown + start of the router (new RAM / vCPUs of the saved config), config pushed again.
+        The group network has no DHCP / DNS / NAT for the ~1 min it takes."""
+        rtr = router_vm_name(group.name)
+        logger.info(f"Restarting router {rtr}")
+        self._shutdown(rtr, force=False)
+        libvirt_client.start_vm(rtr)
+        self._wait_router(rtr, timeout)
+        with self._lock(group.name):
+            self.push_router_config(db, group)
+        self.pin_uplink(db, group)
 
     def pin_uplink(self, db: Session, group: Group, timeout: float = 120) -> Optional[str]:
         """Give the router's uplink NIC a fixed address: its current lease on the uplink network
@@ -966,6 +1021,8 @@ class GroupService:
             vm_service.sync_vms(db)
             db.delete(group)
             db.commit()
+            from app.services import registry_service
+            registry_service.forget(name)  # registry credentials / mirror records (the disk went with the router)
         wgs.reconcile(db)  # stops the group's WireGuard relay
         event_bus.publish({"kind": "group", "event": "deleted", "id": group_id, "name": name})
         return True
@@ -1203,6 +1260,7 @@ class GroupService:
                     "image": m.image or self._source_label(m), "memory": m.memory, "vcpu": m.vcpu}
 
         router = info("router", router_vm_name(spec.name), "router", spec.router.ip, spec.router.lan_mac, spec.router)
+        router.update(memory=spec.router.effective_memory(), vcpu=spec.router.effective_vcpu())  # registry: more
         members = [info(m.name, member_vm_name(spec.name, m.name), m.role, m.ip, m.mac, m) for m in spec.members]
         all_states = [router["state"]] + [m["state"] for m in members]
         if all(s == "running" for s in all_states):
@@ -1396,6 +1454,7 @@ class GroupService:
         model.load_balancers = [lb for lb in model.load_balancers if not lb.owner]
         model.address_pools = [p for p in model.address_pools if not p.owner]
         model.router.uplink_ip = None
+        model.router.registry.hostname = model.router.registry.ca_pem = None
         model.owner = None
         if model.router.wireguard is not None:  # assigned on this host / by this router
             wg = model.router.wireguard

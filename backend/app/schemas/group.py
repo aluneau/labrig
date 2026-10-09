@@ -271,6 +271,49 @@ class VLANSpec(BaseModel):
     cidr: str
 
 
+class EgressSpec(BaseModel):
+    """What the group's machines may reach outside the lab (forwarded traffic through the router).
+    blocked: everything from the group network to the uplink side is refused except `allow` (e.g. a
+    customer proxy); the router itself (DNS forwarding, NTP, registry mirroring), WireGuard devices,
+    load balancers and BGP-announced addresses keep working. Applied live."""
+    mode: Literal["open", "blocked"] = "open"
+    allow: List[str] = []  # CIDRs / addresses still reachable when blocked
+
+    @field_validator("allow")
+    @classmethod
+    def _allow(cls, v: List[str]) -> List[str]:
+        out: List[str] = []
+        for n in v:
+            n = _ipv4_net(n, "Egress allow")
+            if n not in out:
+                out.append(n)
+        return out
+
+
+REGISTRY_DISK_SERIAL = "vmm-registry"  # /dev/disk/by-id/virtio-vmm-registry on the router
+
+
+class RegistrySpec(BaseModel):
+    """Mirror registry on the router (Red Hat mirror-registry = Quay + podman, filled by oc-mirror v2).
+    Enabled, the router gets memory_mb / vcpus (instead of router.memory / vcpu) and an extra thin disk
+    of disk_gb for the registry storage and oc-mirror's cache (docs/disconnected.md)."""
+    enabled: bool = False
+    port: int = Field(8443, ge=1, le=65535)
+    disk_gb: int = Field(250, ge=20, le=16384)
+    memory_mb: int = Field(8192, ge=2048)
+    vcpus: int = Field(4, ge=1, le=64)
+    # Assigned / read back by the app
+    hostname: Optional[str] = None  # registry.<domain> (DNS record served by the router)
+    ca_pem: Optional[str] = None    # CA of the registry's TLS certificate (made on the router)
+
+    @field_validator("port")
+    @classmethod
+    def _port(cls, v: int) -> int:
+        if v in RESERVED_ROUTER_PORTS:
+            raise ValueError(f"The registry can't listen on port {v} (used by the router itself)")
+        return v
+
+
 class RouterSpec(BaseModel):
     flavour: Literal["el", "vyos"] = "el"
     # Cloud image: "almalinux-9" (distribution-version) or a cloudimg-*.qcow2 volume name.
@@ -283,6 +326,8 @@ class RouterSpec(BaseModel):
     bgp: Optional[BGPSpec] = None
     wireguard: Optional[WireGuardSpec] = None
     vlans: List[VLANSpec] = []
+    egress: EgressSpec = EgressSpec()
+    registry: RegistrySpec = RegistrySpec()
     # Assigned by the app
     ip: Optional[str] = None
     lan_mac: Optional[str] = Field(None, pattern=MAC)
@@ -290,6 +335,13 @@ class RouterSpec(BaseModel):
     # Fixed address of the uplink NIC (DHCP reservation on the uplink network): how the host
     # reaches the router's load balancers
     uplink_ip: Optional[str] = None
+
+    def effective_memory(self) -> int:
+        """RAM the router VM gets (MiB): more when it runs the mirror registry"""
+        return max(self.memory, self.registry.memory_mb) if self.registry.enabled else self.memory
+
+    def effective_vcpu(self) -> int:
+        return max(self.vcpu, self.registry.vcpus) if self.registry.enabled else self.vcpu
 
 
 class ReservationSpec(BaseModel):
@@ -529,6 +581,12 @@ class GroupSpec(BaseModel):
         if reserved:
             raise ValueError(f"Port {', '.join(reserved)} is used by the router itself")
         self._check_dhcp_hosts(net)
+        reg = self.router.registry
+        if reg.enabled:
+            if reg.port in lb_ports:
+                raise ValueError(f"The registry port {reg.port} is already used by a load balancer")
+            if "registry" in names + [h.hostname for h in self.dhcp_hosts] + records:
+                raise ValueError("The name 'registry' is used by the group's mirror registry")
         if self.router.wireguard is not None:
             self.router.wireguard.check(self.cidr)
         if self.router.bgp is not None:

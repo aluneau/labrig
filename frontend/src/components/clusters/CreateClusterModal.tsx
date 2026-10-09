@@ -24,7 +24,7 @@ import { clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../.
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 import {
-  MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
+  DisconnectedSection, MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
   TopologySection, VersionSection, defaultOsDraft, osDraftErrors, osRequest,
 } from './OpenShiftFields';
 
@@ -325,6 +325,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
             <StorageSection draft={os} patch={patchOs} />
             <SriovSection draft={os} patch={patchOs} />
             <MetalLBSection draft={os} patch={patchOs} />
+            <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />
             <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
             <ResourceSummary draft={os} autoGroup={autoGroup} />
             {osErrors.map((e) => <Alert key={e} variant="danger" isInline isPlain title={e} />)}

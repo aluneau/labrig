@@ -73,6 +73,7 @@ type openshiftModel struct {
 	Topology        types.String `tfsdk:"topology"`
 	Storage         types.String `tfsdk:"storage"`
 	StorageDiskSize types.Int64  `tfsdk:"storage_disk_size"`
+	OdfProfile      types.String `tfsdk:"odf_profile"`
 	Operators       types.List   `tfsdk:"operators"`
 	SRIOV           types.Bool   `tfsdk:"sriov"`
 	SRIOVNics       types.Int64  `tfsdk:"sriov_nics"`
@@ -83,6 +84,7 @@ type openshiftModel struct {
 	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
 	MetalLBMode     types.String `tfsdk:"metallb_mode"`
 	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
+	Disconnected    types.Bool   `tfsdk:"disconnected"`
 }
 
 type apiClusterNode struct {
@@ -204,6 +206,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
 					"storage":           osStr("none (default), lvms or odf (>= 3 nodes); adds a disk per storage node."),
 					"storage_disk_size": osInt("GiB (default 100)."),
+					"odf_profile":       osStr("ODF footprint: lab (default: small Ceph, no object storage, about +2 vCPU / +6 GiB per storage node) or lean (Red Hat sizing, +8 vCPU / +24 GiB)."),
 					"operators": schema.ListAttribute{Optional: true, Computed: true, ElementType: types.StringType,
 						PlanModifiers: []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 						Description:   "OLM package names (default channel, redhat-operators). Adding one installs it in place; removing is not supported (uninstall it in the cluster first)."},
@@ -216,6 +219,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"metallb_demo":      liveBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
 					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
+					"disconnected":      osBool("Disconnected install (default false): the group router runs a mirror registry (8 GiB RAM, 4 vCPUs, 250 GiB disk) filled by oc-mirror with the release + the add-ons' operators, the group's egress is blocked before the nodes boot, the cluster pulls from the mirror only. The first mirror downloads ~20+ GB."),
 				},
 			},
 		},
@@ -341,6 +345,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			if v := intPtr(os.StorageDiskSize); v != nil {
 				opts["storage_disk_size"] = *v
 			}
+			if v := strPtr(os.OdfProfile); v != nil {
+				opts["odf_profile"] = *v
+			}
 			if !os.Operators.IsNull() && !os.Operators.IsUnknown() {
 				var names []string
 				resp.Diagnostics.Append(os.Operators.ElementsAs(ctx, &names, false)...)
@@ -384,6 +391,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			if !os.DisableUpdates.IsNull() && !os.DisableUpdates.IsUnknown() {
 				opts["disable_updates"] = os.DisableUpdates.ValueBool()
+			}
+			if !os.Disconnected.IsNull() && !os.Disconnected.IsUnknown() {
+				opts["disconnected"] = os.Disconnected.ValueBool()
 			}
 		}
 		if v := strPtr(plan.Version); v != nil {
@@ -677,6 +687,7 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 	mlb, _ := o["metallb"].(map[string]any)
 	m.Channel, m.Topology, m.Storage = str(o["channel"]), str(o["topology"]), str(o["storage"])
 	m.StorageDiskSize = num(o["storage_disk_size"])
+	m.OdfProfile = str(o["odf_profile"])
 	m.SRIOV, m.SRIOVNics, m.SRIOVVFs, m.SRIOVDeviceType = flag(sriov["enabled"]), num(sriov["nics"]), num(sriov["vfs"]), str(sriov["device_type"])
 	m.MetalLB, m.MetalLBAddrs, m.MetalLBDemo = flag(mlb["enabled"]), num(mlb["addresses"]), flag(mlb["demo"])
 	m.MetalLBMode = str(mlb["mode"])
@@ -684,6 +695,10 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 		m.MetalLBMode = types.StringValue("l2")
 	}
 	m.DisableUpdates = flag(o["disable_updates"])
+	m.Disconnected = flag(o["disconnected"])
+	if m.Disconnected.IsNull() {
+		m.Disconnected = types.BoolValue(false)
+	}
 	names := []string{}
 	if ops, ok := o["operators"].([]any); ok {
 		for _, op := range ops {

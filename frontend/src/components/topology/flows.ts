@@ -156,6 +156,27 @@ function memberFlow(t: GroupTopology, m: TopologyMachine): Flow {
 
 function internetFlow(t: GroupTopology, m: TopologyMachine): Flow {
   const r = t.router;
+  if (r.roles.includes('egress')) {
+    return {
+      id: `internet:${m.name}`,
+      label: `${m.name} tries to download something from the internet (blocked)`,
+      steps: [
+        {
+          title: 'DNS still answers',
+          text: `${m.name} asks the router for e.g. quay.io: the router still resolves internet names (it forwards the question).`,
+          active: [`m:${m.name}`, `drop:${m.name}`, 'bus', 'lan', 'router', 'badge:dns'],
+          move: [{ seg: `drop:${m.name}`, reverse: true }, { seg: 'lan', reverse: true }],
+        },
+        {
+          title: 'Refused by the router',
+          text: `The packet reaches the router (its gateway), which refuses to forward it outside the lab and answers `
+            + `"administratively prohibited": the connection fails at once. Use the mirror registry at registry.${t.domain} instead.`,
+          active: ['router', 'badge:egress'],
+          move: [{ seg: `drop:${m.name}`, reverse: true }, { seg: 'lan', reverse: true }],
+        },
+      ],
+    };
+  }
   const fwd = r.dns_forwarders.length ? r.dns_forwarders.join(', ') : 'the DNS server of its uplink';
   return {
     id: `internet:${m.name}`,

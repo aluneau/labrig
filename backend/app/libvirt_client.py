@@ -853,6 +853,56 @@ class LibvirtClient:
             self.connect().storageVolLookupByPath(domain_xml.disk_info(el)["path"]).resize(int(capacity), 0)
         self._publish_vm(domain, "devices")
 
+    def set_config_resources(self, name: str, memory_mib: int, vcpu: int) -> bool:
+        """Change RAM / vCPUs in the saved config (applies at the next cold start). True if it changed."""
+        domain = self._domain(name)
+        root = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        kib = int(memory_mib) * 1024
+
+        def kib_of(tag: str) -> int:
+            el = root.find(tag)
+            if el is None:
+                return 0
+            unit = (el.get("unit") or "KiB").lower()
+            factor = {"kib": 1, "k": 1, "mib": 1024, "m": 1024, "gib": 1024 ** 2, "g": 1024 ** 2, "b": 1 / 1024,
+                      "bytes": 1 / 1024}.get(unit, 1)
+            return int(int(el.text or 0) * factor)
+
+        vcpu_el = root.find("vcpu")
+        cur_vcpu = int(vcpu_el.text) if vcpu_el is not None and vcpu_el.text else 0
+        if kib_of("memory") == kib and kib_of("currentMemory") in (kib, 0) and cur_vcpu == int(vcpu):
+            return False
+        cfg = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+        if kib >= kib_of("memory"):
+            domain.setMemoryFlags(kib, cfg | libvirt.VIR_DOMAIN_MEM_MAXIMUM)
+            domain.setMemoryFlags(kib, cfg)
+        else:
+            domain.setMemoryFlags(kib, cfg)
+            domain.setMemoryFlags(kib, cfg | libvirt.VIR_DOMAIN_MEM_MAXIMUM)
+        if int(vcpu) >= cur_vcpu:
+            domain.setVcpusFlags(int(vcpu), cfg | libvirt.VIR_DOMAIN_VCPU_MAXIMUM)
+            domain.setVcpusFlags(int(vcpu), cfg)
+        else:
+            domain.setVcpusFlags(int(vcpu), cfg)
+            domain.setVcpusFlags(int(vcpu), cfg | libvirt.VIR_DOMAIN_VCPU_MAXIMUM)
+        self._publish_vm(domain, "updated")
+        return True
+
+    def disk_with_serial(self, name: str, serial: str) -> Optional[Dict[str, Any]]:
+        """{target, path, live, config} of the disk with this <serial>, in the running or saved config"""
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        found: Optional[Dict[str, Any]] = None
+        for label, root in (("live", live), ("config", config)):
+            if root is None:
+                continue
+            for disk in domain_xml.disk_elements(root):
+                if (disk.findtext("serial") or "") == serial:
+                    info = domain_xml.disk_info(disk)
+                    found = found or {"target": info["target"], "path": info["path"], "live": False, "config": False}
+                    found[label] = True
+        return found
+
     def next_disk_target(self, name: str, prefix: str) -> str:
         """First free vdX / sdX across the running and saved configs"""
         live, config = self._xml_roots(self._domain(name))

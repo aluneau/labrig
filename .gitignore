@@ -5,7 +5,7 @@ backend/data/
 backend/.env
 
 # Node
-node_modules/
+node_modules
 frontend/build/
 
 # Release / build outputs
