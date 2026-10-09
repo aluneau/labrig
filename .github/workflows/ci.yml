@@ -10,7 +10,7 @@ jobs:
   backend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: libvirt bindings (distro package, like the hosts)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-libvirt python3-venv
       - name: venv + dependencies
@@ -30,8 +30,8 @@ jobs:
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -43,8 +43,8 @@ jobs:
   provider:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: opentofu_provider/go.mod
           cache-dependency-path: opentofu_provider/go.sum

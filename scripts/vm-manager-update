@@ -180,7 +180,9 @@ def unpack(tarball, version):
             m.uname = m.gname = "root"
             m.mode &= 0o755
             members.append(m)
-        tar.extractall(tmp, members=members)
+        # members already checked above; the "data" filter (Python 3.12, backported to EL 9's 3.9) re-checks them
+        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tar.extractall(tmp, members=members, **extra)
     os.rename(os.path.join(tmp, top), dest)
     os.rmdir(tmp)
     with open(os.path.join(dest, "VERSION")) as f:
