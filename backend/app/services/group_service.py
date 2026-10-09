@@ -39,6 +39,7 @@ from app.schemas.group import (
 from app.services.cloud_image_service import cloud_image_service
 from app.services import bgp_service as bgps
 from app.services import ipv6_service
+from app.services import router_cases
 from app.services import wireguard_service as wgs
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
 from app.services.task_service import task_service
@@ -383,8 +384,25 @@ class GroupService:
         metadata = libvirt_client.group_metadata_xml(spec.name, "network")
         # No <forward> (isolated) and no <ip>: libvirt runs no dnsmasq, the router does DHCP/DNS
         xml = (f"<network><name>{escape(name)}</name><metadata>{metadata}</metadata>"
-               f"<bridge stp='on' delay='0'/></network>")
+               f"<bridge stp='on' delay='0'/>{router_cases.network_mtu_xml(spec)}</network>")
         libvirt_client.create_network(name, xml, autostart=True)
+
+    @staticmethod
+    def _set_network_mtu(spec: GroupSpec) -> None:
+        """spec.network.mtu changed: rewrite the libvirt network's <mtu> (saved definition: the bridge and
+        the VMs' taps take it at the next group start; DHCP option 26 / the router LAN are live)"""
+        import xml.etree.ElementTree as ET
+        name = network_name(spec.name)
+        try:
+            root = ET.fromstring(libvirt_client.get_network_xml(name))
+        except libvirt.libvirtError as e:
+            logger.warning(f"Could not read network {name}: {e}")
+            return
+        for old in root.findall("mtu"):
+            root.remove(old)
+        if spec.network.mtu:
+            ET.SubElement(root, "mtu", size=str(spec.network.mtu))
+        libvirt_client.redefine_network(ET.tostring(root, encoding="unicode"), restart=False)
 
     def _vm_id(self, db: Session, vm_name: str) -> Optional[int]:
         vm = db.query(VM).filter(VM.name == vm_name).first()
@@ -431,6 +449,14 @@ class GroupService:
         # dual stack: DHCPv6 + router advertisements on the member's NIC (otherwise vm_service's default)
         network_config = (ipv6_service.member_network_config(member.mac, image.distribution)
                           if spec.ipv6_prefix() else None)
+        user_data = None
+        if not (member.user_data and member.user_data.strip()):
+            # egress mode proxy: the member gets the proxy environment (router_cases)
+            config = cloud_image_service.build_cloud_config(
+                member.name, ci.username, ci.password, [k.strip() for k in ci.ssh_keys if k.strip()], ci.keyboard,
+                f"{member.name}.{spec.domain}")
+            if router_cases.member_cloud_config(spec, config):
+                user_data = "#cloud-config\n" + yaml.safe_dump(config, sort_keys=False)
         vm_service.create_vm(
             db,
             VMCreate(name=member_vm_name(spec.name, member.name), description=f"Member of lab group {spec.name}",
@@ -439,7 +465,7 @@ class GroupService:
                      cloudinit_keyboard=ci.keyboard, cloudinit_userdata=member.user_data,
                      network_name=network_name(spec.name), mac_address=member.mac, start=start),
             hostname=member.name, fqdn=f"{member.name}.{spec.domain}", metadata_xml=metadata_xml,
-            network_config=network_config,
+            user_data=user_data, network_config=network_config,
         )
 
     def _wait_router(self, vm_name: str, timeout: float, on_wait: Optional[Callable[[], None]] = None) -> None:
@@ -604,6 +630,8 @@ class GroupService:
             group.spec = spec.model_dump(mode="json")
             group.domain = spec.domain
             db.commit()
+            if spec.network.mtu != old.network.mtu:
+                self._set_network_mtu(spec)
             # router first, so new members get their lease
             self.push_router_config(db, group)
             self._registry_changed(db, group, old, spec)
@@ -660,11 +688,24 @@ class GroupService:
             new.router.egress = old.router.egress.model_copy(deep=True)
         if "registry" not in given:
             new.router.registry = old.router.registry.model_copy(deep=True)
-        # same for the network block (IPv6); its assigned prefix stays unless one is given
+        if "path" not in given:
+            new.router.path = old.router.path.model_copy(deep=True)
         if "network" not in new.model_fields_set:
             new.network = old.network.model_copy(deep=True)
+        else:  # a network block with only some settings (e.g. OpenTofu's ipv6 or mtu) keeps the others
+            for attr in ("mtu", "ipv6"):
+                if attr not in new.network.model_fields_set:
+                    setattr(new.network, attr, getattr(old.network, attr))
+        # IPv6: the assigned prefix / tunnel /64 stay unless given (ipv6_service.assign)
         if new.router.wireguard is not None and old.router.wireguard is not None:
             new.router.wireguard.subnet6 = new.router.wireguard.subnet6 or old.router.wireguard.subnet6
+        if "proxy" not in new.router.egress.model_fields_set:  # squid settings survive mode switches
+            new.router.egress.proxy = old.router.egress.proxy.model_copy(deep=True)
+        # split DNS zones / resolver knobs: a dns block without them (e.g. OpenTofu's) keeps the stored ones
+        dns_given = new.router.dns.model_fields_set
+        for attr in ("zones", "stop_rebind", "no_negcache", "cache_size"):
+            if attr not in dns_given:
+                setattr(new.router.dns, attr, getattr(old.router.dns, attr))
         new.router.registry.hostname = old.router.registry.hostname
         new.router.registry.ca_pem = old.router.registry.ca_pem
         # WireGuard peers are added / removed through /wireguard/peers (devices hold their configs):
@@ -1326,6 +1367,7 @@ class GroupService:
         rtr = router_vm_name(spec.name)
         data["router_uplink_ips"] = [a for i in libvirt_client.get_vm_interfaces(rtr) for a in i["addresses"]]
         data["leases"] = self.leases(group, running=data["router"]["state"] == "running")
+        data["proxy"] = router_cases.summary(spec) or None
         return data
 
     @staticmethod
@@ -1408,7 +1450,7 @@ class GroupService:
             return []  # agent not ready / no lease file yet
         members = {m.mac: m.name for m in spec.members if m.mac}
         reserved = {h.mac for h in spec.dhcp_hosts} | {r.mac for r in spec.reservations}
-        vms = self._network_vms(network_name(spec.name))
+        vms = self._network_vms(network_name(spec.name)) or {}  # None: network gone (group being deleted)
         for lease in leases:
             mac = lease["mac"]
             lease["kind"] = "member" if mac in members else "reservation" if mac in reserved else "dynamic"

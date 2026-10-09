@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -41,6 +42,7 @@ type networkModel struct {
 	Name        types.String    `tfsdk:"name"`
 	Mode        types.String    `tfsdk:"mode"`
 	ForwardDev  types.String    `tfsdk:"forward_dev"`
+	VLAN        types.Int64     `tfsdk:"vlan"`
 	IPAddress   types.String    `tfsdk:"ip_address"`
 	Prefix      types.Int64     `tfsdk:"prefix"`
 	DHCPEnabled types.Bool      `tfsdk:"dhcp_enabled"`
@@ -68,6 +70,8 @@ func (r *networkResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"name":         schema.StringAttribute{Required: true, PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 			"mode":         schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("nat"), Description: "nat, route, open, isolated, or hostdev (SR-IOV VF pool: forward_dev = the physical function, no address/DHCP; see GET /hosts/sriov)."},
 			"forward_dev":  schema.StringAttribute{Optional: true, Description: "Host interface to forward through (any if unset); for mode = hostdev, the SR-IOV physical function (required)."},
+			"vlan": schema.Int64Attribute{Optional: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()},
+				Description: "mode = hostdev only: VLAN tag the PF applies to every VF of the pool (the guest sees untagged traffic). A vmmanager_nic can override it. Changing it recreates the pool."},
 			"ip_address":   schema.StringAttribute{Optional: true, Description: "Host address on the network, e.g. 192.168.150.1."},
 			"prefix":       schema.Int64Attribute{Optional: true, Description: "Subnet prefix length, e.g. 24."},
 			"dhcp_enabled": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true)},
@@ -141,7 +145,14 @@ func (r *networkResource) ModifyPlan(ctx context.Context, req resource.ModifyPla
 func (r *networkResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var c networkModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &c)...)
-	if resp.Diagnostics.HasError() || c.Mode.IsUnknown() || c.Mode.ValueString() != modeHostdev {
+	if resp.Diagnostics.HasError() || c.Mode.IsUnknown() {
+		return
+	}
+	if c.Mode.ValueString() != modeHostdev {
+		if !c.VLAN.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("vlan"), "VLAN only on SR-IOV VF pools",
+				"vlan needs mode = \"hostdev\": on other networks, tag inside the guest.")
+		}
 		return
 	}
 	if c.ForwardDev.IsNull() {
@@ -194,6 +205,9 @@ func (r *networkResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	body := settingsBody(plan)
 	body["name"] = plan.Name.ValueString()
+	if !plan.VLAN.IsNull() && !plan.VLAN.IsUnknown() {
+		body["vlan"] = plan.VLAN.ValueInt64()
+	}
 	body["autostart"] = plan.Autostart.ValueBool()
 
 	var created apiNetwork
@@ -234,6 +248,11 @@ func (r *networkResource) readInto(ctx context.Context, m *networkModel, d diags
 	m.Name = types.StringValue(n.Name)
 	m.Mode = types.StringValue(n.ForwardMode)
 	m.ForwardDev = strOrNull(n.ForwardDev)
+	if n.VLAN != nil {
+		m.VLAN = types.Int64Value(*n.VLAN)
+	} else {
+		m.VLAN = types.Int64Null()
+	}
 	m.IPAddress = strOrNull(n.IPAddress)
 	if n.Prefix != nil && n.IPAddress != nil {
 		m.Prefix = types.Int64Value(*n.Prefix)

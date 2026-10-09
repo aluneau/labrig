@@ -76,7 +76,8 @@ def dnsmasq_lines(spec: GroupSpec) -> List[str]:
         "# router) + stateful DHCPv6; reserved machines get <prefix>::<host number> (dhcp-host [addr])",
         "enable-ra",
         f"dhcp-range={start},{end},64,12h",
-        f"ra-param=*,{RA_INTERVAL},{RA_LIFETIME}",
+        # MTU in the RAs too when the group sets one (network.mtu, router_cases)
+        f"ra-param=*,{f'mtu:{spec.network.mtu},' if spec.network.mtu else ''}{RA_INTERVAL},{RA_LIFETIME}",
         f"dhcp-option=option6:dns-server,[{rip6}]",
         f"dhcp-option=option6:domain-search,{spec.domain}",
         f"dhcp-option=option6:ntp-server,[{rip6}]",
@@ -106,7 +107,7 @@ def nft_table(spec: GroupSpec, bgp_prefixes: List[str]) -> str:
                   " counter drop comment \"vmm ipv6 egress drop\"\n"
                   "    }\n")
     forward = ""
-    if spec.router.egress.mode == "blocked":
+    if spec.router.egress.mode in ("blocked", "proxy"):  # proxy = blocked + squid (router_cases)
         forward = (f"        ip6 saddr {net} ip6 daddr {{ {', '.join(lab + allow)} }} accept\n"
                    f"        ip6 saddr {net} counter reject with icmpv6 type admin-prohibited"
                    " comment \"vmm egress blocked\"\n")

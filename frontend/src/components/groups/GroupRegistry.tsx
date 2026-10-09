@@ -32,6 +32,7 @@ import { groupApi, taskApi } from '../../services/api';
 import { useLiveEvents } from '../../hooks/useEvents';
 import { errorText } from '../../utils/format';
 import { GroupRegistryImages } from './GroupRegistryImages';
+import { GroupProxy } from './GroupProxy';
 
 const muted: React.CSSProperties = { fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' };
 const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(\/\d{1,3})?)$/;
@@ -147,8 +148,8 @@ export const GroupRegistry: React.FC<{ group: GroupDetail; onDone: (msg: string)
   const allowList = allow.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
   const allowBad = allowList.some((a) => !CIDR_RE.test(a));
   const blocked = egress.mode === 'blocked';
-  const setEgress = (mode: 'open' | 'blocked') =>
-    putRouter({ egress: { mode, allow: allowList } },
+  const setEgress = (mode: 'open' | 'blocked' | 'proxy') =>
+    putRouter({ egress: { ...egress, mode, allow: allowList } },
       mode === 'blocked' ? 'Internet access blocked for the lab machines' : 'Internet access open again');
 
   const enableRegistry = (enabled: boolean) => putRouter({
@@ -209,8 +210,9 @@ export const GroupRegistry: React.FC<{ group: GroupDetail; onDone: (msg: string)
       </div>
       <Form style={{ maxWidth: 700 }}>
         <FormGroup fieldId="egress-switch">
-          <Switch id="egress-switch" label="Internet blocked for the lab machines" labelOff="Internet open for the lab machines"
-            isChecked={blocked} isDisabled={busy || allowBad} onChange={(_e, on) => setEgress(on ? 'blocked' : 'open')} />
+          <Switch id="egress-switch" label={egress.mode === 'proxy' ? 'Internet blocked for the lab machines (except through the proxy)' : 'Internet blocked for the lab machines'}
+            labelOff="Internet open for the lab machines"
+            isChecked={blocked || egress.mode === 'proxy'} isDisabled={busy || allowBad} onChange={(_e, on) => setEgress(on ? 'blocked' : 'open')} />
         </FormGroup>
         <FormGroup label="Still reachable when blocked" fieldId="egress-allow">
           <Flex>
@@ -228,6 +230,8 @@ export const GroupRegistry: React.FC<{ group: GroupDetail; onDone: (msg: string)
           </HelperTextItem></HelperText></FormHelperText>
         </FormGroup>
       </Form>
+
+      <GroupProxy group={group} onDone={onDone} onError={onError} />
 
       {/* Registry */}
       <Title headingLevel="h3" size="lg" style={{ margin: '32px 0 8px' }}>

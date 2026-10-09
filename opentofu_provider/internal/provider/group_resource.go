@@ -98,6 +98,9 @@ type groupModel struct {
 	BGPRange      types.String         `tfsdk:"bgp_announce_range"`
 	Egress        *egressModel         `tfsdk:"egress"`
 	Registry      *registryModel       `tfsdk:"registry"`
+	DNSZones      []dnsZoneModel       `tfsdk:"dns_zone"`
+	MTU           types.Int64          `tfsdk:"mtu"`
+	Path          *pathModel           `tfsdk:"path"`
 	IPv6          *ipv6Model           `tfsdk:"ipv6"`
 	RouterIP6     types.String         `tfsdk:"router_ip6"`
 	MemberIP6s    types.Map            `tfsdk:"member_ip6s"`
@@ -116,14 +119,59 @@ type apiIPv6 struct {
 	Egress  string  `json:"egress,omitempty"`
 }
 
-type apiGroupNetwork struct {
-	IPv6 *apiIPv6 `json:"ipv6"`
+// Split DNS zone (docs/router-cases.md)
+type dnsZoneModel struct {
+	Domain  types.String `tfsdk:"domain"`
+	Servers types.List   `tfsdk:"servers"`
 }
 
-// Egress switch of the router (docs/disconnected.md)
+// The router as a narrow hop (docs/router-cases.md)
+type pathModel struct {
+	MTU            types.Int64 `tfsdk:"mtu"`
+	DropFragNeeded types.Bool  `tfsdk:"drop_frag_needed"`
+	ClampMSS       types.Bool  `tfsdk:"clamp_mss"`
+}
+
+// Egress switch of the router (docs/disconnected.md; proxy: docs/router-cases.md)
 type egressModel struct {
 	Mode  types.String `tfsdk:"mode"`
 	Allow types.List   `tfsdk:"allow"`
+	Proxy *proxyModel  `tfsdk:"proxy"`
+}
+
+type proxyModel struct {
+	Port         types.Int64  `tfsdk:"port"`
+	AllowDomains types.List   `tfsdk:"allow_domains"`
+	ConnectPorts types.List   `tfsdk:"connect_ports"`
+	Username     types.String `tfsdk:"username"`
+	Password     types.String `tfsdk:"password"`
+	MemberEnv    types.Bool   `tfsdk:"member_env"`
+}
+
+type apiProxy struct {
+	Port         int64    `json:"port"`
+	AllowDomains []string `json:"allow_domains"`
+	ConnectPorts []int64  `json:"connect_ports"`
+	Username     *string  `json:"username"`
+	Password     *string  `json:"password"`
+	MemberEnv    bool     `json:"member_env"`
+}
+
+type apiDNSZone struct {
+	Domain  string   `json:"domain"`
+	Servers []string `json:"servers"`
+}
+
+type apiPath struct {
+	MTU            *int64 `json:"mtu"`
+	DropFragNeeded bool   `json:"drop_frag_needed"`
+	ClampMSS       bool   `json:"clamp_mss"`
+}
+
+// Settings left out are kept by the server (mtu and ipv6 are managed independently)
+type apiGroupNetwork struct {
+	MTU  *int64   `json:"mtu,omitempty"`
+	IPv6 *apiIPv6 `json:"ipv6,omitempty"`
 }
 
 // Mirror registry on the router (docs/disconnected.md)
@@ -138,8 +186,9 @@ type registryModel struct {
 }
 
 type apiEgress struct {
-	Mode  string   `json:"mode"`
-	Allow []string `json:"allow"`
+	Mode  string    `json:"mode"`
+	Allow []string  `json:"allow"`
+	Proxy *apiProxy `json:"proxy,omitempty"`
 }
 
 type apiRegistry struct {
@@ -213,17 +262,19 @@ type apiGroupSpec struct {
 		DNS     struct {
 			Forwarders []string       `json:"forwarders"`
 			Records    []apiDNSRecord `json:"records"`
+			Zones      []apiDNSZone   `json:"zones"`
 		} `json:"dns"`
 		WireGuard *apiWireGuard `json:"wireguard,omitempty"`
 		BGP       *apiBGP       `json:"bgp,omitempty"`
 		// omitted: the server keeps the stored blocks
 		Egress   *apiEgress   `json:"egress,omitempty"`
 		Registry *apiRegistry `json:"registry,omitempty"`
+		Path     *apiPath     `json:"path,omitempty"`
 	} `json:"router"`
+	Network   *apiGroupNetwork     `json:"network,omitempty"` // omitted: kept by the server
 	CloudInit map[string]any       `json:"cloud_init,omitempty"`
 	Members   []apiGroupMemberSpec `json:"members"`
 	DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
-	Network   *apiGroupNetwork     `json:"network,omitempty"` // omitted: the server keeps the stored one
 }
 
 type apiGroupMember struct {
@@ -254,15 +305,17 @@ type apiGroup struct {
 			DNS    struct {
 				Forwarders []string       `json:"forwarders"`
 				Records    []apiDNSRecord `json:"records"`
+				Zones      []apiDNSZone   `json:"zones"`
 			} `json:"dns"`
 			WireGuard *apiWireGuard `json:"wireguard"`
 			BGP       *apiBGP       `json:"bgp"`
 			Egress    *apiEgress    `json:"egress"`
 			Registry  *apiRegistry  `json:"registry"`
+			Path      *apiPath      `json:"path"`
 		} `json:"router"`
+		Network   *apiGroupNetwork     `json:"network"`
 		Members   []apiGroupMemberSpec `json:"members"`
 		DHCPHosts []apiGroupDHCPHost   `json:"dhcp_hosts"`
-		Network   apiGroupNetwork      `json:"network"`
 	} `json:"spec"`
 }
 
@@ -349,9 +402,32 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"load balancers, the registry and WireGuard keep working. Applied live. Omitted: left as it is on the server.",
 				Attributes: map[string]schema.Attribute{
 					"mode": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("open"),
-						Description: "open or blocked."},
+						Description: "open, blocked, or proxy (blocked + squid on the router as the only way out, docs/router-cases.md)."},
 					"allow": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 						Description: "CIDRs / addresses still reachable when blocked (e.g. a proxy)."},
+					"proxy": schema.SingleNestedAttribute{Optional: true,
+						Description: "Squid settings for mode = \"proxy\" (plain forward proxy, CONNECT for HTTPS, no TLS interception).",
+						Attributes: map[string]schema.Attribute{
+							"port": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(3128)},
+							"allow_domains": schema.ListAttribute{Optional: true, ElementType: types.StringType,
+								Description: "Allowed destinations (\".example.com\" = it and below); empty = any."},
+							"connect_ports": schema.ListAttribute{Optional: true, ElementType: types.Int64Type,
+								Description: "Ports allowed for CONNECT (HTTPS tunnels); default [443]."},
+							"username": schema.StringAttribute{Optional: true, Description: "Basic authentication (with password)."},
+							"password": schema.StringAttribute{Optional: true, Sensitive: true},
+							"member_env": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true),
+								Description: "Members created from a cloud image get http(s)_proxy / no_proxy and apt / dnf proxy settings."},
+						}},
+				}},
+			"mtu": schema.Int64Attribute{Optional: true,
+				Description: "MTU of the group network (libvirt bridge, router LAN, DHCP option 26 to the members). Omitted: left as it is."},
+			"path": schema.SingleNestedAttribute{Optional: true,
+				Description: "The router as a narrow hop towards the outside (docs/router-cases.md): smaller MTU on its interfaces, " +
+					"PMTUD black hole (drops the ICMP fragmentation-needed it should send), TCP MSS clamping. Applied live. Omitted: left as it is.",
+				Attributes: map[string]schema.Attribute{
+					"mtu":              schema.Int64Attribute{Optional: true, Description: "576-1500, not above mtu."},
+					"drop_frag_needed": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false)},
+					"clamp_mss":        schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false)},
 				}},
 			"registry": schema.SingleNestedAttribute{Optional: true,
 				Description: "Mirror registry on the router (mirror-registry / Quay, filled with oc-mirror v2): the router gets " +
@@ -405,6 +481,14 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"mac":      schema.StringAttribute{Required: true, Description: "Lowercase MAC address."},
 					"ip":       schema.StringAttribute{Required: true, Description: "Address in cidr (not the router's or a member's)."},
 					"hostname": schema.StringAttribute{Optional: true},
+				}},
+			},
+			"dns_zone": schema.ListNestedBlock{
+				Description: "Split DNS: names in domain are forwarded to servers (an IPv4 address, ip#port or a member name, e.g. " +
+					"a member running the customer's internal DNS) instead of the forwarders. Applied live.",
+				NestedObject: schema.NestedBlockObject{Attributes: map[string]schema.Attribute{
+					"domain":  schema.StringAttribute{Required: true},
+					"servers": schema.ListAttribute{Required: true, ElementType: types.StringType},
 				}},
 			},
 			"dns_record": schema.ListNestedBlock{
@@ -479,6 +563,37 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 		if !e.Allow.IsNull() && !e.Allow.IsUnknown() {
 			e.Allow.ElementsAs(ctx, &s.Router.Egress.Allow, false)
 		}
+		if p := e.Proxy; p != nil {
+			ap := &apiProxy{Port: p.Port.ValueInt64(), AllowDomains: []string{}, ConnectPorts: []int64{443},
+				Username: strPtr(p.Username), Password: strPtr(p.Password), MemberEnv: p.MemberEnv.IsNull() || p.MemberEnv.IsUnknown() || p.MemberEnv.ValueBool()}
+			if ap.Port == 0 {
+				ap.Port = 3128
+			}
+			if !p.AllowDomains.IsNull() && !p.AllowDomains.IsUnknown() {
+				p.AllowDomains.ElementsAs(ctx, &ap.AllowDomains, false)
+			}
+			if !p.ConnectPorts.IsNull() && !p.ConnectPorts.IsUnknown() {
+				p.ConnectPorts.ElementsAs(ctx, &ap.ConnectPorts, false)
+			}
+			s.Router.Egress.Proxy = ap
+		}
+	}
+	s.Router.DNS.Zones = []apiDNSZone{}
+	for _, z := range m.DNSZones {
+		zone := apiDNSZone{Domain: z.Domain.ValueString(), Servers: []string{}}
+		z.Servers.ElementsAs(ctx, &zone.Servers, false)
+		s.Router.DNS.Zones = append(s.Router.DNS.Zones, zone)
+	}
+	if !m.MTU.IsNull() && !m.MTU.IsUnknown() {
+		mtu := m.MTU.ValueInt64()
+		s.Network = &apiGroupNetwork{MTU: &mtu}
+	}
+	if p := m.Path; p != nil {
+		s.Router.Path = &apiPath{DropFragNeeded: p.DropFragNeeded.ValueBool(), ClampMSS: p.ClampMSS.ValueBool()}
+		if !p.MTU.IsNull() && !p.MTU.IsUnknown() {
+			mtu := p.MTU.ValueInt64()
+			s.Router.Path.MTU = &mtu
+		}
 	}
 	if v := m.IPv6; v != nil {
 		ip := &apiIPv6{Enabled: v.Enabled.IsNull() || v.Enabled.IsUnknown() || v.Enabled.ValueBool(), Egress: v.Egress.ValueString()}
@@ -486,7 +601,10 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 			prefix := v.Prefix.ValueString()
 			ip.Prefix = &prefix
 		}
-		s.Network = &apiGroupNetwork{IPv6: ip}
+		if s.Network == nil {
+			s.Network = &apiGroupNetwork{}
+		}
+		s.Network.IPv6 = ip
 	}
 	if reg := m.Registry; reg != nil {
 		s.Router.Registry = &apiRegistry{Enabled: reg.Enabled.IsNull() || reg.Enabled.IsUnknown() || reg.Enabled.ValueBool(),
@@ -773,7 +891,41 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		if len(e.Allow) > 0 || !allow.IsNull() {
 			allow, _ = types.ListValueFrom(ctx, types.StringType, e.Allow)
 		}
-		m.Egress = &egressModel{Mode: types.StringValue(e.Mode), Allow: allow}
+		em := &egressModel{Mode: types.StringValue(e.Mode), Allow: allow}
+		if m.Egress.Proxy != nil && e.Proxy != nil {
+			prev, p := m.Egress.Proxy, e.Proxy
+			pm := &proxyModel{Port: types.Int64Value(p.Port), Username: strOrNull(p.Username), Password: prev.Password,
+				MemberEnv: types.BoolValue(p.MemberEnv), AllowDomains: prev.AllowDomains, ConnectPorts: prev.ConnectPorts}
+			if len(p.AllowDomains) > 0 || !prev.AllowDomains.IsNull() {
+				pm.AllowDomains, _ = types.ListValueFrom(ctx, types.StringType, p.AllowDomains)
+			}
+			if !prev.ConnectPorts.IsNull() {
+				pm.ConnectPorts, _ = types.ListValueFrom(ctx, types.Int64Type, p.ConnectPorts)
+			}
+			em.Proxy = pm
+		}
+		m.Egress = em
+	}
+	var zones []dnsZoneModel
+	for _, z := range g.Spec.Router.DNS.Zones {
+		servers, _ := types.ListValueFrom(ctx, types.StringType, z.Servers)
+		zones = append(zones, dnsZoneModel{Domain: types.StringValue(z.Domain), Servers: servers})
+	}
+	m.DNSZones = zones
+	// mtu / path: only tracked when the config manages them
+	if !m.MTU.IsNull() {
+		m.MTU = types.Int64Null()
+		if g.Spec.Network != nil && g.Spec.Network.MTU != nil {
+			m.MTU = types.Int64Value(*g.Spec.Network.MTU)
+		}
+	}
+	if m.Path != nil && g.Spec.Router.Path != nil {
+		p := g.Spec.Router.Path
+		pm := &pathModel{MTU: types.Int64Null(), DropFragNeeded: types.BoolValue(p.DropFragNeeded), ClampMSS: types.BoolValue(p.ClampMSS)}
+		if p.MTU != nil {
+			pm.MTU = types.Int64Value(*p.MTU)
+		}
+		m.Path = pm
 	}
 	if m.Registry != nil && g.Spec.Router.Registry != nil {
 		reg := g.Spec.Router.Registry
@@ -781,7 +933,8 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 			DiskGB: types.Int64Value(reg.DiskGB), MemoryMB: types.Int64Value(reg.MemoryMB), VCPUs: types.Int64Value(reg.VCPUs),
 			Hostname: strOrNull(reg.Hostname), CAPEM: strOrNull(reg.CAPEM)}
 	}
-	if v := g.Spec.Network.IPv6; m.IPv6 != nil && v != nil {
+	if g.Spec.Network != nil && g.Spec.Network.IPv6 != nil && m.IPv6 != nil {
+		v := g.Spec.Network.IPv6
 		egress := v.Egress
 		if egress == "" {
 			egress = "reject"

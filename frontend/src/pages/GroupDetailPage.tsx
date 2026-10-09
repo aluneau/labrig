@@ -43,6 +43,8 @@ import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { GroupBgp } from '../components/groups/GroupBgp';
 import { GroupRegistry } from '../components/groups/GroupRegistry';
 import { GroupIpv6 } from '../components/groups/GroupIpv6';
+import { GroupDnsSettings } from '../components/groups/GroupDnsSettings';
+import { GroupMtu } from '../components/groups/GroupMtu';
 import { LabTopology } from '../components/topology/LabTopology';
 import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
@@ -428,6 +430,8 @@ export const GroupDetailPage: React.FC = () => {
                   <DescriptionListDescription>{spec.dhcp ? `${spec.dhcp.start} – ${spec.dhcp.end}` : '—'}</DescriptionListDescription></DescriptionListGroup>
                 <DescriptionListGroup><DescriptionListTerm>DNS forwarders</DescriptionListTerm>
                   <DescriptionListDescription>{spec.router?.dns?.forwarders?.join(', ') || 'from the uplink'}</DescriptionListDescription></DescriptionListGroup>
+                <DescriptionListGroup><DescriptionListTerm>MTU</DescriptionListTerm>
+                  <DescriptionListDescription>{spec.network?.mtu || 1500}{spec.router?.path?.mtu ? ` · narrow hop ${spec.router.path.mtu} on the router` : ''}</DescriptionListDescription></DescriptionListGroup>
               </DescriptionList>
 
               <Title headingLevel="h2" size="lg" style={{ marginTop: 24 }}>DNS records</Title>
@@ -458,6 +462,8 @@ export const GroupDetailPage: React.FC = () => {
               <GroupIpv6 group={group} onDone={onDone} onError={onError} />
 
               <GroupDhcp group={group} onDone={onDone} onError={onError} />
+              <GroupDnsSettings group={group} onDone={onDone} onError={onError} />
+              <GroupMtu group={group} onDone={onDone} onError={onError} />
             </PageSection>
           </Tab>
 

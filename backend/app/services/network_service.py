@@ -69,6 +69,9 @@ class NetworkService:
 
         if not net_data.xml_config and net_data.forward_mode == "hostdev":
             self._check_pf(net_data.forward_dev)
+        elif not net_data.xml_config and net_data.vlan:
+            raise ValueError("A VLAN tag is only supported on SR-IOV VF pools (the PF tags the VFs' traffic); "
+                             "for other networks tag inside the guest")
         xml = net_data.xml_config or self._build_network_xml(net_data)
         net_uuid = libvirt_client.create_network(net_data.name, xml, autostart=net_data.autostart)
         self.sync_networks(db)
@@ -326,16 +329,23 @@ class NetworkService:
 
         if not pf:
             raise ValueError("An SR-IOV VF pool needs a physical function (forward_dev): see GET /hosts/sriov")
-        if sriov_service.get_pf(pf) is None:
+        info = sriov_service.get_pf(pf, details=False)
+        if info is None:
             raise ValueError(f"{pf} is not an SR-IOV capable interface on this host (see GET /hosts/sriov)")
+        if info["total_vfs"] == 0:
+            raise ValueError(f"{pf}'s firmware allows no VFs (sriov_totalvfs = 0): see the checks on the Host page")
 
     def _build_network_xml(self, net_data: NetworkCreate) -> str:
         if net_data.forward_mode == "hostdev":
             # SR-IOV VF pool: libvirt hands out the PF's free VFs to <interface type='network'> NICs as PCI
-            # passthrough (managed = bound to vfio-pci on VM start, given back on stop). No bridge / IP / DHCP.
+            # passthrough (managed = bound to vfio-pci on VM start, given back to its driver on stop; vfio is
+            # the only backend QEMU has). It sets the NIC's MAC (and VLAN) on the VF through the PF and
+            # restores them afterwards. No bridge / IP / DHCP: the VF is on the PF's physical network.
+            vlan_xml = f"<vlan><tag id='{int(net_data.vlan)}'/></vlan>" if net_data.vlan else ""
             return f"""<network>
             <name>{escape(net_data.name)}</name>
-            <forward mode='hostdev' managed='yes'><pf dev={quoteattr(net_data.forward_dev)}/></forward>
+            <forward mode='hostdev' managed='yes'><driver name='vfio'/><pf dev={quoteattr(net_data.forward_dev)}/></forward>
+            {vlan_xml}
         </network>"""
         ip_xml = ""
         if net_data.ip_address and net_data.prefix:
@@ -370,6 +380,7 @@ class NetworkService:
         domain = root.find("domain")
         ip = root.find("ip")
         dhcp_range = ip.find("./dhcp/range") if ip is not None else None
+        tag = root.find("./vlan/tag")
 
         prefix = None
         if ip is not None:
@@ -392,6 +403,7 @@ class NetworkService:
             "dhcp_enabled": dhcp_range is not None,
             "dhcp_start": dhcp_range.get("start") if dhcp_range is not None else None,
             "dhcp_end": dhcp_range.get("end") if dhcp_range is not None else None,
+            "vlan": int(tag.get("id")) if tag is not None and (tag.get("id") or "").isdigit() else None,
         }
 
 
