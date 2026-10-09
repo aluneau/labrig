@@ -542,7 +542,7 @@ Goal: develop on the rig (git checkout), host the app elsewhere and pull new ver
   `/opt/vm-manager/current` -> the running release (the systemd unit runs from it), data in `/var/lib/vm-manager`
   (DATA_DIR, DB; owned by the service user), config in `/etc/vm-manager/vm-manager.env` (read by Settings next
   to `backend/.env`). A git checkout (the rig) keeps working as before ("checkout mode": `git pull` + `setup.sh`).
-- **Updater** `vm-manager-update` (python3 stdlib, root, `/usr/local/sbin`): `install` (bootstrap a host from
+- **Updater** `vm-manager-update` (python3 stdlib, root, `/usr/sbin`): `install` (bootstrap a host from
   GitHub), `update [--version X] [--channel stable|nightly] [--force]`, `rollback`, `list`, `status`, `check`.
   update = resolve release (GitHub API) -> download + sha256 -> unpack -> new release's `setup.sh --release`
   (venv, packages, helper/polkit/PAM, unit; no restart) -> refuse while tasks run (unless --force) -> switch

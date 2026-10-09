@@ -29,7 +29,7 @@ Fixed command whitelist, every argument validated here (never trust the caller):
       anyone when run as root). Needed because pam_unix can't check another local user's password
       from the app's non-root process. root (uid 0) is refused. Exit 6 = denied.
   helper self-update <version> <stable|nightly>
-      Start /usr/local/sbin/vm-manager-update (root-owned, installed by setup.sh) detached in the transient unit
+      Start /usr/libexec/vm-manager/vm-manager-update (root-owned, installed by setup.sh) detached in the transient unit
       vm-manager-update.service (it restarts the app's service). It only installs the CURRENT latest release of
       the channel from the repo set in /etc/vm-manager/update.conf (root-owned), and refuses when <version> is
       not that release: the caller can't pick an older version or another source. Release installs only.
@@ -486,7 +486,7 @@ def pam_auth(args):
     print("ok")
 
 
-UPDATER = "/usr/local/sbin/vm-manager-update"
+UPDATER = "/usr/libexec/vm-manager/vm-manager-update"
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$")
 
 

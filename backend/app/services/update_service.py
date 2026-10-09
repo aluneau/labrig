@@ -25,7 +25,7 @@ from app.services.helper_service import run_helper
 logger = logging.getLogger(__name__)
 
 RELEASES_DIR = "/opt/vm-manager/releases"
-UPDATER = "/usr/local/sbin/vm-manager-update"
+UPDATER = "/usr/libexec/vm-manager/vm-manager-update"
 UPDATE_LOG = "/var/log/vm-manager-update.log"
 CHECK_INTERVAL = 6 * 3600
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$")

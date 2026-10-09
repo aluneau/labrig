@@ -24,7 +24,7 @@ sudo python3 vm-manager-update install --channel nightly -- --listen 0.0.0.0 --p
 Run it with `sudo` from the account that will run the app (or `--user NAME`). Everything after `--` goes to
 `scripts/setup.sh` (`--listen`, `--port`, `--no-boot`, `--wg-ports`, `--no-auth`) and is kept for updates.
 The release's `setup.sh --release` does the rest: packages, libvirt, privileged helper, PAM, venv, systemd unit,
-and installs the updater as `/usr/local/sbin/vm-manager-update`.
+and installs the updater as `/usr/sbin/vm-manager-update`.
 
 Moving an existing git-checkout install to a release install (same host):
 `sudo python3 vm-manager-update install --import-data ~/Projets/vm-manager` copies its `backend/data` (DB,

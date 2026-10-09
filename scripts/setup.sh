@@ -179,9 +179,12 @@ $SUDO sh -c 'command -v dhcp_release' >/dev/null 2>&1 || warn "dhcp_release not 
 systemctl is-active --quiet polkit 2>/dev/null || $SUDO systemctl start polkit 2>/dev/null || true
 # Updater from GitHub releases (docs/updates.md): `sudo vm-manager-update update`, or the Host page's
 # "Update now" through the helper (self-update), which only runs this root-owned copy
-$SUDO install -o root -g root -m 0755 "$APP_DIR/scripts/vm-manager-update" /usr/local/sbin/vm-manager-update
-if command -v restorecon >/dev/null 2>&1; then $SUDO restorecon /usr/local/sbin/vm-manager-update; fi
-ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules, /usr/local/sbin/vm-manager-update"
+# (/usr/sbin link: in sudo's secure_path on every distro, /usr/local/sbin isn't on EL)
+$SUDO install -o root -g root -m 0755 "$APP_DIR/scripts/vm-manager-update" "$HELPER_DIR/vm-manager-update"
+$SUDO ln -sfn "$HELPER_DIR/vm-manager-update" /usr/sbin/vm-manager-update
+$SUDO rm -f /usr/local/sbin/vm-manager-update
+if command -v restorecon >/dev/null 2>&1; then $SUDO restorecon "$HELPER_DIR/vm-manager-update"; fi
+ok "helper in $HELPER_DIR, polkit rule /etc/polkit-1/rules.d/50-vm-manager.rules, /usr/sbin/vm-manager-update"
 
 # ---------------------------------------------------------------------------
 step "Login (Linux accounts through PAM)"
