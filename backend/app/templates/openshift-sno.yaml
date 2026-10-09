@@ -1,0 +1,56 @@
+id: openshift-sno
+title: OpenShift single node (SNO)
+summary: An OpenShift single-node cluster (agent-based installer) in a lab group whose router serves the api / *.apps DNS and load balancer. Heavy.
+tags: [openshift, sno, kubernetes]
+requires: [openshift]
+heavy: true
+resources: {vcpus: 9, memory_mb: 25088, disk_gb: 130}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: channel, label: Update channel, type: choice, choices: [stable-4.20, stable-4.19, stable-4.18], default: stable-4.20}
+  - {name: version, label: Exact release, type: string, pattern: '^\d+\.\d+\.\d+$', help: 'e.g. 4.20.39; empty = latest of the channel'}
+  - {name: storage, label: Storage, type: choice, choices: [none, lvms], default: none,
+     help: 'lvms adds a 100 GiB disk and the LVM Storage operator (a default StorageClass)'}
+  - {name: metallb, label: MetalLB (L2) + demo service, type: bool, default: false}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-ocp"
+group:
+  cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}"}
+cluster:
+  name: "c{{case}}"
+  type: openshift
+  openshift:
+    channel: "{{channel}}"
+    version: "{{version}}"
+    topology: sno
+    storage: "{{storage}}"
+    metallb: {enabled: "{{metallb}}", mode: l2}
+guide: |
+  # Case {{case}}: OpenShift single node
+
+  For customer issues that need a real cluster: operators, upgrades, MachineConfigs, ingress, storage.
+  **Heavy:** the node takes 24 GiB of RAM and 8 vCPUs; the install takes 45–90 minutes and downloads
+  several GB (cached per release afterwards).
+
+  ## What is in the lab
+  - Lab group **{{group}}** on **{{cidr}}**; the router `{{ip:1}}` serves `api.c{{case}}.{{domain}}`,
+    `api-int.c{{case}}.{{domain}}`, `*.apps.c{{case}}.{{domain}}` and load-balances 6443 / 22623 / 80 / 443 (haproxy)
+  - Cluster **c{{case}}** (SNO, {{channel}}), storage: {{storage}}, MetalLB: {{metallb}}
+  - Needs your pull secret (Clusters page → OpenShift pull secret), checked before creation
+
+  ## Steps
+  1. Wait for the group, then the cluster task (Clusters page → c{{case}}: install progress).
+  2. Cluster page: download the kubeconfig, copy the kubeadmin password.
+  3. Console: `https://console-openshift-console.apps.c{{case}}.{{domain}}` — reachable through the router DNS,
+     e.g. from a laptop with WireGuard (Remote access tab of the group).
+
+  ## Checks
+  - `oc get clusterversion,co` all Available
+  - `oc get nodes` Ready, `oc get csr` nothing Pending
+  - With MetalLB: `curl http://hello.{{domain}}/` answers from the demo service
+
+  ## Things to try
+  - Install an operator day 2 from the cluster page (Operators)
+  - Apply the customer's MachineConfig and watch the node reboot (`oc get mcp -w`)

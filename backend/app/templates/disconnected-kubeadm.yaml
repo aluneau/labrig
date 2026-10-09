@@ -5,14 +5,16 @@ tags: [kubernetes, kubeadm, disconnected, registry, containerd]
 requires: [kubeadm, registry]
 resources: {vcpus: 6, memory_mb: 8192, disk_gb: 100}
 params:
-  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
-  - {name: cidr, label: Lab subnet, type: string, default: 10.42.90.0/24}
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: version, label: Kubernetes version, type: string, default: v1.37, pattern: '^v?\d+\.\d+(\.\d+)?$',
+     help: 'Minor (latest patch, resolved on the router) or patch'}
   - {name: image, label: Node cloud image, type: cloud_image, default: debian-13}
-  - {name: version, label: Kubernetes version, type: string, default: v1.37}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
 name: "c{{case}}-air"
 group:
-  name: "c{{case}}-air"
   cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}"}
   router:
     # the router is the site's bastion: mirror registry (Quay) at registry.<domain>:8443, internet kept
     registry: {enabled: true, port: 8443, disk_gb: 60, memory_mb: 4096, vcpus: 2}
@@ -22,6 +24,9 @@ cluster:
   version: "{{version}}"
   ctlplanes: 1
   workers: 1
+  image: "{{image}}"
+  username: admin
+  password: "{{password}}"
   disconnected: true
   mirror_images: [docker.io/library/redis:7-alpine]
 guide: |

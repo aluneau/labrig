@@ -1,0 +1,68 @@
+id: mtu-1400
+title: MTU 1400 path and PMTUD black hole
+summary: A 1400-byte hop between the lab and the outside that swallows ICMP "fragmentation needed" - small requests work, big transfers hang.
+tags: [mtu, network]
+requires: []
+resources: {vcpus: 3, memory_mb: 2560, disk_gb: 30}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
+  - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+name: "c{{case}}-mtu"
+group:
+  name: "c{{case}}-mtu"
+  cidr: "{{cidr}}"
+  # the lab itself is a normal 1500-byte network...
+  network: {mtu: 1500}
+  router:
+    # ...but the router is a 1400-byte hop towards the outside (a VPN / tunnel / misconfigured link on the
+    # customer's path) and drops the ICMP "fragmentation needed" it should send back: PMTUD black hole
+    path: {mtu: 1400, drop_frag_needed: true, clamp_mss: false}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - {name: client, image: "{{image}}", memory: 1024}
+    - {name: server, image: "{{image}}", memory: 1024}
+guide: |
+  ## Customer symptom
+  "SSH logs in but hangs on `ls` of a big directory", "`curl` of a small page works, a big download stalls at a
+  few KB", "TLS handshake times out (the certificate chain is big)", "image pulls hang", "it works on the LAN,
+  not through the VPN". Small packets pass, full-size ones vanish without an error: the path has a smaller MTU
+  than the hosts think, and the ICMP messages that would tell them (type 3 code 4, *fragmentation needed*) are
+  dropped by a firewall on the way. That's a **PMTUD black hole**.
+
+  ## What the lab contains
+  - `client` and `server` on a 1500-byte lab network (`ip link` shows mtu 1500; members also get it by DHCP).
+  - The router's interfaces are 1400 bytes (Network & DNS tab: *Narrow hop MTU*), and it drops the
+    *fragmentation needed* it generates (*PMTUD black hole* ticked). MSS clamping is off.
+  - Between `client` and `server` (same L2 network) nothing is wrong: compare.
+
+  ## Reproduce
+  On `client` (console, user admin):
+  ```
+  ip link show enp1s0                              # mtu 1500: the host believes 1500 works
+  ping -c2 -M do -s 1372 192.168.122.1             # 1372 + 28 = 1400 bytes: OK
+  ping -c2 -M do -s 1373 192.168.122.1             # 1401 bytes: 100% loss, NO error (black hole)
+  ping -c2 -M do -s 1472 server                    # 1500 bytes inside the lab: OK
+  curl -m 20 -o /dev/null https://deb.debian.org/debian/dists/trixie/Release   # hangs: big TCP segments lost
+  curl -m 20 -o /dev/null -sI http://deb.debian.org/                           # small answer: works (plain HTTP:
+                                                   # even a TLS handshake carries a big certificate chain)
+  ```
+  `-M do` sets Don't Fragment; `-s` is the ICMP payload (IP 20 + ICMP 8 = 28 bytes of headers).
+
+  Untick *PMTUD black hole*: the same 1373-byte ping now fails with **"Frag needed and DF set (mtu = 1400)"** /
+  "Message too long", `ip route get 192.168.122.1` shows `mtu 1400` cached, and the download works: that's PMTUD
+  doing its job. (`sudo ip route flush cache` on the client between tries: it remembers the learned MTU for 10 min.)
+
+  ## What to check / try
+  - `tracepath -n 192.168.122.1` (iputils-tracepath) shows `pmtu 1400` when ICMP gets through, nothing useful when not.
+  - `tcpdump -ni any 'icmp[0] == 3 and icmp[1] == 4'` on the router console: the frag-needed packets it drops.
+  - `ss -ti` on the client during a hang: retransmits of full-size segments (`mss:1448`).
+  - Fix 1 (the usual one on firewalls / VPN gateways): **MSS clamping**: tick *Clamp the TCP MSS*: SYNs through the
+    router get MSS 1360, the download works even with the black hole. ping / UDP stay broken: clamping only fixes TCP.
+  - Fix 2: lower the hosts' MTU: set *Network MTU* to 1400 (DHCP option 26; on a member `sudo networkctl
+    reconfigure enp1s0` or reboot), or `ip link set enp1s0 mtu 1400`.
+  - Fix 3: let ICMP type 3 code 4 through (untick *PMTUD black hole*). Linux senders can also probe by themselves:
+    `sysctl net.ipv4.tcp_mtu_probing=1`.
+  - Variants: Network MTU 9000 (jumbo frames in the lab, 1500 outside); a narrow hop without black hole to
+    show working PMTUD; OpenShift / OVN overlays (MTU 1400 = 1500 - Geneve overhead) on top of it.

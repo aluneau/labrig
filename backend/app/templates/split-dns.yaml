@@ -1,0 +1,84 @@
+id: split-dns
+title: Split DNS (internal zone on its own resolver)
+summary: Internal names (corp.example) resolve only through the customer's internal DNS server; everything else through public resolvers.
+tags: [dns]
+requires: []
+resources: {vcpus: 3, memory_mb: 2048, disk_gb: 30}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
+  - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: zone, label: Internal DNS zone, type: string, default: corp.example, pattern: '^[a-z0-9-]+(\.[a-z0-9-]+)+$'}
+name: "c{{case}}-dns"
+group:
+  name: "c{{case}}-dns"
+  cidr: "{{cidr}}"
+  router:
+    dns:
+      forwarders: [1.1.1.1, 9.9.9.9]
+      # conditional forwarding: the zone goes to the internal server (a member), the rest to the forwarders
+      zones:
+        - {domain: "{{zone}}", servers: [dns1]}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - {name: client, image: "{{image}}", memory: 1024}
+    # The customer's internal resolver: dnsmasq authoritative for the zone, answering only inside the lab
+    - name: dns1
+      image: "{{image}}"
+      memory: 512
+      ip: "{{ip:53}}"
+      role: dns
+      user_data: |
+        #cloud-config
+        hostname: dns1
+        users:
+          - default
+          - {name: admin, plain_text_passwd: "{{password}}", lock_passwd: false, sudo: "ALL=(ALL) NOPASSWD:ALL", shell: /bin/bash}
+        ssh_pwauth: true
+        package_update: true
+        packages: [qemu-guest-agent, dnsmasq, dnsutils]
+        write_files:
+          - path: /etc/dnsmasq.d/internal.conf
+            content: |
+              # The customer's internal zone: answered here only, never forwarded
+              bind-dynamic
+              no-resolv
+              local=/{{zone}}/
+              host-record=app.{{zone}},{{ip:80}}
+              host-record=intranet.{{zone}},{{ip:81}}
+              host-record=ldap.{{zone}},{{ip:82}}
+        runcmd:
+          - systemctl enable --now qemu-guest-agent
+          - systemctl restart dnsmasq
+guide: |
+  ## Customer symptom
+  "`app.{{zone}}` resolves on some machines and not on others", "nslookup works but the application can't
+  resolve", "it only works when the VPN is up": internal names live on an internal DNS server, public names on
+  public resolvers, and a client (or a resolver in between) asks the wrong one.
+
+  ## What the lab contains
+  - The router resolves `*.c{{case}}-dns.lab` itself, forwards **`{{zone}}`** to `dns1` ({{ip:53}}, the
+    "internal DNS"), and everything else to 1.1.1.1 / 9.9.9.9 (Network & DNS tab: *Split DNS zones*).
+  - `dns1` runs dnsmasq, authoritative for `{{zone}}` (app, intranet, ldap). It knows nothing else.
+  - `client` uses the router as its resolver (DHCP), like a machine on the customer's LAN.
+
+  ## Reproduce
+  On `client` (console, user admin; `sudo apt install -y dnsutils` for dig):
+  ```
+  getent hosts app.{{zone}}            # {{ip:80}}, through the router's conditional forwarding
+  dig +short app.{{zone}} @1.1.1.1     # empty: the public internet doesn't know the zone
+  dig +short app.{{zone}} @{{ip:53}}   # {{ip:80}}: dns1 asked directly
+  dig +short www.redhat.com @{{ip:53}} # empty / REFUSED: the internal server does not recurse
+  ```
+  Break it like the customer: remove the zone in the UI (Network & DNS, *Remove*), or point a client at a public
+  resolver only (`nameserver 1.1.1.1` in /etc/resolv.conf, or `resolvectl dns enp1s0 1.1.1.1` with systemd-resolved) -> internal names stop resolving, public ones keep working.
+  The reverse mistake: only `nameserver {{ip:53}}` -> internal names work, the internet doesn't.
+
+  ## What to check / try
+  - `resolvectl status`, `/etc/resolv.conf`: which server does the client really use? Search domains?
+  - `dig +trace`, `dig @<server>` against each resolver; `journalctl -u systemd-resolved`.
+  - DNS rebinding protection (Network & DNS: *drop private addresses in upstream answers*): private answers coming
+    from upstream are dropped, zones are exempt — a frequent cause of "the public name of an internal app has no
+    address".
+  - Negative caching: tick *Don't cache negative answers* (or set the cache size to 0) to compare.

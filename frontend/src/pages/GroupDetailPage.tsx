@@ -42,10 +42,34 @@ import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { GroupBgp } from '../components/groups/GroupBgp';
 import { GroupRegistry } from '../components/groups/GroupRegistry';
+import { GroupDnsSettings } from '../components/groups/GroupDnsSettings';
+import { GroupMtu } from '../components/groups/GroupMtu';
 import { LabTopology } from '../components/topology/LabTopology';
 import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
 import { groupStatus } from './GroupsPage';
+import { Markdown } from '../components/common/Markdown';
+import { SaveTemplateModal } from '../components/groups/SaveTemplateModal';
+
+/** Case guide of a group created from a template (rendered when it was created) */
+const GuideTab: React.FC<{ group: GroupDetail }> = ({ group }) => {
+  const t = group.spec.template!;
+  return (
+    <div id="group-guide">
+      <DescriptionList isHorizontal isCompact style={{ marginBottom: 16 }}>
+        {t.case && <DescriptionListGroup><DescriptionListTerm>Case</DescriptionListTerm>
+          <DescriptionListDescription id="group-guide-case">{t.case}</DescriptionListDescription></DescriptionListGroup>}
+        <DescriptionListGroup><DescriptionListTerm>Template</DescriptionListTerm>
+          <DescriptionListDescription>{t.title || t.id} (<Link to={`/templates/${t.id}`}>{t.id}</Link>)</DescriptionListDescription></DescriptionListGroup>
+        {!!Object.keys(t.params || {}).length && <DescriptionListGroup><DescriptionListTerm>Parameters</DescriptionListTerm>
+          <DescriptionListDescription>
+            {Object.entries(t.params).filter(([k]) => k !== 'password').map(([k, v]) => `${k} = ${v === null ? '—' : String(v)}`).join(' · ')}
+          </DescriptionListDescription></DescriptionListGroup>}
+      </DescriptionList>
+      <Markdown source={t.guide || '_This template has no guide._'} />
+    </div>
+  );
+};
 
 /** Hosts, DNS records and load balancers that clusters manage in this group (read-only here) */
 const ClusterEntries: React.FC<{ group: GroupDetail }> = ({ group }) => {
@@ -289,6 +313,7 @@ export const GroupDetailPage: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<string | number>(() => searchParams.get('tab') || 'topology');
+  const [saveTplOpen, setSaveTplOpen] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteDisks, setDeleteDisks] = useState(true);
@@ -358,12 +383,14 @@ export const GroupDetailPage: React.FC = () => {
           <FlexItem>
             <Title headingLevel="h1">{group.name} <StatusLabel status={groupStatus(group)} /></Title>
             <div style={{ color: 'var(--pf-v5-global--Color--200)' }}>
+              {group.spec.template?.case && <>case {group.spec.template.case} · </>}
               {group.cidr} · {group.domain} · uplink {group.uplink || 'none'} · {group.member_count} member(s)
             </div>
           </FlexItem>
           <FlexItem align={{ default: 'alignRight' }}>
             <Button variant="secondary" onClick={() => power('start')} isDisabled={powerBusy || group.state === 'running'} style={{ marginRight: 8 }}>Start</Button>
             <Button variant="secondary" onClick={() => power('stop')} isDisabled={powerBusy || group.state === 'stopped'} style={{ marginRight: 8 }}>Stop</Button>
+            <Button variant="secondary" onClick={() => setSaveTplOpen(true)} style={{ marginRight: 8 }} id="g-save-template">Save as template</Button>
             <Button variant="danger" onClick={() => setConfirmDelete(true)} isDisabled={group.status === 'deleting'}>Delete</Button>
           </FlexItem>
         </Flex>
@@ -374,7 +401,12 @@ export const GroupDetailPage: React.FC = () => {
         {error && <Alert variant="danger" isInline title={error} style={{ marginBottom: 16 }} actionClose={<AlertActionCloseButton onClose={() => setError(null)} />} />}
         {notice && <Alert variant="success" isInline title={notice} style={{ marginBottom: 16 }} actionClose={<AlertActionCloseButton onClose={() => setNotice(null)} />} />}
 
-        <Tabs activeKey={tab} onSelect={(_e, k) => setTab(k)} mountOnEnter>
+        <Tabs activeKey={tab === 'guide' && !spec.template ? 'topology' : tab} onSelect={(_e, k) => setTab(k)} mountOnEnter>
+          {spec.template && (
+            <Tab eventKey="guide" title={<TabTitleText>Case guide</TabTitleText>}>
+              <PageSection variant="light"><GuideTab group={group} /></PageSection>
+            </Tab>
+          )}
           <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>}>
             <PageSection variant="light">
               <LabTopology groupId={group.id}
@@ -426,6 +458,8 @@ export const GroupDetailPage: React.FC = () => {
                   <DescriptionListDescription>{spec.dhcp ? `${spec.dhcp.start} – ${spec.dhcp.end}` : '—'}</DescriptionListDescription></DescriptionListGroup>
                 <DescriptionListGroup><DescriptionListTerm>DNS forwarders</DescriptionListTerm>
                   <DescriptionListDescription>{spec.router?.dns?.forwarders?.join(', ') || 'from the uplink'}</DescriptionListDescription></DescriptionListGroup>
+                <DescriptionListGroup><DescriptionListTerm>MTU</DescriptionListTerm>
+                  <DescriptionListDescription>{spec.network?.mtu || 1500}{spec.router?.path?.mtu ? ` · narrow hop ${spec.router.path.mtu} on the router` : ''}</DescriptionListDescription></DescriptionListGroup>
               </DescriptionList>
 
               <Title headingLevel="h2" size="lg" style={{ marginTop: 24 }}>DNS records</Title>
@@ -453,6 +487,8 @@ export const GroupDetailPage: React.FC = () => {
               <div style={{ marginTop: 16 }}><AddRecordForm groupId={group.id} domain={group.domain} onDone={onDone} onError={onError} /></div>
 
               <GroupDhcp group={group} onDone={onDone} onError={onError} />
+              <GroupDnsSettings group={group} onDone={onDone} onError={onError} />
+              <GroupMtu group={group} onDone={onDone} onError={onError} />
             </PageSection>
           </Tab>
 
@@ -501,6 +537,8 @@ export const GroupDetailPage: React.FC = () => {
           </div>
         )}
       </ConfirmModal>
+      <SaveTemplateModal group={group} isOpen={saveTplOpen} onClose={() => setSaveTplOpen(false)}
+        onSaved={(id) => onDone(`Saved as template ${id} (Templates page)`)} />
       <CreateVMModal isOpen={customOpen} group={group} onClose={() => setCustomOpen(false)}
         onCreated={(msg) => onDone(msg || 'Member added')} />
       <ConfirmModal title={`Remove member ${toRemove}?`} isOpen={!!toRemove} confirmLabel="Remove"

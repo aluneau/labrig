@@ -8,6 +8,7 @@ import logging
 from typing import List, Optional, Dict, Any, Tuple
 from xml.sax.saxutils import quoteattr
 
+import libvirt
 from sqlalchemy.orm import Session
 
 from app import domain_xml
@@ -153,7 +154,7 @@ class VMService:
                 network_xml="\n".join(
                     [self._build_network_xml(network, mac) for network, mac in
                      (nics or [(vm_data.network_name or settings.DEFAULT_NETWORK, vm_data.mac_address)])]
-                    + [self._nic_xml(n.network, n.model, n.mac, n.link_state) for n in vm_data.extra_nics]),
+                    + [self._nic_xml(n.network, n.model, n.mac, n.link_state, n.vlan) for n in vm_data.extra_nics]),
                 arch=vm_data.arch,
                 boot_devs=["hd", "cdrom"] if vm_data.iso_path else ["hd"],
                 metadata_xml=metadata_xml,
@@ -179,7 +180,7 @@ class VMService:
         ))
 
         if vm_data.start:
-            libvirt_client.start_vm(vm_data.name)
+            self._start_vm(vm_data.name)
             db_vm.status = "running"
             db.commit()
 
@@ -238,11 +239,26 @@ class VMService:
     def _start(self, db: Session, vm: VM) -> None:
         """Start, applying a pending one-shot boot order (PUT /vms/{id}/boot once=true)"""
         if not vm.next_boot:
-            libvirt_client.start_vm(vm.name)
+            self._start_vm(vm.name)
             return
-        libvirt_client.start_vm_with_boot_order(vm.name, vm.next_boot.split(","))
+        self._start_vm(vm.name, vm.next_boot.split(","))
         vm.next_boot = None
         db.commit()
+
+    def _start_vm(self, name: str, boot_order: Optional[List[str]] = None) -> None:
+        """Start; VMs with SR-IOV VF NICs get their pools checked first (plain-words failures)"""
+        needs = self._vf_pool_needs(libvirt_client.get_vm_nics(name))
+        if needs and (libvirt_client.get_vm(name) or {}).get("state") not in ("running", "paused"):
+            self.check_vf_pools(needs)
+        try:
+            if boot_order:
+                libvirt_client.start_vm_with_boot_order(name, boot_order)
+            else:
+                libvirt_client.start_vm(name)
+        except libvirt.libvirtError as e:
+            if not needs:
+                raise
+            raise self._vf_error(needs, e)
 
     # Devices: CD-ROM, boot order, disks
 
@@ -352,9 +368,9 @@ class VMService:
                 return mac
 
     def _nic_xml(self, network: str, model: str = "virtio", mac: Optional[str] = None,
-                 link_state: str = "up") -> str:
+                 link_state: str = "up", vlan: Optional[int] = None) -> str:
         """Interface XML for a libvirt network. SR-IOV VF pool networks (forward mode hostdev) give the
-        guest a VF: no emulated model / link state, and the host needs an IOMMU."""
+        guest a VF: no emulated model / link state, the host needs an IOMMU; vlan = tag set on the VF."""
         from app.services.sriov_service import sriov_service
 
         mode = libvirt_client.network_forward_mode(network)
@@ -363,15 +379,56 @@ class VMService:
         if mode == "hostdev":
             iommu = sriov_service.iommu()
             if not iommu["enabled"]:
-                raise ValueError(f"'{network}' is an SR-IOV VF pool: {iommu['message']}")
-            return domain_xml.nic_xml(network, None, mac)
+                raise ValueError(f"'{network}' is an SR-IOV VF pool, but this host has no active IOMMU, so VFs "
+                                 f"can't be passed through. {iommu['message']}")
+            return domain_xml.nic_xml(network, None, mac, vlan=vlan)
+        if vlan:
+            raise ValueError(f"A VLAN tag on the NIC is only supported on SR-IOV VF pools ('{network}' is a "
+                             f"{mode} network): tag inside the guest instead")
         return domain_xml.nic_xml(network, model, mac, link_state)
 
+    @staticmethod
+    def _vf_pool_needs(nics: List[Dict[str, Any]]) -> Dict[str, int]:
+        """{VF pool network: number of VFs these NICs take}"""
+        needs: Dict[str, int] = {}
+        for nic in nics:
+            if nic.get("vf") and nic.get("network") and nic.get("pending") != "detach":
+                needs[nic["network"]] = needs.get(nic["network"], 0) + 1
+        return needs
+
+    def check_vf_pools(self, needs: Dict[str, int]) -> None:
+        """Plain-words reason when a VF pool can't hand out the VFs (no free VF, no IOMMU, shared IOMMU
+        group, PF gone) before libvirt fails with a cryptic (and localized) error"""
+        from app.services.sriov_service import sriov_service
+
+        for network, count in needs.items():
+            sriov_service.check_pool(network, libvirt_client.network_pf(network), count)
+
+    def _vf_error(self, needs: Dict[str, int], error: Exception) -> Exception:
+        """A start / hot-plug with VF NICs failed: explain why in plain words when we can"""
+        try:
+            self.check_vf_pools(needs)
+        except ValueError as e:
+            return ValueError(str(e))
+        message = error.get_error_message() if isinstance(error, libvirt.libvirtError) else str(error)
+        return ValueError(f"{message} (SR-IOV VF NIC: see the SR-IOV checks on the Host page and the host's "
+                          f"journal: journalctl -u virtqemud -u libvirtd)")
+
     def add_nic(self, db: Session, vm: VM, network: str, model: str, mac: Optional[str],
-                link_state: str = "up") -> Dict[str, Any]:
+                link_state: str = "up", vlan: Optional[int] = None) -> Dict[str, Any]:
         if mac and mac.lower() in libvirt_client.all_macs():
             raise ValueError(f"MAC {mac} is already used by a VM on this host")
-        result = libvirt_client.attach_nic(vm.name, self._nic_xml(network, model, mac, link_state))
+        xml = self._nic_xml(network, model, mac, link_state, vlan)
+        vf_pool = libvirt_client.network_forward_mode(network) == "hostdev"
+        if vf_pool and vm.status in ("running", "paused"):
+            self.check_vf_pools({network: 1})
+        result = libvirt_client.attach_nic(vm.name, xml)
+        if vf_pool and result["pending"] and result["error"] and vm.status in ("running", "paused"):
+            # Hot-plug of the VF failed: say why (it is still saved for the next start)
+            try:
+                self.check_vf_pools({network: 1})
+            except ValueError as e:
+                result["error"] = str(e)
         hostdev = libvirt_client.network_forward_mode(network) == "hostdev"
         what = f"an SR-IOV VF from '{network}'" if hostdev else f"a {model} NIC on '{network}'"
         message = f"Added {what} ({result['mac']})"

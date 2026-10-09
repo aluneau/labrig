@@ -39,25 +39,30 @@ backend/app/
   services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
-                      bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
+                      router_cases (split DNS, proxy, MTU render helpers), bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
                       k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
+                      template_service (customer-case templates: load/validate, render, create, save group as template)
+  templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
+  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
 docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, k3s, kubeadm (clusters)
+docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
+docs/templates.md     customer-case templates: file format, placeholders, API, adding one
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), sriov-pool, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -111,8 +116,13 @@ e2e/                  Playwright browser tests against the real app (see below)
   read it from the saved config; `vf: true`). Debian/Ubuntu cloud-image VMs get a network-config with DHCP on
   every NIC (primary by MAC keeps the default route; EL's NetworkManager does it by itself).
 - **vIOMMU** = `<iommu model='intel'>` + `<ioapic driver='qemu'/>` (domain_xml.set_iommu), saved config only:
-  applies at the next cold start. Host SR-IOV state is read from sysfs (`sriov_service`); VF counts go through
-  the helper (`sriov-set-numvfs`). This rig has no IOMMU: test VF pools nested (docs/sriov.md).
+  applies at the next cold start. Host SR-IOV state is read from sysfs + `ip -j -d link` (`sriov_service`: readiness
+  checks with fix commands per distro, VF MAC/VLAN/trust/IOMMU group). Changes go through the helper (v3):
+  `sriov-set-numvfs`, `sriov-vf-options` (trust/spoofchk on every VF of a PF), `sriov-persist` (PF by PCI address in
+  `/etc/vm-manager/sriov.conf` + `vm-manager-sriov.service` running `helper sriov-restore` at boot). VF pools: `vlan`
+  on the network / NIC (`<vlan><tag>`, libvirt sets it with the MAC through the PF); `vm_service._start_vm` /
+  `add_nic` run `sriov_service.check_pool` first (plain-words: no free VF, shared IOMMU group, PF gone). This rig has
+  no IOMMU: test VF pools nested (docs/sriov.md §3, `e2e/sriov-real.js` with HOST_SH).
 - Network settings edits redefine the XML (keeping uuid/bridge/mac/hosts) and restart the network;
   DHCP reservations use `net.update` (live, no restart).
 - **Lab groups**: the `GroupSpec` (schemas/group.py) is the source of truth; `normalize()` assigns router
@@ -167,6 +177,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   via guest-exec (survives app restarts; done runs only read back); the pull secret goes to `/run` (tmpfs) for the run
   only. Spec PUTs without `egress`/`registry` keep the stored ones (`model_fields_set`). Own images: skopeo copy on the
   router, archive uploads spooled to disk and pushed from the host by `registry_client` (registry v2 API, no tools).
+- **Router cases** (docs/router-cases.md; `services/router_cases.py` = render helpers called by router_service, kept
+  separate): `router.dns.zones` (split DNS: `server=/zone/ip`, a server may be a member name resolved at render;
+  + `stop_rebind`/`no_negcache`/`cache_size`); egress `mode: proxy` = the blocked forward rules + squid on the router
+  (`router.egress.proxy`: port, `allow_domains` dstdomain, `connect_ports`, basic auth hashed on the router with
+  `openssl passwd -apr1`, `dns_nameservers 127.0.0.1`; dnf-installed on first use, stopped otherwise); cloud-image
+  members created in proxy mode get the proxy env via cloud-init (`member_env`; `bootcmd` writes apt/dnf proxy before
+  packages) — raw `user_data` members don't. `network.mtu` = libvirt `<mtu>` (saved def, next group start) + router
+  LAN + DHCP option 26 (running Debian members need `networkctl reconfigure`); `router.path` = MTU of both router
+  NICs (live `ip link` + NM profile by MAC; uplink reset via a marker file), `drop_frag_needed` (nft output chain),
+  `clamp_mss` (`maxseg size set rt mtu`). Spec PUTs without `network`/`path`/`proxy`/dns zones keep the stored ones.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -205,6 +225,15 @@ e2e/                  Playwright browser tests against the real app (see below)
   (`override_path`, CA), containerd `config_path` + sandbox image, no `images pull` in prereqs, packages pinned to the
   mirrored patch. Day 2: `POST /clusters/{id}/mirror` (new registry -> hosts.toml pushed via guest-exec). Delete from a
   shared group restores `spec.mirror.egress_before`. Quay 401 on a missing repo = "not mirrored" (ImagePullBackOff).
+- **Templates** (docs/templates.md): `backend/app/templates/*.yaml` (built-in, read-only) + `DATA_DIR/templates/*.yaml`
+  (user, "Save as template" on a group). Loaded on every request; a bad file is reported in `GET /templates` `errors`,
+  never fatal (`scripts/check-templates.py` validates offline: parse, placeholders, render with sample params through
+  GroupSpec / ClusterCreate). Plain `{{param}}` substitution (exact placeholder keeps the type), built-ins `{{group}}`
+  `{{domain}}` `{{ip:N}}` `{{<cidr param>:N}}`, `_if:` drops a mapping; `cidr: auto` = first free /24 of
+  `TEMPLATE_SUBNET_POOL`. Render = preview + host checks (`group_service.normalize` dry run) + estimate vs free RAM +
+  OpenTofu HCL; create = `group_service.create_group` with `spec.template` (id, case, params, rendered guide: kept
+  by `_keep_owned`, shown on the group's "Case guide" tab) + a `template_cluster` task that waits for the group and
+  creates the cluster (kubeadm / openshift; `image:` slug -> cloud_image_id).
 - **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
   (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
   nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry
@@ -270,8 +299,12 @@ KUBECTL=… node clusters.js                                      # k3s: create,
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
+node templates.js                                               # templates: gallery, wizard (YAML edit, OpenTofu, guide), Basic lab boots, Case guide tab, save-as-template round trip
+scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
+node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
+HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

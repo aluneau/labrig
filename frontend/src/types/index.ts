@@ -74,6 +74,7 @@ export interface VMNic {
   link_state: LinkState;
   device?: string | null; // host tap while running
   vf: boolean; // SR-IOV VF passed through from the host (VF pool network)
+  vlan?: number | null; // VF pool NICs: VLAN tag set on this NIC (overrides the pool's)
   // running VM only: 'attach' = appears at next start, 'detach' = goes away when released, 'change' = saved differs
   pending?: 'attach' | 'detach' | 'change' | null;
 }
@@ -83,6 +84,7 @@ export interface VMNicCreate {
   model?: NicModel;
   mac?: string;
   link_state?: LinkState;
+  vlan?: number; // SR-IOV VF pool networks only: VLAN tag the PF applies to this VF
 }
 
 export interface VMNicUpdate {
@@ -229,6 +231,7 @@ export interface Network {
   bridge_name?: string | null;
   forward_mode: string;
   forward_dev?: string | null;
+  vlan?: number | null; // SR-IOV VF pools: VLAN tag set on every VF of the pool
   domain?: string | null;
   ip_address?: string | null;
   prefix?: number | null;
@@ -295,6 +298,7 @@ export interface NetworkCreate {
   name: string;
   forward_mode: string; // nat | route | isolated | hostdev (SR-IOV VF pool: forward_dev = PF)
   forward_dev?: string;
+  vlan?: number; // SR-IOV VF pools only: VLAN tag set on every VF of the pool
   ip_address?: string;
   prefix?: number;
   dhcp_enabled: boolean;
@@ -364,7 +368,7 @@ export interface ClusterRegistry {
   url: string;
   uplink_url?: string | null;
   enabled: boolean;
-  egress: 'open' | 'blocked';
+  egress: 'open' | 'blocked' | 'proxy';
   // kubeadm disconnected
   images?: MirroredImage[];
   failed?: string[];
@@ -738,23 +742,67 @@ export interface RouterSpec {
   memory?: number;
   vcpu?: number;
   disk_size?: number;
-  dns?: { forwarders?: string[]; records?: DNSRecord[] };
+  dns?: DNSSpec;
   bgp?: BGPSpec | null;
   wireguard?: WireGuardSpec | null;
   vlans?: unknown[];
   egress?: EgressSpec;
   registry?: RegistrySpec;
+  path?: PathSpec;
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
   uplink_ip?: string | null; // fixed (reserved) address on the uplink network
 }
 
-/** Egress switch of the group router (disconnected labs, docs/disconnected.md) */
+/** Router DNS: forwarders, records, split DNS zones + resolver knobs (docs/router-cases.md) */
+export interface DNSSpec {
+  forwarders?: string[];
+  records?: DNSRecord[];
+  zones?: DNSZone[];
+  stop_rebind?: boolean;
+  no_negcache?: boolean;
+  cache_size?: number | null;
+}
+
+/** Conditional forwarding: names in domain go to servers (IPv4, ip#port or a member name) */
+export interface DNSZone {
+  domain: string;
+  servers: string[];
+  allow_private?: boolean;
+}
+
+/** Squid on the router (egress mode proxy) */
+export interface ProxySpec {
+  port?: number;
+  allow_domains?: string[];
+  connect_ports?: number[];
+  username?: string | null;
+  password?: string | null;
+  member_env?: boolean;
+}
+
+/** The router as a narrow hop (MTU / PMTUD cases) */
+export interface PathSpec {
+  mtu?: number | null;
+  drop_frag_needed?: boolean;
+  clamp_mss?: boolean;
+}
+
+/** Egress switch of the group router (disconnected labs, docs/disconnected.md; proxy: docs/router-cases.md) */
 export interface EgressSpec {
-  mode: 'open' | 'blocked';
-  allow?: string[]; // CIDRs / addresses still reachable when blocked
   exempt?: { source: string; owner?: string | null }[]; // group sources still allowed out when blocked
+  mode: 'open' | 'blocked' | 'proxy';
+  allow?: string[]; // CIDRs / addresses still reachable when blocked / proxy
+  proxy?: ProxySpec;
+}
+
+export interface ProxyInfo {
+  url: string;
+  url_with_auth: string;
+  fqdn_url: string;
+  no_proxy: string;
+  env: Record<string, string>;
 }
 
 /** Mirror registry (mirror-registry / Quay) on the group router */
@@ -987,6 +1035,14 @@ export interface GroupTopology {
     dns_forwarders: string[];
     load_balancers: { name: string; port: number; backends: string[]; owner?: string | null }[];
     config_applied: boolean;
+    // router cases (docs/router-cases.md)
+    proxy_port?: number | null;
+    dns_zones?: string[];
+    network_mtu?: number;
+    lan_mtu?: number;
+    path_mtu?: number | null;
+    drop_frag_needed?: boolean;
+    clamp_mss?: boolean;
   };
   wireguard: {
     enabled: boolean;
@@ -1078,6 +1134,8 @@ export interface GroupSpec {
   load_balancers?: LoadBalancerSpec[];
   owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
   dhcp_hosts?: GroupDHCPHost[];
+  network?: { mtu?: number | null };
+  template?: TemplateRef | null; // set when created from a customer-case template
 }
 
 export interface GroupHostInfo {
@@ -1151,6 +1209,7 @@ export interface GroupLease {
 export interface GroupDetail extends Group {
   router_uplink_ips: string[];
   leases: GroupLease[];
+  proxy?: ProxyInfo | null; // egress mode proxy
 }
 
 export interface RouterConfig {
@@ -1164,11 +1223,27 @@ export interface RouterConfig {
   config_error?: string | null;
 }
 
+export interface SriovCheck {
+  id: string;
+  label: string;
+  status: 'ok' | 'warning' | 'error' | 'info';
+  detail: string;
+  fix?: string | null; // exact command when there is one
+}
+
 export interface SriovVF {
   index: number;
   pci?: string | null;
-  driver?: string | null; // igbvf, iavf, vfio-pci (passed through), ...
+  driver?: string | null; // igbvf, iavf, mlx5_core, vfio-pci (passed through), ...
   netdev?: string | null;
+  in_use: boolean; // bound to vfio-pci: passed through to a VM
+  iommu_group?: number | null;
+  group_others: string[]; // other devices in its IOMMU group (non-empty = can't be passed through)
+  mac?: string | null;
+  vlan?: number | null;
+  spoofchk?: boolean | null;
+  trust?: boolean | null;
+  link_state?: string | null;
 }
 
 export interface SriovPF {
@@ -1178,13 +1253,126 @@ export interface SriovPF {
   vendor_id?: string | null;
   device_id?: string | null;
   vf_device_id?: string | null;
-  total_vfs: number;
+  total_vfs: number; // firmware limit (0 = SR-IOV off in the NIC firmware)
   num_vfs: number;
   operstate?: string | null;
+  carrier: boolean;
+  persistent: boolean; // VF count + options restored at boot (vm-manager-sriov.service)
+  persisted_num_vfs?: number | null;
+  trust?: boolean | null; // VF options applied to every VF (null = never set from the app)
+  spoofchk?: boolean | null;
   vfs: SriovVF[];
+  checks: SriovCheck[];
 }
 
 export interface SriovStatus {
   iommu: { enabled: boolean; groups: number; message?: string | null };
+  checks: SriovCheck[];
   pfs: SriovPF[];
+  helper_version?: number | null;
+}
+
+export interface SriovPFUpdate {
+  num_vfs?: number;
+  trust?: boolean;
+  spoofchk?: boolean;
+  persistent?: boolean;
+}
+
+// Customer-case templates (docs/templates.md)
+
+export interface TemplateRef {
+  id: string;
+  title?: string | null;
+  case?: string | null;
+  params: Record<string, unknown>;
+  guide?: string | null;
+  created_at?: string | null;
+}
+
+export type TemplateParamType = 'string' | 'int' | 'bool' | 'choice' | 'cloud_image' | 'cidr';
+
+export interface TemplateParam {
+  name: string;
+  label?: string | null;
+  type: TemplateParamType;
+  required: boolean;
+  default?: unknown;
+  help?: string | null;
+  pattern?: string | null;
+  choices: unknown[];
+  min?: number | null;
+  max?: number | null;
+}
+
+export interface TemplateResources {
+  vcpus: number;
+  memory_mb: number;
+  disk_gb: number;
+}
+
+export interface TemplateInfo {
+  id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  requires: string[];
+  resources: TemplateResources;
+  params: TemplateParam[];
+  heavy: boolean;
+  has_cluster: boolean;
+  cluster_type?: string | null;
+  custom: boolean;
+  author?: string | null;
+}
+
+export interface TemplateDetail extends TemplateInfo {
+  name: string;
+  group: Record<string, unknown>;
+  cluster?: Record<string, unknown> | null;
+  guide: string;
+  yaml: string;
+}
+
+export interface TemplateList {
+  templates: TemplateInfo[];
+  errors: { file: string; error: string }[];
+}
+
+export interface TemplateEstimate {
+  vcpus: number;
+  memory_mb: number;
+  disk_gb: number;
+  host_memory_free_mb?: number | null;
+  fits: boolean;
+  detail: string[];
+}
+
+export interface TemplateRender {
+  ok: boolean;
+  params: Record<string, unknown>;
+  group?: GroupSpec | null;
+  cluster?: Record<string, unknown> | null;
+  yaml: string;
+  guide: string;
+  hcl: string;
+  errors: string[];
+  warnings: string[];
+  estimate: TemplateEstimate | Record<string, never>;
+}
+
+export interface TemplateCreated {
+  group_id: number;
+  group_name: string;
+  task_id: number;
+  cluster_task_id?: number | null;
+}
+
+export interface TemplateSave {
+  group_id: number;
+  id: string;
+  title: string;
+  summary?: string;
+  tags?: string[];
+  guide?: string | null;
 }

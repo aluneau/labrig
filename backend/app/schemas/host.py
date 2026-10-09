@@ -87,11 +87,29 @@ class LibvirtAction(BaseModel):
     warning: Optional[str] = None
 
 
+class SriovCheck(BaseModel):
+    """One readiness check, in plain words, with the fix (exact command when there is one)"""
+    id: str
+    label: str
+    status: str  # ok | warning | error | info
+    detail: str
+    fix: Optional[str] = None
+
+
 class SriovVF(BaseModel):
     index: int
     pci: Optional[str] = None
     driver: Optional[str] = None  # igbvf, iavf, mlx5_core, vfio-pci (passed through), None
     netdev: Optional[str] = None
+    in_use: bool = False  # bound to vfio-pci: passed through to a VM
+    iommu_group: Optional[int] = None
+    group_others: List[str] = []  # other endpoint devices in its IOMMU group (non-empty = can't be passed through)
+    # As the PF driver reports them (ip -d link): libvirt sets mac / vlan when it hands the VF to a VM
+    mac: Optional[str] = None
+    vlan: Optional[int] = None
+    spoofchk: Optional[bool] = None
+    trust: Optional[bool] = None
+    link_state: Optional[str] = None
 
 
 class SriovPF(BaseModel):
@@ -101,10 +119,16 @@ class SriovPF(BaseModel):
     vendor_id: Optional[str] = None  # e.g. 8086
     device_id: Optional[str] = None  # e.g. 10c9 (82576)
     vf_device_id: Optional[str] = None  # e.g. 10ca
-    total_vfs: int
+    total_vfs: int  # firmware limit (0 = SR-IOV off in the NIC firmware)
     num_vfs: int
     operstate: Optional[str] = None
+    carrier: bool = False
+    persistent: bool = False  # VF count restored at boot (vm-manager-sriov.service)
+    persisted_num_vfs: Optional[int] = None
+    trust: Optional[bool] = None  # VF options applied to every VF (None = never set from the app)
+    spoofchk: Optional[bool] = None
     vfs: List[SriovVF] = []
+    checks: List[SriovCheck] = []
 
 
 class IommuStatus(BaseModel):
@@ -115,8 +139,14 @@ class IommuStatus(BaseModel):
 
 class SriovStatus(BaseModel):
     iommu: IommuStatus
+    checks: List[SriovCheck] = []  # host readiness: firmware IOMMU, kernel, iommu=pt, vfio-pci, helper, unit
     pfs: List[SriovPF] = []
+    helper_version: Optional[int] = None
 
 
 class SriovNumVfs(BaseModel):
-    num_vfs: int = Field(..., ge=0, le=4096)
+    """PUT /hosts/sriov/{pf}: every field optional, applied in this order"""
+    num_vfs: Optional[int] = Field(None, ge=0, le=4096)
+    trust: Optional[bool] = None  # VF trust (guest may change MAC / enable promiscuous: bonding, OpenShift)
+    spoofchk: Optional[bool] = None  # MAC anti-spoofing (off for bonding / failover MAC moves)
+    persistent: Optional[bool] = None  # restore the VF count + options at boot

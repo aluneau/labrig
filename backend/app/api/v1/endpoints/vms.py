@@ -69,7 +69,10 @@ def delete_vm(
 @router.post("/{vm_id}/{action}", response_model=VM)
 def vm_power_action(vm_id: int, action: PowerAction, db: Session = Depends(get_db)):
     """Power actions: start, stop (ACPI), force_stop, reboot, suspend, resume"""
-    vm = vm_service.power_action(db, vm_id, action)
+    try:
+        vm = vm_service.power_action(db, vm_id, action)
+    except ValueError as e:  # e.g. an SR-IOV VF pool can't hand out the VM's VFs
+        raise HTTPException(status_code=400, detail=str(e))
     if not vm:
         raise HTTPException(status_code=404, detail="VM not found")
     return vm

@@ -39,6 +39,17 @@ Read `CLAUDE.md` first (layout, run/verify commands, architecture rules, portabi
 - WireGuard from outside the LAN (needs a port forward on the home router), Windows/macOS/phone clients,
   the ufw branch of `setup.sh --wg-ports`, an EL10 router with FRR.
 
+### SR-IOV on real hardware (branch feat/sriov-real, 2026-10-09): what remains to verify on a RHEL lab host
+Built and verified nested only (AlmaLinux 10 L1 with emulated igb + vIOMMU, see docs/sriov.md §3 "Verified nested").
+On a host with a real SR-IOV NIC and IOMMU, run docs/sriov.md §3 "How to verify" and `e2e/sriov-real.js`, and check:
+- Intel **ixgbe / i40e / ice** and **mlx5** PFs: the Host checks (driver notes, firmware VF limit hints: mstconfig,
+  NVM, ice DDP), VF counts > 7, libvirt setting MAC + VLAN on those PFs, `trust` / `spoofchk` accepted by each driver.
+- `vm-manager-sriov.service` at boot with slow PF drivers (ice DDP load, mlx5 firmware init; the helper waits 90 s per
+  PF) and with libvirt enabled at boot (the unit is ordered before libvirtd / virtqemud: autostarted VMs with VFs).
+- A slot without ACS (VF sharing an IOMMU group) and an ENOMEM when setting VFs (BIOS "SR-IOV Global Enable" off /
+  MMIO short): the plain-words messages were only exercised on a fake sysfs tree.
+- VLAN tagging reaching a real switch port (trunk on the switch side), bonding in a guest over 2 VFs with trust on.
+
 ## This host (CachyOS gaming rig)
 
 - `vm-manager` service (User=aluneau, 127.0.0.1:8000) and libvirtd are **not enabled at boot**. After a reboot:
