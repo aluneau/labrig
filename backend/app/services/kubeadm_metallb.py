@@ -214,7 +214,7 @@ def set_options(db: Session, cluster: Cluster, body: MetalLBOptions) -> Task:
                 network.remove_address_pool(f"{cluster.name}-metallb")
                 network.remove_bgp_range(f"{cluster.name}-metallb")
                 network.commit()
-        _save(db, cluster, **new, state="pending", message=None)
+        _save(db, cluster, **{**new, "state": "pending", "message": None})
         func, label = apply, "Configure MetalLB on"
 
     def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
