@@ -26,8 +26,9 @@ import { groupApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 
 const muted: React.CSSProperties = { fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' };
-const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
-const IP_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+// IPv4, or IPv6 (groups with IPv6, docs/ipv6.md: the backend checks the details)
+const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}\/\d{1,2}|[0-9a-fA-F:]*:[0-9a-fA-F:]*\/\d{1,3})$/;
+const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-fA-F:]*:[0-9a-fA-F:]*)$/;
 
 const stateLabel = (state: string) => (
   <Label isCompact color={state === 'Established' ? 'green' : state === 'Active' || state === 'Connect' ? 'orange' : 'grey'}>{state}</Label>
@@ -169,8 +170,8 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
         <Thead><Tr><Th>Peer</Th><Th>Machine</Th><Th>AS</Th><Th>State</Th><Th>Up for</Th><Th>Prefixes received</Th></Tr></Thead>
         <Tbody>
           {status.sessions.map((s) => (
-            <Tr key={s.peer}>
-              <Td>{s.peer}{s.dynamic && <span style={muted}> (listen range)</span>}</Td>
+            <Tr key={`${s.afi}-${s.peer}`}>
+              <Td>{s.peer}{s.afi === 'ipv6' && <Label isCompact style={{ marginLeft: 6 }}>IPv6</Label>}{s.dynamic && <span style={muted}> (listen range)</span>}</Td>
               <Td>{s.name || s.description || '—'}</Td>
               <Td>{s.remote_as ?? '—'}</Td>
               <Td>{stateLabel(s.state)}</Td>
@@ -180,7 +181,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
           ))}
           {!status.sessions.length && (
             <Tr><Td colSpan={6}>{status.router_running
-              ? `No session yet: machines of ${status.listen_range || group.cidr} can connect to ${routerIp} (AS ${status.asn}).`
+              ? `No session yet: machines of ${status.listen_range || group.cidr} can connect to ${routerIp}${status.router_ip6 ? ` (IPv6: ${status.listen_range6} to ${status.router_ip6})` : ''} (AS ${status.asn}).`
               : 'The router is stopped.'}</Td></Tr>
           )}
         </Tbody>

@@ -149,6 +149,8 @@ def proxy_url(spec: GroupSpec, with_auth: bool = True, host: Optional[str] = Non
 def no_proxy(spec: GroupSpec) -> str:
     """Destinations clients must reach directly (the lab, its domain, the router, WireGuard devices)"""
     items = ["localhost", "127.0.0.1", f".{spec.domain}", spec.domain, spec.cidr]
+    if spec.ipv6_prefix():  # dual stack (docs/ipv6.md)
+        items.append(spec.ipv6_prefix())
     if spec.router.ip:
         items.append(spec.router.ip)
     if spec.router.uplink_ip:
@@ -173,7 +175,7 @@ def proxy_env(spec: GroupSpec) -> Dict[str, str]:
 
 def squid_conf(spec: GroupSpec) -> str:
     p = spec.router.egress.proxy
-    lab = [spec.cidr]
+    lab = [spec.cidr] + ([spec.ipv6_prefix()] if spec.ipv6_prefix() else [])  # squid listens on IPv6 too
     wg = spec.router.wireguard
     if wg is not None and wg.enabled and wg.subnet:
         lab.append(wg.subnet)

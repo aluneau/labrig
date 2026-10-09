@@ -94,3 +94,8 @@ downloads its config again, without private key.
 | Handshake OK, names don't resolve | `resolvectl status` (Fedora) / `cat /etc/resolv.conf`: the router's tunnel address must be a DNS server of the connection. `dig @10.44.N.1 web1.<domain>`. |
 | Handshake OK, no ping | The member's own firewall; `ip route get <member ip>` on the laptop must say `dev wg-…`. Another network of the laptop may overlap the group CIDR or the tunnel subnet (pick another group CIDR / `WG_SUBNET_POOL`). |
 | Router side | Router console: `wg show`, `systemctl status wg-quick@wg0`, `cat /etc/wireguard/wg0.conf`. *Router* tab → *Apply again* re-pushes the config. |
+
+## IPv6
+
+In a group with IPv6 (docs/ipv6.md) the tunnel also gets a /64 (`subnet6`): devices get `<subnet6>::<n>` and route the
+lab /64, the tunnel /64 and the IPv6 announce ranges. Download the config again for devices added before IPv6 was on.

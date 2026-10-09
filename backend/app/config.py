@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # BGP announce ranges (addresses lab machines announce to their group router, e.g. a MetalLB BGP
     # pool): the first free /27 of this range, unique on the host so WireGuard clients can route them
     BGP_ANNOUNCE_POOL: str = "10.45.0.0/16"
+    # Dual stack lab groups (docs/ipv6.md): every IPv6 /64 the app assigns (group networks, WireGuard tunnels,
+    # BGP announce ranges) is a free /64 of this ULA range, unique on the host
+    IPV6_ULA_POOL: str = "fd00:564d:4d00::/48"
 
     # Address VNC consoles listen on. 127.0.0.1 keeps them local to the host;
     # set to 0.0.0.0 to reach them from the LAN (they have no password).

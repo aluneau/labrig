@@ -76,6 +76,7 @@ const ago = (epoch?: number | null) => {
 const ROLE_LABEL: Record<string, string> = {
   dhcp: 'DHCP', dns: 'DNS', nat: 'NAT', ntp: 'NTP', lb: 'Load balancer', wireguard: 'WireGuard', bgp: 'BGP',
   registry: 'Registry', egress: 'Internet blocked', proxy: 'Proxy only', 'split-dns': 'Split DNS', mtu: 'MTU',
+  ipv6: 'IPv6',
 };
 
 // ---------------------------------------------------------------- box contents
@@ -399,13 +400,13 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
   if (key === 'router') {
     return {
       title: `Router ${r.name} (${r.state})`,
-      text: `The lab's gateway, a small AlmaLinux VM with two network cards: eth0 on "${r.uplink_network}" (${r.uplink_ip || 'DHCP'}) towards the internet, eth1 on the lab network (${r.lan_ip}). Every lab machine sends traffic for other networks to ${r.lan_ip}. Hover its badges to see what else it does.`,
+      text: `The lab's gateway, a small AlmaLinux VM with two network cards: eth0 on "${r.uplink_network}" (${r.uplink_ip || 'DHCP'}) towards the internet, eth1 on the lab network (${r.lan_ip}${r.lan_ip6 ? `, ${r.lan_ip6}` : ''}). Every lab machine sends traffic for other networks to ${r.lan_ip}. Hover its badges to see what else it does.`,
     };
   }
   if (key === 'bus') {
     return {
       title: `Lab network ${t.cidr}`,
-      text: `One L2 segment ("${t.network_name}"), like a single switch: machines here talk to each other directly — ARP finds the MAC address behind an IP. Anything outside ${t.cidr} goes through the router at ${r.lan_ip}.`,
+      text: `One L2 segment ("${t.network_name}"), like a single switch: machines here talk to each other directly — ARP finds the MAC address behind an IP${t.ipv6_prefix ? ` (IPv6 ${t.ipv6_prefix}: neighbor discovery does the same)` : ''}. Anything outside ${t.cidr} goes through the router at ${r.lan_ip}.`,
     };
   }
   if (key.startsWith('badge:')) {
@@ -422,7 +423,8 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       proxy: `Proxy-only egress: lab machines can't reach the internet directly (refused, like "Internet blocked"); squid on the router at ${r.lan_ip}:${r.proxy_port ?? 3128} is the only way out. Settings and the environment to copy: Registry & egress tab.`,
       'split-dns': `Split DNS: names in ${(r.dns_zones || []).join(', ')} are forwarded to their own DNS servers (conditional forwarding), everything else to ${r.dns_forwarders.join(', ') || 'the uplink\'s DNS'}. Network & DNS tab.`,
       mtu: `MTU: the lab network uses ${r.network_mtu ?? 1500} bytes${r.path_mtu ? `; the router is a narrow hop of ${r.path_mtu} bytes towards the outside${r.drop_frag_needed ? ' and drops the ICMP "fragmentation needed" it should send back (PMTUD black hole)' : ''}${r.clamp_mss ? '; it clamps the TCP MSS of forwarded connections' : ''}` : ''}. Network & DNS tab.`,
-      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
+      ipv6: `Dual stack: the lab network also has ${t.ipv6_prefix}. The router (${r.lan_ip6}) sends router advertisements (default route) and hands out IPv6 addresses by DHCPv6: each machine gets the same host number as its IPv4 address, and an AAAA record. IPv6 stays inside the lab (the uplink is IPv4 only).`,
+      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr}${t.bgp.listen_range6 ? ` and ${t.bgp.listen_range6}` : ''} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
     };
     return { title: ROLE_LABEL[role] || role, text: texts[role] || '' };
   }
@@ -431,7 +433,7 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
     if (!m) return null;
     const what = m.kind === 'node' ? `${m.role === 'ctlplane' ? 'Control plane' : 'Worker'} node of cluster ${m.cluster}`
       : m.kind === 'member' ? 'Lab member' : 'A machine with a reserved address';
-    const parts = [`${what}, ${m.ip} (${m.fqdn}), ${m.state}.`];
+    const parts = [`${what}, ${m.ip}${m.ip6 ? ` and ${m.ip6}` : ''} (${m.fqdn}), ${m.state}.`];
     if (m.bgp_state) {
       parts.push(m.bgp_state === 'Established'
         ? `It has a BGP session with the router${m.bgp_prefixes.length ? ` and tells it "send traffic for ${m.bgp_prefixes.join(', ')} to me"` : ' but announces nothing'}.`

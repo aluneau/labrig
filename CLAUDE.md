@@ -39,7 +39,8 @@ backend/app/
   services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
-                      router_cases (split DNS, proxy, MTU render helpers), bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
+                      router_cases (split DNS, proxy, MTU render helpers), router_ipv6 (dual stack render helpers) + ipv6_service
+                      (IPv6 /64 assignment, members' network-config, DHCPv6 leases), bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
@@ -57,10 +58,11 @@ docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, Me
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
+docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), router-cases (split DNS, proxy, MTU), sriov-pool, k3s, kubeadm (clusters)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -185,6 +187,17 @@ e2e/                  Playwright browser tests against the real app (see below)
   LAN + DHCP option 26 (running Debian members need `networkctl reconfigure`); `router.path` = MTU of both router
   NICs (live `ip link` + NM profile by MAC; uplink reset via a marker file), `drop_frag_needed` (nft output chain),
   `clamp_mss` (`maxseg size set rt mtu`). Spec PUTs without `network`/`path`/`proxy`/dns zones keep the stored ones.
+- **IPv6 / dual stack** (docs/ipv6.md; `router_ipv6` = render hooks, `ipv6_service` = assignment): `network.ipv6`
+  (`enabled`, `prefix` = a /64 of `IPV6_ULA_POOL` assigned like WG subnets, `egress` reject|drop). Addresses are
+  derived, never stored: `spec.ip6_of(ipv4)` = same host number in decimal digits (`.21` -> `<prefix>::21`, router
+  `::1`). Stateful DHCPv6 (not SLAAC: AAAA records need known addresses): `dhcp-host=mac,v4,[v6],name`, `enable-ra`,
+  `ra-param=*,…`, dynamic range `::dc:0-ffff`. dnsmasq ignores router solicitations with only `listen-address`: the
+  push writes `interface=<lan>` (found by MAC) to `/etc/dnsmasq.d/vmm-ipv6-iface.conf` and sets the LAN address with
+  `nmcli` (live on/off). Members get a network-config with dhcp6 + accept-ra. nft `table ip6 vmm_group6`: egress
+  blocked/proxy reject in forward, `egress: drop` = prerouting drop (no IPv6 uplink: without it the kernel answers "no
+  route" at once). FRR: peer group `LAB6` + `address-family ipv6 unicast`, IPv6 announce ranges (`lab6` /64) `le
+  128`, `prefer-global`; members need `disable-connected-check` (DHCPv6 /128). WireGuard `subnet6`. Cross-family
+  `overlaps()` is wrong in `ipaddress`: use `nets_overlap`. No IPv6 internet, clusters stay IPv4.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -290,6 +303,7 @@ CLIENT_SH="ssh client" node wireguard.js                        # remote access:
 node templates.js                                               # templates: gallery, wizard (YAML edit, OpenTofu, guide), Basic lab boots, Case guide tab, save-as-template round trip
 scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
+node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host

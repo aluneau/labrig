@@ -80,3 +80,10 @@ Kubernetes clusters in the group (kubeadm, k3s) can use upstream MetalLB in BGP 
 | Session up, no route | The prefix must be inside an announce range (`show bgp ipv4 unicast neighbors <ip> received-routes` needs soft-reconfig; simpler: is it in the BGP tab's ranges?). On the machine, the address must exist (FRR's `network` needs it in its table) and `no bgp ebgp-requires-policy` must be set. |
 | Route present, laptop can't reach it | Re-download the WireGuard config (AllowedIPs must contain the range); `ip route get <addr>` on the laptop must say `dev wg-…`. |
 | Traffic only to one node | Normal for one connection; several connections spread (ECMP). |
+
+## IPv6
+
+With IPv6 on in the group (docs/ipv6.md), FRR also runs `address-family ipv6 unicast`: IPv6 sessions from the lab /64
+(peer group `LAB6`), an IPv6 announce range (`lab6`, a /64 of `IPV6_ULA_POOL`, accepted `le 128`). Members peering
+over a DHCPv6 address need `neighbor <router>::1 disable-connected-check` (the address is a /128). Example config and
+details: docs/ipv6.md.

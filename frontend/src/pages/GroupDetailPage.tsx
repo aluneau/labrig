@@ -42,6 +42,7 @@ import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { GroupBgp } from '../components/groups/GroupBgp';
 import { GroupRegistry } from '../components/groups/GroupRegistry';
+import { GroupIpv6 } from '../components/groups/GroupIpv6';
 import { GroupDnsSettings } from '../components/groups/GroupDnsSettings';
 import { GroupMtu } from '../components/groups/GroupMtu';
 import { LabTopology } from '../components/topology/LabTopology';
@@ -95,7 +96,7 @@ const ClusterEntries: React.FC<{ group: GroupDetail }> = ({ group }) => {
         <Tbody>
           {group.hosts.map((h) => (
             <Tr key={h.name}>
-              <Td>{h.name}</Td><Td>{h.fqdn}</Td><Td>{h.ip}</Td><Td>{h.mac}</Td><Td>{owner(h.owner)}</Td>
+              <Td>{h.name}</Td><Td>{h.fqdn}</Td><Td>{h.ip}{h.ip6 && <div>{h.ip6}</div>}</Td><Td>{h.mac}</Td><Td>{owner(h.owner)}</Td>
               <Td><StatusLabel status={h.state} /></Td>
               <Td isActionCell>{h.vm_id && <Link to={`/vms/${h.vm_id}/console`}>Console</Link>}</Td>
             </Tr>
@@ -186,13 +187,13 @@ const AddRecordForm: React.FC<{ groupId: number; domain: string; onDone: (msg: s
   groupId, domain, onDone, onError,
 }) => {
   const [name, setName] = useState('');
-  const [type, setType] = useState<'a' | 'cname'>('a');
+  const [type, setType] = useState<'a' | 'aaaa' | 'cname'>('a');
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const submit = async () => {
     setBusy(true);
     try {
-      await groupApi.setRecord(groupId, type === 'a' ? { name, a: value } : { name, cname: value });
+      await groupApi.setRecord(groupId, type === 'a' ? { name, a: value } : type === 'aaaa' ? { name, aaaa: value } : { name, cname: value });
       onDone(`Record ${name} applied on the router`);
       setName('');
       setValue('');
@@ -212,14 +213,15 @@ const AddRecordForm: React.FC<{ groupId: number; domain: string; onDone: (msg: s
         </FlexItem>
         <FlexItem>
           <FormGroup label="Type" fieldId="rec-type">
-            <FormSelect id="rec-type" value={type} onChange={(_e, v) => setType(v as 'a' | 'cname')}>
+            <FormSelect id="rec-type" value={type} onChange={(_e, v) => setType(v as 'a' | 'aaaa' | 'cname')}>
               <FormSelectOption value="a" label="A" />
+              <FormSelectOption value="aaaa" label="AAAA" />
               <FormSelectOption value="cname" label="CNAME" />
             </FormSelect>
           </FormGroup>
         </FlexItem>
         <FlexItem>
-          <FormGroup label={type === 'a' ? 'IPv4 address' : 'Target'} fieldId="rec-value">
+          <FormGroup label={type === 'a' ? 'IPv4 address' : type === 'aaaa' ? 'IPv6 address' : 'Target'} fieldId="rec-value">
             <TextInput id="rec-value" value={value} onChange={(_e, v) => setValue(v)} />
           </FormGroup>
         </FlexItem>
@@ -384,7 +386,7 @@ export const GroupDetailPage: React.FC = () => {
             <Title headingLevel="h1">{group.name} <StatusLabel status={groupStatus(group)} /></Title>
             <div style={{ color: 'var(--pf-v5-global--Color--200)' }}>
               {group.spec.template?.case && <>case {group.spec.template.case} · </>}
-              {group.cidr} · {group.domain} · uplink {group.uplink || 'none'} · {group.member_count} member(s)
+              {group.cidr}{group.router.ip6 ? ` + ${group.spec.network?.ipv6?.prefix}` : ''} · {group.domain} · uplink {group.uplink || 'none'} · {group.member_count} member(s)
             </div>
           </FlexItem>
           <FlexItem align={{ default: 'alignRight' }}>
@@ -421,7 +423,7 @@ export const GroupDetailPage: React.FC = () => {
                 <Tbody>
                   {[group.router, ...group.members].map((m) => (
                     <Tr key={m.name}>
-                      <Td>{m.name}</Td><Td>{m.role}</Td><Td>{m.fqdn}</Td><Td>{m.ip}</Td><Td>{m.mac}</Td><Td>{m.image}</Td>
+                      <Td>{m.name}</Td><Td>{m.role}</Td><Td>{m.fqdn}</Td><Td>{m.ip}{m.ip6 && <div className="member-ip6">{m.ip6}</div>}</Td><Td>{m.mac}</Td><Td>{m.image}</Td>
                       <Td>{m.memory ? formatMiB(m.memory) : '—'}</Td><Td><StatusLabel status={m.state} /></Td>
                       <Td isActionCell>
                         {m.vm_id && <Link to={`/vms/${m.vm_id}/console`}>Console</Link>}
@@ -466,13 +468,14 @@ export const GroupDetailPage: React.FC = () => {
               <Table aria-label="DNS records" variant="compact">
                 <Thead><Tr><Th>Name</Th><Th>Type</Th><Th>Value</Th><Th screenReaderText="Actions" /></Tr></Thead>
                 <Tbody>
-                  <Tr><Td>router.{group.domain}</Td><Td>A</Td><Td>{spec.router?.ip}</Td><Td>automatic</Td></Tr>
+                  <Tr><Td>router.{group.domain}</Td><Td>A{group.router.ip6 && ' + AAAA'}</Td><Td>{spec.router?.ip}{group.router.ip6 && <div>{group.router.ip6}</div>}</Td><Td>automatic</Td></Tr>
                   {group.members.map((m) => (
-                    <Tr key={m.name}><Td>{m.fqdn}</Td><Td>A</Td><Td>{m.ip}</Td><Td>automatic</Td></Tr>
+                    <Tr key={m.name}><Td>{m.fqdn}</Td><Td>A{m.ip6 && ' + AAAA'}</Td><Td>{m.ip}{m.ip6 && <div>{m.ip6}</div>}</Td><Td>automatic</Td></Tr>
                   ))}
                   {(spec.router?.dns?.records || []).map((r) => (
                     <Tr key={r.name}>
-                      <Td>{r.name.endsWith('.') ? r.name : `${r.name}.${group.domain}`}</Td><Td>{r.a ? 'A' : 'CNAME'}</Td><Td>{r.a || r.cname}</Td>
+                      <Td>{r.name.endsWith('.') ? r.name : `${r.name}.${group.domain}`}</Td><Td>{r.cname ? 'CNAME' : [r.a && 'A', r.aaaa && 'AAAA'].filter(Boolean).join(' + ')}</Td>
+                      <Td>{r.cname || <>{r.a}{r.a && r.aaaa && <br />}{r.aaaa}</>}</Td>
                       <Td isActionCell>
                         {r.owner ? <>managed by {r.owner.replace('cluster:', 'cluster ')}</> : (
                           <Button variant="link" isDanger isInline onClick={async () => {
@@ -485,6 +488,8 @@ export const GroupDetailPage: React.FC = () => {
                 </Tbody>
               </Table>
               <div style={{ marginTop: 16 }}><AddRecordForm groupId={group.id} domain={group.domain} onDone={onDone} onError={onError} /></div>
+
+              <GroupIpv6 group={group} onDone={onDone} onError={onError} />
 
               <GroupDhcp group={group} onDone={onDone} onError={onError} />
               <GroupDnsSettings group={group} onDone={onDone} onError={onError} />

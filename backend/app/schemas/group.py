@@ -45,11 +45,56 @@ def _ipv4(value: Optional[str], label: str) -> Optional[str]:
         raise ValueError(f"{label} '{value}' is not an IPv4 address")
 
 
+def _ipv6(value: Optional[str], label: str) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return str(ipaddress.IPv6Address(value.strip()))
+    except ValueError:
+        raise ValueError(f"{label} '{value}' is not an IPv6 address")
+
+
+def _ip_any(value: Optional[str], label: str) -> Optional[str]:
+    """An IPv4 or IPv6 address (normalized)"""
+    if value is None:
+        return None
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        raise ValueError(f"{label} '{value}' is not an IP address")
+
+
+def _net_any(value: str, label: str) -> str:
+    """An IPv4 or IPv6 network (host bits cleared)"""
+    try:
+        return str(ipaddress.ip_network(value.strip(), strict=False))
+    except ValueError:
+        raise ValueError(f"{label} '{value}' is not an IP network")
+
+
+def nets_overlap(a: Any, b: Any) -> bool:
+    """overlaps() across families is meaningless (ipaddress compares the integers): False"""
+    return a.version == b.version and a.overlaps(b)
+
+
+def ip6_for(ipv4: Optional[str], net4: Optional[str], net6: Optional[str]) -> Optional[str]:
+    """The IPv6 address paired with a group IPv4 address (dual stack): same host number, written in
+    decimal digits so it reads alike: 10.42.7.21 in 10.42.7.0/24 -> <prefix>::21, .1 -> ::1"""
+    if not ipv4 or not net4 or not net6:
+        return None
+    n4 = ipaddress.IPv4Network(net4)
+    offset = int(ipaddress.IPv4Address(ipv4)) - int(n4.network_address)
+    if offset <= 0:
+        return None
+    return str(ipaddress.IPv6Network(net6).network_address + int(str(offset), 16))
+
+
 class DNSRecord(BaseModel):
     """A record served by the router. name is relative to the group domain
     ("api.ocp", "*.apps.ocp") unless it ends with a dot (absolute)."""
     name: str = Field(..., min_length=1, max_length=253)
     a: Optional[str] = None
+    aaaa: Optional[str] = None  # IPv6 (with or without `a`); served even when the group has no IPv6
     cname: Optional[str] = None
     # Set by the app for records it manages (e.g. "cluster:k1"); users can't change those
     owner: Optional[str] = None
@@ -66,12 +111,17 @@ class DNSRecord(BaseModel):
     def _a(cls, v: Optional[str]) -> Optional[str]:
         return _ipv4(v, "A record")
 
+    @field_validator("aaaa")
+    @classmethod
+    def _aaaa(cls, v: Optional[str]) -> Optional[str]:
+        return _ipv6(v, "AAAA record")
+
     @model_validator(mode="after")
     def _one_value(self):
-        if (self.a is None) == (self.cname is None):
-            raise ValueError(f"DNS record '{self.name}': set exactly one of 'a' or 'cname'")
+        if (self.a is None and self.aaaa is None) == (self.cname is None):
+            raise ValueError(f"DNS record '{self.name}': set 'a' and / or 'aaaa', or 'cname'")
         if self.cname and self.name.startswith("*."):
-            raise ValueError(f"DNS record '{self.name}': wildcards can only be A records")
+            raise ValueError(f"DNS record '{self.name}': wildcards can only be A / AAAA records")
         return self
 
 
@@ -146,7 +196,7 @@ class BGPNeighbor(BaseModel):
     @field_validator("ip")
     @classmethod
     def _ip(cls, v: str) -> str:
-        return _ipv4(v, "BGP neighbor")
+        return _ip_any(v, "BGP neighbor")
 
 
 class BGPAnnounceRange(BaseModel):
@@ -159,7 +209,7 @@ class BGPAnnounceRange(BaseModel):
     @field_validator("prefix")
     @classmethod
     def _prefix(cls, v: str) -> str:
-        return _ipv4_net(v, "Announce range")
+        return _net_any(v, "Announce range")
 
 
 class BGPSpec(BaseModel):
@@ -175,23 +225,31 @@ class BGPSpec(BaseModel):
     announce_ranges: List[BGPAnnounceRange] = []
     maximum_paths: int = Field(8, ge=1, le=64)
 
-    def check(self, cidr: str, wg_subnet: Optional[str]) -> None:
-        net = ipaddress.IPv4Network(cidr)
+    def check(self, cidr: str, wg_subnet: Optional[str], net6: Optional[str] = None,
+              wg_subnet6: Optional[str] = None) -> None:
+        nets = [ipaddress.ip_network(n) for n in (cidr, net6) if n]
         ips = [n.ip for n in self.neighbors]
         dupes = {ip for ip in ips if ips.count(ip) > 1}
         if dupes:
             raise ValueError(f"Duplicate BGP neighbors: {', '.join(sorted(dupes))}")
         for n in self.neighbors:
-            if ipaddress.IPv4Address(n.ip) not in net:
-                raise ValueError(f"BGP neighbor {n.ip} is not on the group network {cidr}")
-        prefixes = [ipaddress.IPv4Network(r.prefix) for r in self.announce_ranges]
+            addr = ipaddress.ip_address(n.ip)
+            if addr.version == 6 and net6 is None:
+                continue  # kept (not rendered) while the group's IPv6 is off
+            if not any(addr.version == net.version and addr in net for net in nets):
+                raise ValueError(f"BGP neighbor {n.ip} is not on the group network "
+                                 f"{' / '.join(str(net) for net in nets)}")
+        prefixes = [ipaddress.ip_network(r.prefix) for r in self.announce_ranges]
+        tunnels = [ipaddress.ip_network(n) for n in (wg_subnet, wg_subnet6) if n]
         for i, p in enumerate(prefixes):
-            if p.overlaps(net):
-                raise ValueError(f"Announce range {p} overlaps the group network {cidr}: "
+            lan = next((net for net in nets if nets_overlap(p, net)), None)
+            if lan is not None:
+                raise ValueError(f"Announce range {p} overlaps the group network {lan}: "
                                  "BGP routes must be for addresses outside it")
-            if wg_subnet and p.overlaps(ipaddress.IPv4Network(wg_subnet)):
-                raise ValueError(f"Announce range {p} overlaps the WireGuard tunnel subnet {wg_subnet}")
-            clash = next((q for q in prefixes[:i] if q.overlaps(p)), None)
+            tunnel = next((t for t in tunnels if nets_overlap(p, t)), None)
+            if tunnel is not None:
+                raise ValueError(f"Announce range {p} overlaps the WireGuard tunnel subnet {tunnel}")
+            clash = next((q for q in prefixes[:i] if nets_overlap(q, p)), None)
             if clash is not None:
                 raise ValueError(f"Announce ranges {clash} and {p} overlap")
 
@@ -213,6 +271,16 @@ def _ipv4_net(value: str, label: str) -> str:
         return str(ipaddress.IPv4Network(value.strip(), strict=False))
     except ValueError:
         raise ValueError(f"{label} '{value}' is not an IPv4 network")
+
+
+def _ipv6_64(value: str, label: str) -> str:
+    try:
+        net = ipaddress.IPv6Network(value.strip(), strict=False)
+    except ValueError:
+        raise ValueError(f"{label} '{value}' is not an IPv6 network")
+    if net.prefixlen != 64:
+        raise ValueError(f"{label} {net} must be a /64 (DHCPv6 + router advertisements)")
+    return str(net)
 
 
 class WireGuardPeer(BaseModel):
@@ -253,6 +321,7 @@ class WireGuardSpec(BaseModel):
     # Assigned by the app
     host_port: Optional[int] = Field(None, ge=1024, le=65535)  # UDP port on the host (relay)
     subnet: Optional[str] = None      # tunnel subnet, the router takes its first address
+    subnet6: Optional[str] = None     # IPv6 tunnel /64 (groups with IPv6), same host numbers as `subnet`
     public_key: Optional[str] = None  # the router's (its private key never leaves the router)
     peers: List[WireGuardPeer] = []
 
@@ -265,6 +334,11 @@ class WireGuardSpec(BaseModel):
         if not 16 <= net.prefixlen <= 29:
             raise ValueError("The tunnel subnet prefix must be between /16 and /29")
         return str(net)
+
+    @field_validator("subnet6")
+    @classmethod
+    def _subnet6(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _ipv6_64(v, "IPv6 tunnel subnet")
 
     @field_validator("public_key")
     @classmethod
@@ -281,6 +355,13 @@ class WireGuardSpec(BaseModel):
     def router_ip(self) -> Optional[str]:
         """The router's tunnel address (first address of the subnet)"""
         return str(next(ipaddress.IPv4Network(self.subnet).hosts())) if self.subnet else None
+
+    def ip6_of(self, ipv4: Optional[str]) -> Optional[str]:
+        """IPv6 tunnel address paired with a tunnel IPv4 address (None without subnet6)"""
+        return ip6_for(ipv4, self.subnet, self.subnet6)
+
+    def router_ip6(self) -> Optional[str]:
+        return self.ip6_of(self.router_ip())
 
     def check(self, cidr: str) -> None:
         names = [p.name for p in self.peers if p.name]
@@ -307,6 +388,26 @@ class WireGuardSpec(BaseModel):
             addr = ipaddress.IPv4Address(p.ip)
             if addr not in net or addr in (net.network_address, net.broadcast_address) or p.ip == self.router_ip():
                 raise ValueError(f"WireGuard peer {p.name or p.public_key}: {p.ip} is not a free address of {net}")
+
+
+class IPv6Spec(BaseModel):
+    """Dual stack (docs/ipv6.md): the group network also gets an IPv6 /64 (a ULA of IPV6_ULA_POOL unless set).
+    The router takes <prefix>::1 and sends router advertisements (default route, M flag) + stateful DHCPv6:
+    every machine with an IPv4 reservation gets the IPv6 address with the same host number
+    (10.42.7.21 -> <prefix>::21) and an AAAA record. The uplink stays IPv4 only: no IPv6 internet.
+    egress: what happens to IPv6 packets from the lab towards anything outside the lab's IPv6 networks:
+    reject (fails at once: no route / prohibited) or drop (silently dropped: connections hang until they
+    time out, the classic "AAAA preferred, IPv6 broken" symptom)."""
+    enabled: bool = True
+    prefix: Optional[str] = None  # assigned by the app when unset
+    egress: Literal["reject", "drop"] = "reject"
+
+    @field_validator("prefix")
+    @classmethod
+    def _prefix(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        return _ipv6_64(v, "IPv6 prefix")
 
 
 class VLANSpec(BaseModel):
@@ -376,7 +477,7 @@ class EgressSpec(BaseModel):
     def _allow(cls, v: List[str]) -> List[str]:
         out: List[str] = []
         for n in v:
-            n = _ipv4_net(n, "Egress allow")
+            n = _net_any(n, "Egress allow")
             if n not in out:
                 out.append(n)
         return out
@@ -420,6 +521,7 @@ class NetworkSpec(BaseModel):
     for the members (default 1500). Changes reach the members at their next DHCP renewal / boot; the
     bridge's own MTU (libvirt) follows at the next group start."""
     mtu: Optional[int] = Field(None, ge=576, le=9000)
+    ipv6: Optional[IPv6Spec] = None  # dual stack (docs/ipv6.md)
 
 
 class RouterSpec(BaseModel):
@@ -624,8 +726,17 @@ class GroupSpec(BaseModel):
     owner: Optional[str] = None  # "cluster:<name>" for a group created for (and deleted with) a cluster
     dhcp_hosts: List[DHCPHostSpec] = []  # static reservations for non-member machines
     address_pools: List[AddressPoolSpec] = []  # ranges kept free (MetalLB pools...)
-    network: NetworkSpec = NetworkSpec()
+    network: NetworkSpec = NetworkSpec()  # MTU, IPv6 (dual stack)
     template: Optional[TemplateRef] = None  # set by the app when created from a template
+
+    def ipv6_prefix(self) -> Optional[str]:
+        """The group's IPv6 /64 when dual stack is on (enabled and assigned)"""
+        v6 = self.network.ipv6
+        return v6.prefix if v6 is not None and v6.enabled and v6.prefix else None
+
+    def ip6_of(self, ipv4: Optional[str]) -> Optional[str]:
+        """IPv6 address paired with a group IPv4 address (None when the group has no IPv6)"""
+        return ip6_for(ipv4, self.cidr, self.ipv6_prefix())
 
     @field_validator("cidr")
     @classmethod
@@ -714,7 +825,8 @@ class GroupSpec(BaseModel):
             self.router.wireguard.check(self.cidr)
         if self.router.bgp is not None:
             wg = self.router.wireguard
-            self.router.bgp.check(self.cidr, wg.subnet if wg else None)
+            self.router.bgp.check(self.cidr, wg.subnet if wg else None, self.ipv6_prefix(),
+                                  wg.subnet6 if wg else None)
         return self
 
     def _check_router_cases(self, names: List[str], lb_ports: List[int]) -> None:
@@ -782,6 +894,7 @@ class GroupMemberInfo(BaseModel):
     hostname: Optional[str] = None
     fqdn: Optional[str] = None
     ip: Optional[str] = None
+    ip6: Optional[str] = None  # dual stack groups
     mac: Optional[str] = None
     vm_id: Optional[int] = None
     vm_name: Optional[str] = None
@@ -794,7 +907,10 @@ class GroupMemberInfo(BaseModel):
 
 class GroupLease(BaseModel):
     ip: str
-    mac: str
+    mac: str                        # "" for a DHCPv6 lease whose MAC is unknown (see duid)
+    family: str = "ipv4"            # ipv4 | ipv6 (DHCPv6)
+    duid: Optional[str] = None      # DHCPv6 client DUID
+    iaid: Optional[int] = None      # DHCPv6 IA id
     hostname: Optional[str] = None
     expiry: Optional[int] = None  # epoch seconds, 0 = infinite
     kind: str = "dynamic"           # member | reservation | dynamic
@@ -813,6 +929,7 @@ class GroupHostInfo(BaseModel):
     """A reserved host (not a member), e.g. a cluster node"""
     name: str
     ip: str
+    ip6: Optional[str] = None
     mac: str
     owner: Optional[str] = None
     fqdn: Optional[str] = None
@@ -924,6 +1041,7 @@ class WireGuardPeerInfo(BaseModel):
     name: str
     public_key: str
     ip: Optional[str] = None
+    ip6: Optional[str] = None  # groups with IPv6
     allowed_ips: List[str] = []
     # Live, from `wg show wg0 dump` on the router
     endpoint: Optional[str] = None       # where the router last saw it (the host's relay)
@@ -938,7 +1056,9 @@ class WireGuardStatus(BaseModel):
     listen_port: Optional[int] = None
     host_port: Optional[int] = None
     subnet: Optional[str] = None
+    subnet6: Optional[str] = None
     router_tunnel_ip: Optional[str] = None
+    router_tunnel_ip6: Optional[str] = None
     public_key: Optional[str] = None
     endpoint_host: str = ""     # default host in client configs (WG_ENDPOINT_HOST or the host's LAN address)
     endpoint: Optional[str] = None
@@ -977,6 +1097,7 @@ class BGPSettings(BaseModel):
 
 class BGPSession(BaseModel):
     peer: str
+    afi: str = "ipv4"                   # ipv4 | ipv6 (address family of the session)
     name: Optional[str] = None          # member / node owning that address
     remote_as: Optional[int] = None
     state: str                          # Established, Active, Connect, Idle...
@@ -1007,8 +1128,10 @@ class BGPStatus(BaseModel):
     enabled: bool = False
     asn: Optional[int] = None
     router_ip: Optional[str] = None
+    router_ip6: Optional[str] = None
     listen: bool = False
     listen_range: Optional[str] = None
+    listen_range6: Optional[str] = None
     peer_asn: Optional[int] = None
     maximum_paths: Optional[int] = None
     neighbors: List[BGPNeighbor] = []
@@ -1031,6 +1154,7 @@ class TopologyMachine(BaseModel):
     role: Optional[str] = None      # member role, or ctlplane / worker
     cluster: Optional[str] = None
     ip: Optional[str] = None
+    ip6: Optional[str] = None
     mac: Optional[str] = None
     fqdn: Optional[str] = None
     state: str = "missing"
@@ -1078,6 +1202,7 @@ class TopologyRouter(BaseModel):
     vm_id: Optional[int] = None
     state: str = "missing"
     lan_ip: Optional[str] = None
+    lan_ip6: Optional[str] = None
     uplink_ip: Optional[str] = None
     uplink_network: Optional[str] = None
     tunnel_ip: Optional[str] = None
@@ -1100,6 +1225,7 @@ class TopologyRouter(BaseModel):
 class TopologyWireGuardPeer(BaseModel):
     name: str
     ip: Optional[str] = None
+    ip6: Optional[str] = None
     latest_handshake: Optional[int] = None
     endpoint: Optional[str] = None
 
@@ -1107,7 +1233,9 @@ class TopologyWireGuardPeer(BaseModel):
 class TopologyWireGuard(BaseModel):
     enabled: bool = False
     subnet: Optional[str] = None
+    subnet6: Optional[str] = None
     router_ip: Optional[str] = None
+    router_ip6: Optional[str] = None
     host_port: Optional[int] = None
     listen_port: Optional[int] = None
     endpoint: Optional[str] = None
@@ -1120,6 +1248,7 @@ class GroupTopology(BaseModel):
     id: int
     name: str
     cidr: str
+    ipv6_prefix: Optional[str] = None
     domain: str
     network_name: str
     state: str
