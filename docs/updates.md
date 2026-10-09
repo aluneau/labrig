@@ -76,3 +76,8 @@ the app); VMs, routers and clusters keep running.
 | `UPDATE_CHECK` | `true` | `false`: the Host page doesn't ask GitHub (air-gapped hosts) |
 
 Not yet: signed tarballs (minisign; today the checksum comes from the same GitHub release), an RPM in COPR.
+
+## Verified (2026-10-09)
+
+Nested AlmaLinux 9 (Python 3.9, SELinux enforcing): `install --channel nightly` straight from GitHub (layout, 0640 config,
+login), CLI `update` between two nightlies (about 15 s from switch to healthy), the Host page **Update now** button, `rollback`.
