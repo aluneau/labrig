@@ -7,11 +7,12 @@ resources: {vcpus: 3, memory_mb: 2560, disk_gb: 30}
 params:
   - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
   - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
-  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
 name: "c{{case}}-mtu"
 group:
   name: "c{{case}}-mtu"
-  cidr: 10.42.242.0/24
+  cidr: "{{cidr}}"
   # the lab itself is a normal 1500-byte network...
   network: {mtu: 1500}
   router:

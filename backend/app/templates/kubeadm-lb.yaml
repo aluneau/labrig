@@ -1,0 +1,57 @@
+id: kubeadm-lb
+title: kubeadm cluster behind the router load balancer
+summary: Upstream Kubernetes (kubeadm, Flannel) in a lab group; the router serves the API names and load-balances port 6443 over the control planes.
+tags: [kubernetes, kubeadm, haproxy, load-balancer]
+requires: [kubeadm]
+resources: {vcpus: 7, memory_mb: 6656, disk_gb: 70}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: version, label: Kubernetes version, type: string, pattern: '^v?\d+\.\d+(\.\d+)?$',
+     help: 'Minor (v1.34) or patch (v1.34.1); empty = the app default'}
+  - {name: ctlplanes, label: Control planes, type: choice, choices: [1, 3], default: 1,
+     help: '3 = HA control plane (stacked etcd) behind the router haproxy'}
+  - {name: workers, label: Workers, type: int, default: 2, min: 0, max: 6}
+  - {name: image, label: Node cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-k8s"
+group:
+  cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}"}
+cluster:
+  name: "c{{case}}-k8s"
+  type: kubeadm
+  version: "{{version}}"
+  ctlplanes: "{{ctlplanes}}"
+  workers: "{{workers}}"
+  image: "{{image}}"
+  username: admin
+  password: "{{password}}"
+guide: |
+  # Case {{case}}: kubeadm cluster behind a load balancer
+
+  **Customer symptom (typical):** "kubectl times out through the load balancer", "a new control plane
+  can't join", "certificate is valid for X, not for the LB name", "nodes NotReady after a restart".
+
+  ## What is in the lab
+  - Lab group **{{group}}** on **{{cidr}}**, router `{{ip:1}}`: DNS for `{{domain}}` and haproxy on
+    port 6443 (TCP, health-checked) in front of every control plane
+  - Cluster **c{{case}}-k8s**: {{ctlplanes}} control plane(s) + {{workers}} worker(s), kubeadm
+    (containerd, Flannel); the API name is `api.c{{case}}-k8s.{{domain}}`
+  - The cluster is created by a second task once the group is ready (Tasks page)
+
+  ## Steps
+  1. Wait for the group, then the cluster (**Clusters** page: status ready, all nodes Ready).
+  2. Download the kubeconfig on the cluster page: it points at the router's uplink address (reachable
+     from this host) with the API name as TLS server name.
+  3. Reproduce: scale workers, stop a control plane, rotate certificates…
+
+  ## Checks
+  - `kubectl get nodes -o wide` with the downloaded kubeconfig
+  - Router tab: `haproxy.cfg` lists every control plane as a backend of the API load balancer
+  - Stop one control plane (with 3): `kubectl` still answers through the router
+
+  ## Things to try
+  - `kubeadm certs check-expiration` on a control plane; regenerate the apiserver cert without the LB name
+    in the SANs to reproduce the x509 error
+  - Block 6443 on a control plane (`nft`) and watch haproxy mark it down

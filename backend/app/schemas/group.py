@@ -615,6 +615,17 @@ class AddressPoolSpec(BaseModel):
         return ipaddress.IPv4Address(self.start) <= ipaddress.IPv4Address(ip) <= ipaddress.IPv4Address(self.end)
 
 
+class TemplateRef(BaseModel):
+    """The customer-case template a group was created from (docs/templates.md): set by the app,
+    kept across spec updates; the group page shows the guide"""
+    id: str
+    title: Optional[str] = None
+    case: Optional[str] = None
+    params: Dict[str, Any] = {}
+    guide: Optional[str] = None  # rendered markdown (kept even if the template file goes away)
+    created_at: Optional[str] = None
+
+
 class GroupSpec(BaseModel):
     name: str = Field(..., pattern=LABEL, description="Lowercase letters, digits and '-', max 32 chars")
     cidr: str = Field(..., description="IPv4 subnet of the group network, e.g. 10.42.7.0/24")
@@ -632,6 +643,7 @@ class GroupSpec(BaseModel):
     dhcp_hosts: List[DHCPHostSpec] = []  # static reservations for non-member machines
     address_pools: List[AddressPoolSpec] = []  # ranges kept free (MetalLB pools...)
     network: NetworkSpec = NetworkSpec()
+    template: Optional[TemplateRef] = None  # set by the app when created from a template
 
     @field_validator("cidr")
     @classmethod
