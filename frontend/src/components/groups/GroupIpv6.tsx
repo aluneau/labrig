@@ -38,7 +38,7 @@ export const GroupIpv6: React.FC<{ group: GroupDetail; onDone: (msg: string) => 
         {enabled && (
           <>
             <FlexItem>
-              <FormSelect id="ipv6-egress" aria-label="IPv6 to outside the lab" value={egress} style={{ width: 330 }}
+              <FormSelect id="ipv6-egress" aria-label="IPv6 to outside the lab" value={egress} style={{ width: 400 }}
                 onChange={(_e, v) => setEgress(v as 'reject' | 'drop')}>
                 <FormSelectOption value="reject" label="IPv6 to outside the lab: fails at once (reject)" />
                 <FormSelectOption value="drop" label="IPv6 to outside the lab: hangs (dropped)" />
