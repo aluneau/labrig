@@ -145,12 +145,45 @@ def parse_routes(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return routes
 
 
-def read_status(vm_name: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Sessions + BGP routes of the routing table, read with vtysh on the router"""
+def _ms(value: Any) -> Optional[int]:
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def parse_bfd(data: Any) -> List[Dict[str, Any]]:
+    """`show bfd peers json` -> [{peer, status, uptime_seconds, ...}] (single-hop IPv4 sessions)"""
+    peers = []
+    for p in data if isinstance(data, list) else []:
+        ip = p.get("peer")
+        if not ip or not _is_ipv4(ip):
+            continue
+        rx, tx = _ms(p.get("receive-interval")), _ms(p.get("transmit-interval"))
+        rrx, rtx = _ms(p.get("remote-receive-interval")), _ms(p.get("remote-transmit-interval"))
+        rmult = _ms(p.get("remote-detect-multiplier"))
+        # the router declares the peer down after the peer's multiplier x the slower of (our rx, its tx)
+        detect = rmult * max(rx, rtx) if rmult and rx and rtx else None
+        status = p.get("status") or "unknown"
+        peers.append({
+            "peer": ip, "status": status,
+            "uptime_seconds": _ms(p.get("uptime")) if status == "up" else None,
+            "downtime_seconds": _ms(p.get("downtime")) if status != "up" else None,
+            "diagnostic": p.get("diagnostic") if p.get("diagnostic") not in (None, "ok") else None,
+            "detect_multiplier": _ms(p.get("detect-multiplier")), "receive_interval": rx, "transmit_interval": tx,
+            "remote_receive_interval": rrx, "remote_transmit_interval": rtx, "remote_detect_multiplier": rmult,
+            "detect_ms": detect,
+        })
+    peers.sort(key=lambda x: ipaddress.IPv4Address(x["peer"]))
+    return peers
+
+
+def read_status(vm_name: str, bfd: bool = False) -> Tuple[Dict[str, Any], Optional[str]]:
+    """Sessions + BGP routes of the routing table (+ BFD sessions), read with vtysh on the router"""
     script = ("if ! systemctl is-active -q frr; then echo 'FRR is not running on the router' >&2; exit 3; fi; "
               "vtysh -c 'show bgp summary json' && echo " + SEPARATOR + " && vtysh -c 'show ip route bgp json'"
               " && echo " + SEPARATOR + " && vtysh -c 'show version' | head -n 1"
-              " && echo " + SEPARATOR + " && vtysh -c 'show ipv6 route bgp json'")
+              " && echo " + SEPARATOR + " && vtysh -c 'show ipv6 route bgp json'"
+              # bfdd may not run yet (first push): no BFD sessions rather than an error
+              + (" && echo " + SEPARATOR + " && { vtysh -c 'show bfd peers json' 2>/dev/null || echo '[]'; }"
+                 if bfd else ""))
     try:
         result = libvirt_client.agent_exec(vm_name, "/bin/sh", ["-c", script], timeout=15)
     except (libvirt.libvirtError, TimeoutError, KeyError, ValueError) as e:
@@ -165,7 +198,12 @@ def read_status(vm_name: str) -> Tuple[Dict[str, Any], Optional[str]]:
     except ValueError as e:
         return {}, f"Unexpected vtysh output: {e}"
     version = parts[2].strip() if len(parts) > 2 else None
-    return {"sessions": parse_summary(summary), "routes": parse_routes(routes), "frr_version": version}, None
+    try:
+        bfd_peers = parse_bfd(json.loads(parts[4].strip() or "[]")) if len(parts) > 4 else []
+    except ValueError:
+        bfd_peers = []  # bfdd not running: vtysh prints a warning instead of JSON
+    return {"sessions": parse_summary(summary), "routes": parse_routes(routes), "frr_version": version,
+            "bfd_peers": bfd_peers}, None
 
 
 def status(spec: GroupSpec, vm_name: str, running: bool) -> Dict[str, Any]:
@@ -176,12 +214,18 @@ def status(spec: GroupSpec, vm_name: str, running: bool) -> Dict[str, Any]:
                 "router_ip6": spec.ip6_of(spec.router.ip)}
     live: Dict[str, Any] = {}
     error = None
+    bfd = bgp.bfd_on()
     if running and bgp.enabled:
-        live, error = read_status(vm_name)
+        live, error = read_status(vm_name, bfd=bfd is not None)
     names = _peer_names(spec)
+    bfd_peers = (live.get("bfd_peers") or []) if bfd is not None else []
+    for p in bfd_peers:
+        p["name"] = names.get(p["peer"])
+    bfd_by_ip = {p["peer"]: p["status"] for p in bfd_peers}
     sessions = live.get("sessions") or []
     for s in sessions:
         s["name"] = names.get(s["peer"])
+        s["bfd_status"] = bfd_by_ip.get(s["peer"]) if bfd is not None else None
     routes = live.get("routes") or []
     for r in routes:
         for h in r["nexthops"]:
@@ -196,6 +240,7 @@ def status(spec: GroupSpec, vm_name: str, running: bool) -> Dict[str, Any]:
         "announce_ranges": [r.model_dump() for r in bgp.announce_ranges],
         "router_running": running, "router_error": error, "frr_version": live.get("frr_version"),
         "sessions": sessions, "routes": routes,
+        "bfd": bgp.bfd.model_dump() if bgp.bfd is not None else None, "bfd_peers": bfd_peers,
     }
 
 

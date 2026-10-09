@@ -38,6 +38,13 @@ variable "ctlplanes" {
   default = 1 # 3: stacked etcd, haproxy on the router in front of the three API servers
 }
 
+# MetalLB installed by the server: "" (none), "l2" or "bgp" (BGP to the group router, with BFD: sub-second failover).
+# Switch it and apply again: changed in place. The hello demo answers on hello.<domain> (metallb_demo_ip).
+variable "metallb_mode" {
+  type    = string
+  default = ""
+}
+
 variable "use_existing_group" {
   type    = bool
   default = false
@@ -80,6 +87,11 @@ resource "vmmanager_cluster" "k8s" {
   cloud_image_id = vmmanager_cloud_image.debian.id
   group_id       = var.use_existing_group ? vmmanager_group.lab[0].id : null
   # version = "v1.36"   # default: the server's pinned Kubernetes minor
+  kubeadm = {
+    metallb      = var.metallb_mode != ""
+    metallb_mode = var.metallb_mode == "" ? "l2" : var.metallb_mode
+    metallb_bfd  = var.metallb_mode == "bgp"
+  }
   depends_on = [vmmanager_cloud_image.alma] # the group router is AlmaLinux
 }
 
@@ -93,6 +105,10 @@ output "group_id" {
 
 output "node_ips" {
   value = vmmanager_cluster.k8s.node_ips
+}
+
+output "metallb_demo_ip" {
+  value = vmmanager_cluster.k8s.kubeadm.metallb_demo_ip
 }
 
 output "kubeconfig" {

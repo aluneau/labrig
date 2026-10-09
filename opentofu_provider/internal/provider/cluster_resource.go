@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -64,6 +65,7 @@ type clusterModel struct {
 	NodeIPs        types.Map       `tfsdk:"node_ips"`
 	Kubeconfig     types.String    `tfsdk:"kubeconfig"`
 	OpenShift      *openshiftModel `tfsdk:"openshift"`
+	Kubeadm        *kubeadmModel   `tfsdk:"kubeadm"`
 	ConsoleURL     types.String    `tfsdk:"console_url"`
 	KubeadminPass  types.String    `tfsdk:"kubeadmin_password"`
 }
@@ -83,8 +85,20 @@ type openshiftModel struct {
 	MetalLBAddrs    types.Int64  `tfsdk:"metallb_addresses"`
 	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
 	MetalLBMode     types.String `tfsdk:"metallb_mode"`
+	MetalLBBFD      types.Bool   `tfsdk:"metallb_bfd"`
 	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
 	Disconnected    types.Bool   `tfsdk:"disconnected"`
+}
+
+// kubeadm block: MetalLB installed and configured by the server, changed in place (PUT /clusters/{id}/metallb)
+type kubeadmModel struct {
+	MetalLB      types.Bool   `tfsdk:"metallb"`
+	MetalLBMode  types.String `tfsdk:"metallb_mode"`
+	MetalLBAddrs types.Int64  `tfsdk:"metallb_addresses"`
+	MetalLBDemo  types.Bool   `tfsdk:"metallb_demo"`
+	MetalLBBFD   types.Bool   `tfsdk:"metallb_bfd"`
+	MetalLBPool  types.String `tfsdk:"metallb_pool"`
+	ServiceIP    types.String `tfsdk:"metallb_demo_ip"`
 }
 
 type apiClusterNode struct {
@@ -151,6 +165,10 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		return schema.StringAttribute{Optional: true, Computed: true, Description: desc,
 			PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}}
 	}
+	liveInt := func(desc string) schema.Int64Attribute {
+		return schema.Int64Attribute{Optional: true, Computed: true, Description: desc,
+			PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}}
+	}
 	liveBool := func(desc string) schema.BoolAttribute {
 		return schema.BoolAttribute{Optional: true, Computed: true, Description: desc,
 			PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()}}
@@ -196,6 +214,20 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"kubeconfig":         schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "Admin kubeconfig pointing at api_endpoint (openshift: with tls-server-name = api_hostname)."},
 			"console_url":        schema.StringAttribute{Computed: true, PlanModifiers: keepStr, Description: "openshift: web console (resolvable through the group router's DNS, e.g. over WireGuard)."},
 			"kubeadmin_password": schema.StringAttribute{Computed: true, Sensitive: true, PlanModifiers: keepStr, Description: "openshift: kubeadmin password."},
+			"kubeadm": schema.SingleNestedAttribute{
+				Optional: true,
+				Description: "type = kubeadm: MetalLB installed by the server (upstream, FRR mode) with the hello demo. Changed in place: " +
+					"enabling / disabling, switching metallb_mode, BFD, the demo.",
+				Attributes: map[string]schema.Attribute{
+					"metallb":           liveBool("Install MetalLB (default false)."),
+					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
+					"metallb_addresses": liveInt("L2 pool size (default 16)."),
+					"metallb_demo":      liveBool("hello Deployment + LoadBalancer Service, DNS hello.<group domain> (default true)."),
+					"metallb_bfd":       liveBool("bgp mode: BFD on the group router + a MetalLB BFDProfile (sub-second failover)."),
+					"metallb_pool":      schema.StringAttribute{Computed: true, Description: "Assigned pool (range of the group network, or a /27 announce range)."},
+					"metallb_demo_ip":   schema.StringAttribute{Computed: true, Description: "External IP of the hello Service."},
+				},
+			},
 			"openshift": schema.SingleNestedAttribute{
 				Optional: true,
 				Description: "type = openshift (agent-based installer, needs vmmanager_openshift_pull_secret). Unset fields take the " +
@@ -219,6 +251,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"metallb_demo":      liveBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
 					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
+					"metallb_bfd":       liveBool("metallb_mode = bgp: BFD on the group router and a MetalLB BFDProfile (a dead node's routes are withdrawn in < 1 s instead of the 30 s hold time)."),
 					"disconnected":      osBool("Disconnected install (default false): the group router runs a mirror registry (8 GiB RAM, 4 vCPUs, 250 GiB disk) filled by oc-mirror with the release + the add-ons' operators, the group's egress is blocked before the nodes boot, the cluster pulls from the mirror only. The first mirror downloads ~20+ GB."),
 				},
 			},
@@ -389,6 +422,10 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			if len(mlb) > 0 {
 				opts["metallb"] = mlb
 			}
+			if !os.MetalLBBFD.IsNull() && !os.MetalLBBFD.IsUnknown() {
+				mlb["bfd"] = os.MetalLBBFD.ValueBool()
+				opts["metallb"] = mlb
+			}
 			if !os.DisableUpdates.IsNull() && !os.DisableUpdates.IsUnknown() {
 				opts["disable_updates"] = os.DisableUpdates.ValueBool()
 			}
@@ -401,6 +438,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		}
 		delete(body, "version")
 		body["openshift"] = opts
+	}
+	if plan.Kubeadm != nil {
+		body["kubeadm"] = map[string]any{"metallb": kubeadmMetalLB(plan.Kubeadm)}
 	}
 	if d := strPtr(plan.Domain); d != nil {
 		body["domain"] = *d
@@ -500,6 +540,11 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 				*attrs[i] = types.Int64Null()
 			}
 		}
+	}
+	if c.Type == "kubeadm" && m.Kubeadm != nil {
+		fillKubeadm(m.Kubeadm, c.Spec)
+	} else if c.Type != "kubeadm" {
+		m.Kubeadm = nil
 	}
 	if c.Type == "openshift" && m.OpenShift != nil {
 		fillOpenShift(ctx, m.OpenShift, c.Spec)
@@ -620,6 +665,28 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 			return
 		}
 	}
+	if plan.Type.ValueString() == "kubeadm" && plan.Kubeadm != nil && kubeadmChanged(state.Kubeadm, plan.Kubeadm) {
+		var task struct {
+			ID int64 `json:"id"`
+		}
+		if err := r.client.Do(ctx, "PUT", "/clusters/"+id+"/metallb", kubeadmMetalLB(plan.Kubeadm), &task); err != nil {
+			resp.Diagnostics.AddError("Cannot change MetalLB", err.Error())
+			return
+		}
+		if err := r.waitIdle(ctx, id); err != nil {
+			resp.Diagnostics.AddError("MetalLB change failed", err.Error())
+			return
+		}
+		c, err := r.get(ctx, id)
+		if err == nil {
+			mlb, _ := kubeadmSpec(c.Spec)
+			if st, _ := mlb["state"].(string); st == "error" {
+				msg, _ := mlb["message"].(string)
+				resp.Diagnostics.AddError("MetalLB change failed", msg)
+				return
+			}
+		}
+	}
 
 	if !plan.Running.ValueBool() && state.Running.ValueBool() {
 		if err := r.power(ctx, id, "stop"); err != nil {
@@ -659,6 +726,67 @@ func (r *clusterResource) ImportState(ctx context.Context, req resource.ImportSt
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("openshift"), &empty)...)
 }
 
+// kubeadmMetalLB: the MetalLB options of a kubeadm block (unset fields: server defaults)
+func kubeadmMetalLB(k *kubeadmModel) map[string]any {
+	mlb := map[string]any{"enabled": !k.MetalLB.IsNull() && !k.MetalLB.IsUnknown() && k.MetalLB.ValueBool()}
+	if v := strPtr(k.MetalLBMode); v != nil {
+		mlb["mode"] = *v
+	}
+	if v := intPtr(k.MetalLBAddrs); v != nil {
+		mlb["addresses"] = *v
+	}
+	if !k.MetalLBDemo.IsNull() && !k.MetalLBDemo.IsUnknown() {
+		mlb["demo"] = k.MetalLBDemo.ValueBool()
+	}
+	if !k.MetalLBBFD.IsNull() && !k.MetalLBBFD.IsUnknown() {
+		mlb["bfd"] = k.MetalLBBFD.ValueBool()
+	}
+	return mlb
+}
+
+func kubeadmChanged(old, cur *kubeadmModel) bool {
+	if old == nil {
+		return cur.MetalLB.ValueBool()
+	}
+	known := func(a, b attr.Value) bool { return !b.IsUnknown() && !b.IsNull() && !a.Equal(b) }
+	return known(old.MetalLB, cur.MetalLB) || known(old.MetalLBMode, cur.MetalLBMode) || known(old.MetalLBAddrs, cur.MetalLBAddrs) ||
+		known(old.MetalLBDemo, cur.MetalLBDemo) || known(old.MetalLBBFD, cur.MetalLBBFD)
+}
+
+func kubeadmSpec(spec map[string]any) (map[string]any, bool) {
+	k, _ := spec["kubeadm"].(map[string]any)
+	mlb, ok := k["metallb"].(map[string]any)
+	return mlb, ok
+}
+
+// fillKubeadm copies the server's kubeadm MetalLB state (spec.kubeadm.metallb) into m
+func fillKubeadm(m *kubeadmModel, spec map[string]any) {
+	mlb, _ := kubeadmSpec(spec)
+	b := func(v any, def bool) types.Bool {
+		if x, ok := v.(bool); ok {
+			return types.BoolValue(x)
+		}
+		return types.BoolValue(def)
+	}
+	s := func(v any, def string) types.String {
+		if x, ok := v.(string); ok && x != "" {
+			return types.StringValue(x)
+		}
+		if def == "" {
+			return types.StringNull()
+		}
+		return types.StringValue(def)
+	}
+	m.MetalLB, m.MetalLBDemo, m.MetalLBBFD = b(mlb["enabled"], false), b(mlb["demo"], true), b(mlb["bfd"], false)
+	m.MetalLBMode = s(mlb["mode"], "l2")
+	if f, ok := mlb["addresses"].(float64); ok {
+		m.MetalLBAddrs = types.Int64Value(int64(f))
+	} else {
+		m.MetalLBAddrs = types.Int64Value(16)
+	}
+	m.MetalLBPool, m.ServiceIP = s(mlb["pool"], ""), s(mlb["service_ip"], "")
+}
+
 // fillOpenShift copies the server's openshift options (spec.openshift) into m
 func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) {
 	o, _ := spec["openshift"].(map[string]any)
@@ -691,6 +819,10 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 	m.SRIOV, m.SRIOVNics, m.SRIOVVFs, m.SRIOVDeviceType = flag(sriov["enabled"]), num(sriov["nics"]), num(sriov["vfs"]), str(sriov["device_type"])
 	m.MetalLB, m.MetalLBAddrs, m.MetalLBDemo = flag(mlb["enabled"]), num(mlb["addresses"]), flag(mlb["demo"])
 	m.MetalLBMode = str(mlb["mode"])
+	m.MetalLBBFD = flag(mlb["bfd"])
+	if m.MetalLBBFD.IsNull() {
+		m.MetalLBBFD = types.BoolValue(false)
+	}
 	if m.MetalLB.ValueBool() && m.MetalLBMode.IsNull() {
 		m.MetalLBMode = types.StringValue("l2")
 	}
@@ -783,8 +915,9 @@ func (r *clusterResource) openshiftAddons(ctx context.Context, id string, old, c
 		return false
 	}
 	demo := on(cur.MetalLBDemo, true)
-	if isOn && (!wasOn || mode(old) != mode(cur)) {
-		mlb := map[string]any{"enabled": true, "mode": mode(cur), "demo": demo}
+	bfd := on(cur.MetalLBBFD, false)
+	if isOn && (!wasOn || mode(old) != mode(cur) || (bfd && !on(old.MetalLBBFD, false))) {
+		mlb := map[string]any{"enabled": true, "mode": mode(cur), "demo": demo, "bfd": bfd}
 		if v := intPtr(cur.MetalLBAddrs); v != nil {
 			mlb["addresses"] = *v
 		}

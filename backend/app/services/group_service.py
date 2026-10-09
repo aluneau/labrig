@@ -33,7 +33,7 @@ from app.libvirt_client import libvirt_client
 from app.models import CloudImage, Group, GroupMember, Network, Task, VM
 from app.schemas import TaskCreate, VMCreate
 from app.schemas.group import (
-    BGPAnnounceRange, BGPNeighbor, BGPSpec, DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec,
+    BFDSpec, BGPAnnounceRange, BGPNeighbor, BGPSpec, DHCPHostSpec, DHCPRange, DNSRecord, GroupSpec, MemberSpec,
     WireGuardPeer, WireGuardSpec,
 )
 from app.services.cloud_image_service import cloud_image_service
@@ -729,6 +729,8 @@ class GroupService:
                 new.router.bgp.announce_ranges = [r.model_copy() for r in old_bgp.announce_ranges if not r.owner]
             if "neighbors" not in given:
                 new.router.bgp.neighbors = [n.model_copy() for n in old_bgp.neighbors if not n.owner]
+            if "bfd" not in given and old_bgp.bfd is not None:
+                new.router.bgp.bfd = old_bgp.bfd.model_copy()
         if new.router.bgp is not None:
             new.router.bgp.announce_ranges = ([r for r in new.router.bgp.announce_ranges if not r.owner]
                                               + [r.model_copy() for r in owned_ranges])
@@ -1219,6 +1221,8 @@ class GroupService:
             bgp.announce_ranges = [BGPAnnounceRange.model_validate(r) for r in settings_in["announce_ranges"]]
         if settings_in.get("neighbors") is not None:
             bgp.neighbors = [BGPNeighbor.model_validate(n) for n in settings_in["neighbors"]]
+        if settings_in.get("bfd") is not None:
+            bgp.bfd = BFDSpec.model_validate(settings_in["bfd"])
         spec.router.bgp = bgp
         return self.update_group(db, group_id, spec)
 

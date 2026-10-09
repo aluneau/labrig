@@ -131,7 +131,10 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
     odf_profile: d.odfProfile,
     operators: names.map((name) => ({ name, source: source(name) })),
     sriov: d.sriov,
-    metallb: { enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo },
+    metallb: {
+      enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo,
+      bfd: d.metallb.mode === 'bgp' && !!d.metallb.bfd,
+    },
     disable_updates: d.disableUpdates,
     disconnected: d.disconnected,
   };
@@ -533,34 +536,43 @@ export const SriovSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft
 
 // MetalLB
 
-export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => {
-  const m = draft.metallb;
-  const set = (p: Partial<MetalLBOptions>) => patch({ metallb: { ...m, ...p } });
+/** MetalLB options (OpenShift add-on and kubeadm): ids are `${prefix}-metallb…` */
+export const MetalLBFields: React.FC<{ value: MetalLBOptions; onChange: (m: MetalLBOptions) => void; prefix?: string }> = ({
+  value: m, onChange, prefix = 'os',
+}) => {
+  const set = (p: Partial<MetalLBOptions>) => onChange({ ...m, ...p });
   return (
     <FormSection title="MetalLB" titleElement="h3">
-      <Switch id="os-metallb" label="MetalLB (LoadBalancer services)" isChecked={m.enabled}
+      <Switch id={`${prefix}-metallb`} label="MetalLB (LoadBalancer services)" isChecked={m.enabled}
         onChange={(_e, v) => set({ enabled: v })} />
       {m.enabled && (
         <>
-          <FormGroup role="radiogroup" fieldId="os-metallb-mode" label="Mode" isStack>
-            <Radio id="os-metallb-l2" name="os-metallb-mode" label="L2 (ARP)" isChecked={(m.mode || 'l2') === 'l2'}
+          <FormGroup role="radiogroup" fieldId={`${prefix}-metallb-mode`} label="Mode" isStack>
+            <Radio id={`${prefix}-metallb-l2`} name={`${prefix}-metallb-mode`} label="L2 (ARP)" isChecked={(m.mode || 'l2') === 'l2'}
               onChange={() => set({ mode: 'l2' })}
               description="A pool carved out of the lab group network (kept out of the router's DHCP range); one node answers ARP for each service IP. Failover, no load balancing." />
-            <Radio id="os-metallb-bgp" name="os-metallb-mode" label="BGP" isChecked={m.mode === 'bgp'}
+            <Radio id={`${prefix}-metallb-bgp`} name={`${prefix}-metallb-mode`} label="BGP" isChecked={m.mode === 'bgp'}
               onChange={() => set({ mode: 'bgp' })}
               description="A /27 outside the lab network; every node tells the group router over BGP to send the service IPs to it, and the router spreads traffic over the nodes (ECMP). BGP is enabled on the router." />
           </FormGroup>
           <Grid hasGutter md={6}>
             {(m.mode || 'l2') === 'l2' && (
               <GridItem>
-                <FormGroup label="Pool size (addresses)" fieldId="os-metallb-size">
-                  <TextInput id="os-metallb-size" type="number" min={2} max={64} value={String(m.addresses)} style={{ maxWidth: 120 }}
+                <FormGroup label="Pool size (addresses)" fieldId={`${prefix}-metallb-size`}>
+                  <TextInput id={`${prefix}-metallb-size`} type="number" min={2} max={64} value={String(m.addresses)} style={{ maxWidth: 120 }}
                     onChange={(_e, v) => set({ addresses: Math.min(64, Math.max(2, Number(v) || 2)) })} />
                 </FormGroup>
               </GridItem>
             )}
+            {m.mode === 'bgp' && (
+              <GridItem>
+                <Checkbox id={`${prefix}-metallb-bfd`} isChecked={!!m.bfd} onChange={(_e, v) => set({ bfd: v })}
+                  label="BFD (fast failover)"
+                  description="BFD on the router's sessions and a MetalLB BFDProfile: a dead node's routes go in under a second instead of the 30 s BGP hold time." />
+              </GridItem>
+            )}
             <GridItem>
-              <Checkbox id="os-metallb-demo" isChecked={m.demo} onChange={(_e, v) => set({ demo: v })}
+              <Checkbox id={`${prefix}-metallb-demo`} isChecked={m.demo} onChange={(_e, v) => set({ demo: v })}
                 label="Deploy the MetalLB lab demo"
                 description="A hello Deployment behind a LoadBalancer Service, with DNS name hello.<domain> (see the cluster's MetalLB lab tab)." />
             </GridItem>
@@ -570,6 +582,10 @@ export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
     </FormSection>
   );
 };
+
+export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => (
+  <MetalLBFields value={draft.metallb} onChange={(metallb) => patch({ metallb })} />
+);
 
 // Disconnected
 

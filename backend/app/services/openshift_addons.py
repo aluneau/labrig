@@ -4,24 +4,22 @@ Recipes follow the product docs and kcli's `apps/<operator>/` (Namespace + Opera
 Subscription, wait for the CSV, then the operator's CR). Everything goes through `oc` on the host
 (openshift_service.oc), with the cluster's host kubeconfig.
 """
-import ipaddress
 import json
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from app.services.metallb import (DEMO_IMAGE, DEMO_NAME, DEMO_NAMESPACE, NAMESPACE as METALLB_NAMESPACE,  # noqa: F401
+                                  MetalLBClient, in_pool, metallb_pool)
 from app.services.openshift_service import openshift_service
 
 CSV_TIMEOUT = 15 * 60
 CRD_TIMEOUT = 5 * 60
 STORAGE_SERIAL = "vmm-storage"        # libvirt <serial> of the extra disk: /dev/disk/by-id/virtio-vmm-storage
 STORAGE_DEVICE = f"/dev/disk/by-id/virtio-{STORAGE_SERIAL}"
-DEMO_NAMESPACE = "metallb-demo"
-DEMO_NAME = "hello"
 SRIOV_NAMESPACE = "openshift-sriov-network-operator"
-DEMO_IMAGE = "registry.access.redhat.com/ubi9/httpd-24:latest"  # mirrored for disconnected clusters (ITMS); oc-mirror needs the tag
 
 
-class AddonRunner:
+class AddonRunner(MetalLBClient):
     """Runs add-ons on one cluster. sleep(s) must raise when the task is cancelled; log(msg) reports."""
 
     def __init__(self, cluster_name: str, version: str, sleep: Callable[[float], None],
@@ -38,23 +36,10 @@ class AddonRunner:
     def oc(self, args: List[str], timeout: float = 60, stdin: Optional[str] = None) -> Dict[str, Any]:
         return openshift_service.oc(self.cluster, self.version, args, timeout, stdin)
 
+    kube = oc  # MetalLBClient
+
     def oc_json(self, args: List[str], timeout: float = 60) -> Any:
         return openshift_service.oc_json(self.cluster, self.version, args, timeout)
-
-    def apply(self, manifests: List[Dict[str, Any]]) -> None:
-        openshift_service.apply(self.cluster, self.version, manifests)
-
-    def apply_retry(self, manifests: List[Dict[str, Any]], what: str, timeout: float = CRD_TIMEOUT) -> None:
-        """Apply, retrying while the CRD / webhook isn't served yet"""
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                self.apply(manifests)
-                return
-            except RuntimeError as e:
-                if time.monotonic() > deadline:
-                    raise RuntimeError(f"{what}: {e}")
-                self.sleep(10)
 
     def package(self, name: str) -> Dict[str, Any]:
         """packagemanifest -> {source, channel, namespace, all_namespaces_only, csv}"""
@@ -316,151 +301,13 @@ class AddonRunner:
     # -------------------------------------------------------------- MetalLB
 
     def metallb(self, pool: str, mode: str = "l2", bgp: Optional[Dict[str, Any]] = None) -> None:
-        """MetalLB CR + IPAddressPool, then L2Advertisement (l2) or BGPPeer + BGPAdvertisement (bgp:
-        bgp = {router_ip, my_asn, peer_asn}). Switching modes removes the other mode's objects."""
-        self.install_operator("metallb-operator", namespace="metallb-system")
-        self.log(f"Configuring MetalLB ({mode.upper()}, pool {pool})")
+        """Operator + MetalLB CR, then the shared configuration (metallb.MetalLBClient.configure: pool,
+        L2Advertisement or BGPPeer (+ BFDProfile) + BGPAdvertisement; the other mode's objects removed)"""
+        self.install_operator("metallb-operator", namespace=METALLB_NAMESPACE)
         self.apply_retry([{"apiVersion": "metallb.io/v1beta1", "kind": "MetalLB",
-                           "metadata": {"name": "metallb", "namespace": "metallb-system"}}], "MetalLB")
-        manifests: List[Dict[str, Any]] = [
-            {"apiVersion": "metallb.io/v1beta1", "kind": "IPAddressPool",
-             "metadata": {"name": "lab-pool", "namespace": "metallb-system"},
-             "spec": {"addresses": [pool], "autoAssign": True, "avoidBuggyIPs": True}},
-        ]
-        if mode == "bgp":
-            if not bgp:
-                raise ValueError("MetalLB BGP mode needs the router's BGP settings")
-            manifests += [
-                {"apiVersion": "metallb.io/v1beta2", "kind": "BGPPeer",
-                 "metadata": {"name": "lab-router", "namespace": "metallb-system"},
-                 "spec": {"myASN": int(bgp["my_asn"]), "peerASN": int(bgp["peer_asn"]),
-                          "peerAddress": bgp["router_ip"], "holdTime": "30s", "keepaliveTime": "10s"}},
-                {"apiVersion": "metallb.io/v1beta1", "kind": "BGPAdvertisement",
-                 "metadata": {"name": "lab-bgp", "namespace": "metallb-system"},
-                 "spec": {"ipAddressPools": ["lab-pool"]}},
-            ]
-            stale = [["l2advertisement", "lab-l2"]]
-        else:
-            manifests.append({"apiVersion": "metallb.io/v1beta1", "kind": "L2Advertisement",
-                              "metadata": {"name": "lab-l2", "namespace": "metallb-system"},
-                              "spec": {"ipAddressPools": ["lab-pool"]}})
-            stale = [["bgpadvertisement", "lab-bgp"], ["bgppeers.metallb.io", "lab-router"]]
-        self.apply_retry(manifests, "IPAddressPool / advertisement")
-        for kind, name in stale:
-            self.oc(["delete", kind, name, "-n", "metallb-system", "--ignore-not-found"], 60)
+                           "metadata": {"name": "metallb", "namespace": METALLB_NAMESPACE}}], "MetalLB")
+        self.configure(pool, mode, bgp)
 
     def metallb_demo(self, timeout: float = 10 * 60, pool: Optional[str] = None, mode: str = "l2") -> str:
-        """hello Deployment (2 replicas, answers with its pod and node) + LoadBalancer Service.
-        Returns the service's external IP. An existing Service whose IP is outside `pool` (the pool
-        changed with the mode) is re-created to get an address of the new pool."""
-        self.log("Deploying the MetalLB demo (hello)")
-        current = self.service_ip()
-        if current and pool and not in_pool(current, pool):
-            self.log(f"Re-creating the hello Service: {current} is not in the new pool {pool}")
-            self.oc(["delete", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "--ignore-not-found"], 60)
-        # the image's docroot isn't writable by OpenShift's random UID: serve the page from an emptyDir
-        script = (f'echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB {mode.upper()} lab)" '
-                  "> /var/www/html/index.html; exec run-httpd")
-        self.apply([
-            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": DEMO_NAMESPACE}},
-            {"apiVersion": "apps/v1", "kind": "Deployment",
-             "metadata": {"name": DEMO_NAME, "namespace": DEMO_NAMESPACE, "labels": {"app": DEMO_NAME}},
-             "spec": {"replicas": 2, "selector": {"matchLabels": {"app": DEMO_NAME}},
-                      "template": {"metadata": {"labels": {"app": DEMO_NAME}}, "spec": {
-                          "containers": [{
-                              "name": "httpd", "image": DEMO_IMAGE,
-                              "command": ["/bin/sh", "-c", script],
-                              "ports": [{"containerPort": 8080}],
-                              "env": [{"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-                                      {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}}],
-                              "readinessProbe": {"httpGet": {"path": "/", "port": 8080}, "periodSeconds": 5},
-                              "volumeMounts": [{"name": "docroot", "mountPath": "/var/www/html"}],
-                          }],
-                          "volumes": [{"name": "docroot", "emptyDir": {}}]}}}},
-            {"apiVersion": "v1", "kind": "Service",
-             "metadata": {"name": DEMO_NAME, "namespace": DEMO_NAMESPACE,
-                          "annotations": {"metallb.io/address-pool": "lab-pool"}},
-             "spec": {"type": "LoadBalancer", "selector": {"app": DEMO_NAME},
-                      "ports": [{"name": "http", "port": 80, "targetPort": 8080}]}},
-        ])
-        deadline = time.monotonic() + timeout
-        while True:
-            ip = self.service_ip()
-            if ip:
-                return ip
-            if time.monotonic() > deadline:
-                raise TimeoutError("The hello Service got no external IP from MetalLB")
-            self.sleep(5)
-
-    def service_ip(self) -> Optional[str]:
-        out = self.oc(["get", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "-o",
-                       "jsonpath={.status.loadBalancer.ingress[0].ip}"], 30)
-        ip = out["stdout"].strip() if out["exitcode"] == 0 else ""
-        return ip or None
-
-    def announcing_node(self) -> Optional[str]:
-        """Node whose speaker answers ARP for the demo IP: ServiceL2Status (MetalLB >= 0.14), else the
-        latest nodeAssigned event"""
-        out = self.oc(["get", "servicel2statuses.metallb.io", "-n", "metallb-system", "-o", "json"], 30)
-        if out["exitcode"] == 0:
-            try:
-                for item in json.loads(out["stdout"]).get("items", []):
-                    svc = (item.get("status") or {}).get("serviceName")
-                    if svc == DEMO_NAME and (item.get("status") or {}).get("serviceNamespace") == DEMO_NAMESPACE:
-                        return (item.get("status") or {}).get("node")
-            except ValueError:
-                pass
-        out = self.oc(["get", "events", "-n", DEMO_NAMESPACE, "--field-selector",
-                       f"involvedObject.name={DEMO_NAME},reason=nodeAssigned", "-o", "json"], 30)
-        if out["exitcode"] == 0:
-            try:
-                events = sorted(json.loads(out["stdout"]).get("items", []),
-                                key=lambda e: e.get("lastTimestamp") or e.get("eventTime") or "")
-                if events:
-                    msg = events[-1].get("message") or ""  # 'announcing from node "x" with protocol "layer2"'
-                    if 'node "' in msg:
-                        return msg.split('node "', 1)[1].split('"', 1)[0]
-            except ValueError:
-                pass
-        return None
-
-    def demo_endpoints(self) -> List[Dict[str, Any]]:
-        out = self.oc(["get", "pods", "-n", DEMO_NAMESPACE, "-l", f"app={DEMO_NAME}", "-o", "json"], 30)
-        if out["exitcode"] != 0:
-            return []
-        result = []
-        for pod in json.loads(out["stdout"]).get("items", []):
-            ready = any(c.get("type") == "Ready" and c.get("status") == "True"
-                        for c in (pod.get("status") or {}).get("conditions") or [])
-            result.append({"pod": pod["metadata"]["name"], "node": (pod.get("spec") or {}).get("nodeName"),
-                           "ip": (pod.get("status") or {}).get("podIP"), "ready": ready})
-        return result
-
-
-def in_pool(ip: str, pool: str) -> bool:
-    """pool: "a-b" range or a CIDR"""
-    try:
-        addr = ipaddress.IPv4Address(ip)
-        if "/" in pool:
-            return addr in ipaddress.IPv4Network(pool, strict=False)
-        start, _, end = pool.partition("-")
-        return ipaddress.IPv4Address(start.strip()) <= addr <= ipaddress.IPv4Address((end or start).strip())
-    except ValueError:
-        return False
-
-
-def metallb_pool(cidr: str, dhcp_end: str, size: int, taken: List[str]) -> str:
-    """Pick `size` consecutive free addresses after the DHCP range (static pool, top of the subnet)"""
-    net = ipaddress.IPv4Network(cidr)
-    hosts = list(net.hosts())
-    end = ipaddress.IPv4Address(dhcp_end)
-    used = {ipaddress.IPv4Address(ip) for ip in taken}
-    run: List[ipaddress.IPv4Address] = []
-    for h in hosts[:-1]:  # keep the last host address free
-        if h <= end or h in used:
-            run = []
-            continue
-        run.append(h)
-        if len(run) == size:
-            return f"{run[0]}-{run[-1]}"
-    raise ValueError(f"No {size} free consecutive addresses after the DHCP range in {cidr} for MetalLB")
+        """hello Deployment (2 replicas) + LoadBalancer Service, returns its external IP"""
+        return self.deploy_demo(pool, mode, DEMO_IMAGE, timeout)

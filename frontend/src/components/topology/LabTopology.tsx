@@ -138,7 +138,8 @@ function machineLines(m: TopologyMachine): Line[] {
     : m.kind === 'member' ? (m.role && m.role !== 'member' ? m.role : 'member') : 'reserved address';
   const lines: Line[] = [{ text: `${m.ip || '?'} · ${role}` }];
   if (m.bgp_state) {
-    lines.push({ text: m.bgp_state === 'Established' ? 'BGP session up' : `BGP ${m.bgp_state}`, color: m.bgp_state === 'Established' ? C.bgp : C.warn });
+    lines.push({ text: (m.bgp_state === 'Established' ? 'BGP session up' : `BGP ${m.bgp_state}`) + (m.bfd_state ? ` · BFD ${m.bfd_state}` : ''),
+      color: m.bgp_state === 'Established' && (!m.bfd_state || m.bfd_state === 'up') ? C.bgp : C.warn });
   }
   m.bgp_prefixes.slice(0, 2).forEach((p) => lines.push({ text: `announces ${p}`, color: C.bgp, bold: true }));
   if (m.bgp_prefixes.length > 2) lines.push({ text: `+${m.bgp_prefixes.length - 2} more prefixes`, color: C.bgp });
@@ -424,7 +425,9 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       'split-dns': `Split DNS: names in ${(r.dns_zones || []).join(', ')} are forwarded to their own DNS servers (conditional forwarding), everything else to ${r.dns_forwarders.join(', ') || 'the uplink\'s DNS'}. Network & DNS tab.`,
       mtu: `MTU: the lab network uses ${r.network_mtu ?? 1500} bytes${r.path_mtu ? `; the router is a narrow hop of ${r.path_mtu} bytes towards the outside${r.drop_frag_needed ? ' and drops the ICMP "fragmentation needed" it should send back (PMTUD black hole)' : ''}${r.clamp_mss ? '; it clamps the TCP MSS of forwarded connections' : ''}` : ''}. Network & DNS tab.`,
       ipv6: `Dual stack: the lab network also has ${t.ipv6_prefix}. The router (${r.lan_ip6}) sends router advertisements (default route) and hands out IPv6 addresses by DHCPv6: each machine gets the same host number as its IPv4 address, and an AAAA record. IPv6 stays inside the lab (the uplink is IPv4 only).`,
-      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr}${t.bgp.listen_range6 ? ` and ${t.bgp.listen_range6}` : ''} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.`,
+      bgp: `FRR listens for BGP sessions from any machine of ${t.cidr}${t.bgp.listen_range6 ? ` and ${t.bgp.listen_range6}` : ''} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.${t.bgp.bfd?.enabled
+        ? ` BFD is on: each session is checked every ${t.bgp.bfd.receive_interval} ms, so a machine that dies loses its routes after about ${t.bgp.bfd.detect_multiplier * Math.max(t.bgp.bfd.receive_interval, t.bgp.bfd.transmit_interval)} ms instead of the 30 s BGP hold time.`
+        : ' Without BFD, a machine that dies keeps its routes until the 30 s BGP hold time expires.'}`,
     };
     return { title: ROLE_LABEL[role] || role, text: texts[role] || '' };
   }
@@ -438,6 +441,10 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       parts.push(m.bgp_state === 'Established'
         ? `It has a BGP session with the router${m.bgp_prefixes.length ? ` and tells it "send traffic for ${m.bgp_prefixes.join(', ')} to me"` : ' but announces nothing'}.`
         : `Its BGP session with the router is ${m.bgp_state} (not up).`);
+      if (m.bfd_state) {
+        parts.push(m.bfd_state === 'up' ? 'BFD watches the session: if this machine stops answering, the router drops its routes in under a second.'
+          : `Its BFD session is ${m.bfd_state}.`);
+      }
     }
     if (m.l2_announces.length) parts.push(`It answers ARP for ${m.l2_announces.join(', ')} (MetalLB L2): traffic for that address enters the cluster here.`);
     return { title: m.name, text: parts.join(' ') };
@@ -460,7 +467,7 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
   if (key.startsWith('bgp:')) {
     const m = t.machines.find((x) => `bgp:${x.name}` === key);
     if (!m) return null;
-    return { title: `BGP session ${m.name} ↔ router`, text: `A TCP connection (port 179) where ${m.name} tells the router which addresses it can serve: ${m.bgp_prefixes.join(', ') || 'none right now'}. State: ${m.bgp_state}.` };
+    return { title: `BGP session ${m.name} ↔ router`, text: `A TCP connection (port 179) where ${m.name} tells the router which addresses it can serve: ${m.bgp_prefixes.join(', ') || 'none right now'}. State: ${m.bgp_state}.${m.bfd_state ? ` BFD (UDP 3784, small hello packets every few hundred ms): ${m.bfd_state}; it brings the session down at once when ${m.name} goes silent.` : ''}` };
   }
   return null;
 }

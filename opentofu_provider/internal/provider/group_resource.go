@@ -96,6 +96,7 @@ type groupModel struct {
 	WGPublicKey   types.String         `tfsdk:"wireguard_public_key"`
 	BGP           types.Bool           `tfsdk:"bgp"`
 	BGPRange      types.String         `tfsdk:"bgp_announce_range"`
+	BGPBFD        types.Bool           `tfsdk:"bgp_bfd"`
 	Egress        *egressModel         `tfsdk:"egress"`
 	Registry      *registryModel       `tfsdk:"registry"`
 	DNSZones      []dnsZoneModel       `tfsdk:"dns_zone"`
@@ -204,11 +205,17 @@ type apiRegistry struct {
 // apiBGP is the spec's router.bgp block. Only `enabled` is sent: the server keeps the announce
 // ranges / neighbors (assigned, or set in the UI) when the block omits them.
 type apiBGP struct {
-	Enabled        bool `json:"enabled"`
+	Enabled        bool    `json:"enabled"`
+	BFD            *apiBFD `json:"bfd,omitempty"`
 	AnnounceRanges []struct {
 		Prefix string  `json:"prefix"`
 		Owner  *string `json:"owner"`
 	} `json:"announce_ranges,omitempty"`
+}
+
+// apiBFD is router.bgp.bfd: only `enabled` is sent (timers: server defaults or the UI's)
+type apiBFD struct {
+	Enabled bool `json:"enabled"`
 }
 
 // apiWireGuard is the spec's router.wireguard block (devices: vmmanager_wireguard_peer)
@@ -394,6 +401,8 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"bgp": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
 				Description: "BGP on the router (FRR, AS 64512): machines of the group network (AS 64513) announce addresses of " +
 					"bgp_announce_range, the router routes them (ECMP). See docs/bgp.md. Applied live."},
+			"bgp_bfd": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "BFD on the router's BGP sessions (FRR bfdd, 3 x 200 ms): a dead peer's routes go in < 1 s instead of the 30 s hold time. Peers must run BFD too."},
 			"bgp_announce_range": schema.StringAttribute{Computed: true, PlanModifiers: keep,
 				Description: "Range the router accepts BGP routes for (a /27 of BGP_ANNOUNCE_POOL, assigned by the server)."},
 			"egress": schema.SingleNestedAttribute{Optional: true,
@@ -552,6 +561,9 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 	switch {
 	case m.BGP.ValueBool():
 		s.Router.BGP = &apiBGP{Enabled: true}
+		if !m.BGPBFD.IsNull() && !m.BGPBFD.IsUnknown() {
+			s.Router.BGP.BFD = &apiBFD{Enabled: m.BGPBFD.ValueBool()}
+		}
 	case !m.BGPRange.IsNull() && !m.BGPRange.IsUnknown():
 		s.Router.BGP = &apiBGP{Enabled: false} // was enabled: disable, keeping its settings
 	}
@@ -874,9 +886,10 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		}
 		m.WGHostPort, m.WGSubnet, m.WGPublicKey = types.Int64Null(), types.StringNull(), types.StringNull()
 	}
-	m.BGP, m.BGPRange = types.BoolValue(false), types.StringNull()
+	m.BGP, m.BGPRange, m.BGPBFD = types.BoolValue(false), types.StringNull(), types.BoolValue(false)
 	if b := g.Spec.Router.BGP; b != nil {
 		m.BGP = types.BoolValue(b.Enabled)
+		m.BGPBFD = types.BoolValue(b.BFD != nil && b.BFD.Enabled)
 		for _, r := range b.AnnounceRanges {
 			if r.Owner == nil || *r.Owner == "" {
 				m.BGPRange = types.StringValue(r.Prefix)

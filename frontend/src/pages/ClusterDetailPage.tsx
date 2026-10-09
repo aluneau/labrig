@@ -215,6 +215,8 @@ export const ClusterDetailPage: React.FC = () => {
   const busy = cluster.task_running;
   const isOpenShift = cluster.type === 'openshift';
   const os = cluster.spec?.openshift || {};
+  // tabs: OpenShift, and kubeadm clusters in a lab group (MetalLB lab + topology)
+  const tabbed = isOpenShift || (cluster.type === 'kubeadm' && !!cluster.group_id);
 
   return (
     <>
@@ -262,12 +264,12 @@ export const ClusterDetailPage: React.FC = () => {
         </Flex>
       </PageSection>
 
-      {isOpenShift && (
+      {tabbed && (
         <PageSection type="tabs" variant="light" padding={{ default: 'noPadding' }}>
           <Tabs activeKey={tab} onSelect={(_e, k) => setParams(k === 'overview' ? {} : { tab: String(k) }, { replace: true })}
             usePageInsets aria-label="Cluster sections">
             <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
-            <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" />
+            {isOpenShift ? <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" /> : null}
             <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" />
             {cluster.group_id ? <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>} id="os-tab-topology" /> : null}
           </Tabs>
@@ -275,21 +277,21 @@ export const ClusterDetailPage: React.FC = () => {
       )}
 
       <PageSection>
-        {isOpenShift && tab !== 'overview' && (error || loadError) && (
+        {tabbed && tab !== 'overview' && (error || loadError) && (
           <Alert variant="danger" isInline title={error || loadError} style={{ marginBottom: 16 }}
             actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
         )}
         {isOpenShift && tab === 'operators' && (
           <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
         )}
-        {isOpenShift && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
-        {isOpenShift && tab === 'topology' && cluster.group_id && (
+        {tabbed && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
+        {tabbed && tab === 'topology' && cluster.group_id && (
           <Card><CardBody>
             <LabTopology groupId={cluster.group_id} focusCluster={cluster.name}
               refreshKey={`${cluster.updated_at}|${cluster.nodes.map((n) => n.state).join(',')}`} />
           </CardBody></Card>
         )}
-        {(!isOpenShift || tab === 'overview') && (
+        {(!tabbed || tab === 'overview') && (
         <Stack hasGutter>
           {(error || loadError) && (
             <StackItem>

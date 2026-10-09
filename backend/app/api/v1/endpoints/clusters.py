@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
+from app.schemas.openshift import AddonRequest, MetalLBOptions, MetalLBScenario
 from app.services.cluster_service import cluster_service
 
 router = APIRouter()
@@ -79,6 +80,33 @@ def get_kubeconfig(cluster_id: int, db: Session = Depends(get_db)):
 def kubectl(cluster_id: int, view: Literal["nodes", "pods"], db: Session = Depends(get_db)):
     """Output of `kubectl get nodes|pods` run on the first control plane (through the guest agent)"""
     return _bad_request(cluster_service.kubectl, db, _get(db, cluster_id), view)
+
+
+@router.get("/{cluster_id}/metallb", response_model=MetalLBScenario)
+def metallb(cluster_id: int, db: Session = Depends(get_db)):
+    """MetalLB lab (OpenShift add-on or kubeadm): pool, service IP, announcing node / BGP next hops, checks"""
+    cluster = _get(db, cluster_id)
+    if cluster.type == "openshift":
+        from app.services.openshift_installer import openshift_installer
+        return _bad_request(openshift_installer.metallb_scenario, db, cluster)
+    if cluster.type != "kubeadm":
+        raise HTTPException(status_code=400, detail=f"MetalLB is managed for kubeadm and OpenShift clusters, not {cluster.type}")
+    from app.services import kubeadm_metallb
+    return _bad_request(kubeadm_metallb.scenario, db, cluster)
+
+
+@router.put("/{cluster_id}/metallb", response_model=Task)
+def set_metallb(cluster_id: int, data: MetalLBOptions, db: Session = Depends(get_db)):
+    """Enable MetalLB, switch l2 <-> bgp, BFD, deploy / remove the demo (kubeadm), or disable it (kubeadm).
+    OpenShift: same as POST /clusters/{id}/openshift/addons {kind: metallb} (can't be disabled)."""
+    cluster = _get(db, cluster_id)
+    if cluster.type == "openshift":
+        if not data.enabled:
+            raise HTTPException(status_code=400, detail="MetalLB can't be removed from an OpenShift cluster")
+        from app.services.openshift_installer import openshift_installer
+        return _bad_request(openshift_installer.add_addon, db, cluster, AddonRequest(kind="metallb", metallb=data))
+    from app.services import kubeadm_metallb
+    return _bad_request(kubeadm_metallb.set_options, db, cluster, data)
 
 
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers

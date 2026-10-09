@@ -21,7 +21,7 @@ import {
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { MinusCircleIcon, PlusCircleIcon } from '@patternfly/react-icons';
-import { BGPAnnounceRange, BGPNeighbor, BGPStatus, GroupDetail } from '../../types';
+import { BFDSpec, BGPAnnounceRange, BGPNeighbor, BGPStatus, GroupDetail } from '../../types';
 import { groupApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 
@@ -34,23 +34,39 @@ const stateLabel = (state: string) => (
   <Label isCompact color={state === 'Established' ? 'green' : state === 'Active' || state === 'Connect' ? 'orange' : 'grey'}>{state}</Label>
 );
 
-/** FRR config for a lab machine announcing an address (Debian / Ubuntu / EL) */
-export function memberFrrConfig(routerIp: string, routerAsn: number, peerAsn: number, prefix: string): string {
+const bfdLabel = (status?: string | null) => (status
+  ? <Label isCompact color={status === 'up' ? 'green' : status === 'init' ? 'orange' : 'red'}>{status}</Label> : <>—</>);
+
+export const DEFAULT_BFD: BFDSpec = { enabled: true, detect_multiplier: 3, receive_interval: 200, transmit_interval: 200 };
+
+/** FRR config for a lab machine announcing an address (Debian / Ubuntu / EL), with BFD when the router has it */
+export function memberFrrConfig(routerIp: string, routerAsn: number, peerAsn: number, prefix: string, bfd?: BFDSpec | null): string {
   const ip = prefix.split('/')[0];
+  const on = !!bfd?.enabled;
   return [
     '# on the lab machine (as root): FRR announces an address of the range to the router',
     'apt-get install -y frr || dnf install -y frr',
-    "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && systemctl restart frr",
+    on ? "sed -i 's/^bgpd=no/bgpd=yes/; s/^bfdd=no/bfdd=yes/' /etc/frr/daemons && systemctl restart frr"
+      : "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && systemctl restart frr",
     `ip address add ${ip}/32 dev lo   # the address this machine serves`,
-    `vtysh -c 'configure terminal' -c 'router bgp ${peerAsn}' -c 'no bgp ebgp-requires-policy' \\`,
-    `  -c 'neighbor ${routerIp} remote-as ${routerAsn}' -c 'address-family ipv4 unicast' -c 'network ${ip}/32' \\`,
-    "  -c 'end' -c 'write memory'",
+    `vtysh -c 'configure terminal' \\`,
+    ...(on ? [`  -c 'bfd' -c 'profile lab' -c 'detect-multiplier ${bfd!.detect_multiplier}' -c 'receive-interval ${bfd!.receive_interval}' \\`,
+      `  -c 'transmit-interval ${bfd!.transmit_interval}' -c 'exit' -c 'exit' \\`] : []),
+    `  -c 'router bgp ${peerAsn}' -c 'no bgp ebgp-requires-policy' -c 'neighbor ${routerIp} remote-as ${routerAsn}' \\`,
+    ...(on ? [`  -c 'neighbor ${routerIp} bfd profile lab' \\`] : []),
+    `  -c 'address-family ipv4 unicast' -c 'network ${ip}/32' -c 'end' -c 'write memory'`,
   ].join('\n');
 }
 
 /** Upstream MetalLB (kubeadm / k3s clusters in the group): BGP mode towards the router */
-export function metallbBgpManifests(routerIp: string, routerAsn: number, peerAsn: number, prefix: string): string {
-  return `apiVersion: metallb.io/v1beta1
+export function metallbBgpManifests(routerIp: string, routerAsn: number, peerAsn: number, prefix: string, bfd?: BFDSpec | null): string {
+  const profile = bfd?.enabled ? `apiVersion: metallb.io/v1beta1
+kind: BFDProfile
+metadata: {name: lab-bfd, namespace: metallb-system}
+spec: {detectMultiplier: ${bfd.detect_multiplier}, receiveInterval: ${bfd.receive_interval}, transmitInterval: ${bfd.transmit_interval}}
+---
+` : '';
+  return `${profile}apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata: {name: lab-pool, namespace: metallb-system}
 spec: {addresses: ["${prefix}"], avoidBuggyIPs: true}
@@ -58,7 +74,7 @@ spec: {addresses: ["${prefix}"], avoidBuggyIPs: true}
 apiVersion: metallb.io/v1beta2
 kind: BGPPeer
 metadata: {name: lab-router, namespace: metallb-system}
-spec: {myASN: ${peerAsn}, peerASN: ${routerAsn}, peerAddress: ${routerIp}}
+spec: {myASN: ${peerAsn}, peerASN: ${routerAsn}, peerAddress: ${routerIp}${bfd?.enabled ? ', bfdProfile: lab-bfd' : ''}}
 ---
 apiVersion: metallb.io/v1beta1
 kind: BGPAdvertisement
@@ -78,6 +94,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
   const [listen, setListen] = useState(true);
   const [ranges, setRanges] = useState<BGPAnnounceRange[]>([]);
   const [neighbors, setNeighbors] = useState<BGPNeighbor[]>([]);
+  const [bfd, setBfd] = useState<BFDSpec>({ ...DEFAULT_BFD, enabled: false });
   const [dirty, setDirty] = useState(false);
 
   const fill = (s: BGPStatus) => {
@@ -87,6 +104,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
     setListen(s.configured ? s.listen : true);
     setRanges(s.announce_ranges.filter((r) => !r.owner));
     setNeighbors(s.neighbors.filter((n) => !n.owner));
+    setBfd(s.bfd ? { ...s.bfd } : { ...DEFAULT_BFD, enabled: false });
     setDirty(false);
   };
 
@@ -116,6 +134,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
         listen,
         announce_ranges: ranges.filter((r) => r.prefix.trim()),
         neighbors: neighbors.filter((n) => n.ip.trim()),
+        bfd,
       } : { enabled: true };
       const s = await groupApi.setBgp(group.id, body);
       setStatus(s);
@@ -135,6 +154,13 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
   const sample = firstRange ? `${firstRange.split('/')[0].replace(/\d+$/, (n) => String(Number(n) + 1))}/32` : '10.45.0.1/32';
   const rangeBad = ranges.some((r) => r.prefix.trim() && !CIDR_RE.test(r.prefix.trim()));
   const neighborBad = neighbors.some((n) => (n.ip.trim() && !IP_RE.test(n.ip.trim())) || !(n.asn > 0));
+  const bfdBad = bfd.enabled && !(bfd.detect_multiplier >= 2 && bfd.detect_multiplier <= 255
+    && bfd.receive_interval >= 10 && bfd.transmit_interval >= 10);
+  const bfdOn = !!status.bfd?.enabled;
+  const bfdNum = (key: 'detect_multiplier' | 'receive_interval' | 'transmit_interval', label: string, id: string) => (
+    <FlexItem><TextInput id={id} type="number" aria-label={label} value={String(bfd[key])} isDisabled={!bfd.enabled}
+      style={{ maxWidth: 110 }} onChange={(_e, v) => { setBfd({ ...bfd, [key]: Number(v) }); setDirty(true); }} /></FlexItem>
+  );
 
   const intro = (
     <div style={{ ...muted, marginBottom: 12, maxWidth: 900 }}>
@@ -167,7 +193,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
         Sessions {status.frr_version && <span style={muted}>({status.frr_version})</span>}
       </Title>
       <Table aria-label="BGP sessions" variant="compact" id="bgp-sessions">
-        <Thead><Tr><Th>Peer</Th><Th>Machine</Th><Th>AS</Th><Th>State</Th><Th>Up for</Th><Th>Prefixes received</Th></Tr></Thead>
+        <Thead><Tr><Th>Peer</Th><Th>Machine</Th><Th>AS</Th><Th>State</Th>{bfdOn && <Th>BFD</Th>}<Th>Up for</Th><Th>Prefixes received</Th></Tr></Thead>
         <Tbody>
           {status.sessions.map((s) => (
             <Tr key={`${s.afi}-${s.peer}`}>
@@ -175,17 +201,46 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
               <Td>{s.name || s.description || '—'}</Td>
               <Td>{s.remote_as ?? '—'}</Td>
               <Td>{stateLabel(s.state)}</Td>
+              {bfdOn && <Td>{bfdLabel(s.bfd_status)}</Td>}
               <Td>{s.established ? s.uptime : '—'}</Td>
               <Td>{s.prefixes_received ?? 0}</Td>
             </Tr>
           ))}
           {!status.sessions.length && (
-            <Tr><Td colSpan={6}>{status.router_running
+            <Tr><Td colSpan={bfdOn ? 7 : 6}>{status.router_running
               ? `No session yet: machines of ${status.listen_range || group.cidr} can connect to ${routerIp}${status.router_ip6 ? ` (IPv6: ${status.listen_range6} to ${status.router_ip6})` : ''} (AS ${status.asn}).`
               : 'The router is stopped.'}</Td></Tr>
           )}
         </Tbody>
       </Table>
+
+      {bfdOn && (
+        <>
+          <Title headingLevel="h3" size="md" style={{ margin: '20px 0 8px' }}>
+            BFD sessions <span style={muted}>(a silent peer is declared down after {status.bfd!.detect_multiplier} × {status.bfd!.receive_interval} ms
+            instead of the 30 s BGP hold time)</span>
+          </Title>
+          <Table aria-label="BFD sessions" variant="compact" id="bgp-bfd-peers">
+            <Thead><Tr><Th>Peer</Th><Th>Machine</Th><Th>Status</Th><Th>Detection time</Th><Th>Intervals (rx / tx, ms)</Th><Th>Last down</Th></Tr></Thead>
+            <Tbody>
+              {(status.bfd_peers || []).map((p) => (
+                <Tr key={p.peer}>
+                  <Td>{p.peer}</Td>
+                  <Td>{p.name || '—'}</Td>
+                  <Td>{bfdLabel(p.status)}</Td>
+                  <Td>{p.detect_ms != null ? `${p.detect_ms} ms` : '—'}</Td>
+                  <Td>{p.receive_interval ?? '—'} / {p.transmit_interval ?? '—'}
+                    {p.remote_receive_interval != null && <span style={muted}> (peer {p.remote_receive_interval} / {p.remote_transmit_interval})</span>}</Td>
+                  <Td>{p.diagnostic || '—'}</Td>
+                </Tr>
+              ))}
+              {!(status.bfd_peers || []).length && (
+                <Tr><Td colSpan={6}>No BFD session: peers must run BFD too (FRR <code>neighbor {routerIp} bfd</code>, MetalLB BFDProfile).</Td></Tr>
+              )}
+            </Tbody>
+          </Table>
+        </>
+      )}
 
       <Title headingLevel="h3" size="md" style={{ margin: '20px 0 8px' }}>Routes learned (router's routing table)</Title>
       <Table aria-label="BGP routes" variant="compact" id="bgp-routes">
@@ -206,13 +261,13 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
       <ExpandableSection toggleText="Make a lab machine announce an address" style={{ marginTop: 16 }} id="bgp-howto">
         <div style={{ ...muted, marginBottom: 6 }}>On a member (Debian / AlmaLinux), as root:</div>
         <ClipboardCopy isCode isReadOnly variant="expansion" hoverTip="Copy" clickTip="Copied">
-          {memberFrrConfig(routerIp, status.asn || 64512, status.peer_asn || 64513, sample)}
+          {memberFrrConfig(routerIp, status.asn || 64512, status.peer_asn || 64513, sample, status.bfd)}
         </ClipboardCopy>
         {firstRange && (
           <>
             <div style={{ ...muted, margin: '12px 0 6px' }}>MetalLB (upstream) in a kubeadm / k3s cluster of this group, BGP mode:</div>
             <ClipboardCopy isCode isReadOnly variant="expansion" hoverTip="Copy" clickTip="Copied">
-              {metallbBgpManifests(routerIp, status.asn || 64512, status.peer_asn || 64513, firstRange)}
+              {metallbBgpManifests(routerIp, status.asn || 64512, status.peer_asn || 64513, firstRange, status.bfd)}
             </ClipboardCopy>
           </>
         )}
@@ -267,8 +322,23 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
             Only for a machine with another AS than the one above (the listen range covers the rest).
           </HelperTextItem></HelperText></FormHelperText>
         </FormGroup>
+        <FormGroup label="BFD" fieldId="bgp-bfd">
+          <Checkbox id="bgp-bfd" isChecked={bfd.enabled} onChange={(_e, v) => { setBfd({ ...bfd, enabled: v }); setDirty(true); }}
+            label="Fast failover: detect a dead peer in under a second (BFD on every session)" />
+          <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginTop: 8 }}>
+            <FlexItem>Multiplier</FlexItem>{bfdNum('detect_multiplier', 'Detect multiplier', 'bgp-bfd-mult')}
+            <FlexItem>rx ms</FlexItem>{bfdNum('receive_interval', 'Receive interval (ms)', 'bgp-bfd-rx')}
+            <FlexItem>tx ms</FlexItem>{bfdNum('transmit_interval', 'Transmit interval (ms)', 'bgp-bfd-tx')}
+          </Flex>
+          <FormHelperText><HelperText><HelperTextItem>
+            Without BFD the router keeps the routes of a machine that died until the BGP hold time (30 s) expires. With BFD both
+            sides exchange small packets every interval; after multiplier missed packets the session and its routes go
+            ({bfd.detect_multiplier} × {Math.max(bfd.receive_interval, bfd.transmit_interval)} ms = {bfd.detect_multiplier * Math.max(bfd.receive_interval, bfd.transmit_interval)} ms).
+            Peers must enable BFD too; MetalLB clusters get a BFDProfile when their configuration is applied.
+          </HelperTextItem></HelperText></FormHelperText>
+        </FormGroup>
         <Flex>
-          <FlexItem><Button id="bgp-save" type="submit" isDisabled={busy || !dirty || rangeBad || neighborBad} isLoading={busy}>Apply</Button></FlexItem>
+          <FlexItem><Button id="bgp-save" type="submit" isDisabled={busy || !dirty || rangeBad || neighborBad || bfdBad} isLoading={busy}>Apply</Button></FlexItem>
           <FlexItem><Button variant="secondary" isDanger id="bgp-disable" isDisabled={busy || owned.length > 0} onClick={() => save(false)}>
             Disable BGP</Button></FlexItem>
           {owned.length > 0 && <FlexItem style={muted}>Used by {Array.from(new Set(owned.map((r) => r.owner))).join(', ')}</FlexItem>}

@@ -26,6 +26,7 @@ HAPROXY_CONF = "/etc/haproxy/haproxy.cfg"
 WG_CONF = "/etc/wireguard/wg0.conf"
 WG_KEY = "/etc/wireguard/private.key"
 FRR_CONF = "/etc/frr/frr.conf"
+BFD_PROFILE = "vmm"
 PRUNE_LEASES = "/usr/local/libexec/vmm-prune-leases.sh"
 # Run while dnsmasq is stopped: drop the leases whose address is now reserved for another MAC (e.g. a
 # cluster node re-created with a new MAC on the same address). Otherwise dnsmasq keeps that address
@@ -297,6 +298,21 @@ class ELRouterBackend(RouterBackend):
         lines += ["!", "route-map VMM-IN permit 10", " match ip address prefix-list VMM-ANNOUNCE", "exit", "!",
                   "route-map VMM-OUT deny 10", "exit", "!"]
         lines += v6.frr_prefix_lists(spec, [r.prefix for r in bgp.announce_ranges])
+        bfd = bgp.bfd_on()
+        if bfd is not None:
+            # one profile for every session; peers negotiate (the slower of both sides wins)
+            lines += ["bfd", f" profile {BFD_PROFILE}", f"  detect-multiplier {bfd.detect_multiplier}",
+                      f"  receive-interval {bfd.receive_interval}", f"  transmit-interval {bfd.transmit_interval}",
+                      " exit"]
+            # Static BFD sessions with every known lab address: a dynamic (listen range) peer only gets one from
+            # bgpd once its BGP session is up, but FRR >= 10 keeps a `neighbor X bfd` session Idle until BFD is up:
+            # a rebooted member would never come back
+            known = sorted({m.ip for m in spec.members if m.ip} | {r.ip for r in spec.reservations}
+                           | {h.ip for h in spec.dhcp_hosts} | {n.ip for n in bgp.neighbors if ":" not in n.ip},
+                           key=ipaddress.IPv4Address)
+            for ip in known:
+                lines += [f" peer {ip} local-address {spec.router.ip}", f"  profile {BFD_PROFILE}", " exit"]
+            lines += ["exit", "!"]
         remote = str(bgp.peer_asn) if bgp.peer_asn else "external"
         lines += [f"router bgp {bgp.asn}",
                   f" bgp router-id {spec.router.ip}",
@@ -321,6 +337,9 @@ class ELRouterBackend(RouterBackend):
             if n.name or n.owner:
                 lines.append(f" neighbor {n.ip} description {n.name or n.owner}")
             (peers6 if ":" in n.ip else peers).append(n.ip)
+        if bfd is not None:
+            # BFD down = BGP session down at once: the peer's routes are withdrawn without waiting for the hold time
+            lines += [f" neighbor {p} bfd profile {BFD_PROFILE}" for p in peers]
         lines += [" !", " address-family ipv4 unicast", f"  maximum-paths {bgp.maximum_paths}",
                   f"  maximum-paths ibgp {bgp.maximum_paths}"]
         for p in peers:
@@ -343,6 +362,14 @@ class ELRouterBackend(RouterBackend):
                 " && sysctl -qw net.ipv4.fib_multipath_hash_policy=1"
                 " && if grep -q '^bgpd=yes' /etc/frr/daemons; then fresh=0;"
                 " else sed -i 's/^bgpd=.*/bgpd=yes/' /etc/frr/daemons && fresh=1; fi"
+                # bfdd (BFD) is started once and then kept (a daemon newly on needs a restart, reload doesn't
+                # start it). Turning BFD on or off restarts FRR too: FRR 8.5's frr-reload mangles the config when
+                # the `bfd` block comes or goes (it dropped the prefix-list / route-maps: no session at all)
+                + (" && if ! grep -q '^bfdd=yes' /etc/frr/daemons; then"
+                   " sed -i 's/^bfdd=.*/bfdd=yes/' /etc/frr/daemons && fresh=1; fi" if self._bgp(spec).bfd_on() else "")
+                # any change of the bfd block (on/off, timers, static peers) restarts FRR
+                + f" && {{ sum=$(sed -n '/^bfd$/,/^exit$/p' {FRR_CONF} | md5sum | cut -c1-32);"
+                " [ \"$sum\" = \"$(cat /etc/frr/.vmm-bfd-sum 2>/dev/null)\" ] || { fresh=1; echo \"$sum\" > /etc/frr/.vmm-bfd-sum; }; }" +
                 f" && chown frr:frr {FRR_CONF} && chmod 640 {FRR_CONF}"
                 " && { restorecon -R /etc/frr 2>/dev/null; true; }"
                 " && systemctl enable -q frr"

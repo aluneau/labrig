@@ -332,6 +332,8 @@ class ClusterService:
             return openshift_installer.create(db, data)
         if data.openshift is not None:
             raise ValueError("'openshift' options are for type openshift")
+        from app.services import kubeadm_metallb
+        kubeadm_metallb.check_create(data)
         driver = get_driver(data.type)  # rejects unsupported types
         if driver.needs_group and data.network:
             raise ValueError(f"{data.type} clusters live in a lab group (router DNS + API load balancer): "
@@ -575,7 +577,11 @@ class ClusterService:
 
             self._check(task, cluster, db, 95, "Fetching kubeconfig")
             self._fetch_kubeconfig(db, cluster)
-            self._set_status(db, cluster, "ready", None)
+            message = None
+            if cluster.type == "kubeadm":
+                from app.services import kubeadm_metallb
+                message = kubeadm_metallb.initial(db, task, cluster)  # a failure leaves the cluster usable
+            self._set_status(db, cluster, "ready", message)
             return {**result, "api_endpoint": f"https://{cluster.api_ip}:{self._api_port(cluster)}",
                     "version": cluster.version}
 

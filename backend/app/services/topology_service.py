@@ -20,14 +20,18 @@ logger = logging.getLogger(__name__)
 
 
 def _metallb(cluster: Cluster) -> Dict[str, Any]:
-    if cluster.type != "openshift":
+    if cluster.type not in ("openshift", "kubeadm"):
         return {}
-    return ((cluster.spec or {}).get("openshift") or {}).get("metallb") or {}
+    return ((cluster.spec or {}).get(cluster.type) or {}).get("metallb") or {}
 
 
 def _announcing_node(cluster: Cluster) -> Optional[str]:
-    """MetalLB L2: the node whose speaker answers ARP for the demo service (oc on the host)"""
+    """MetalLB L2: the node whose speaker answers ARP for the demo service (oc on the host, kubectl on a
+    kubeadm control plane)"""
     try:
+        if cluster.type == "kubeadm":
+            from app.services import kubeadm_metallb
+            return kubeadm_metallb.announcing_node(cluster)
         from app.services.openshift_addons import AddonRunner
         import time
         return AddonRunner(cluster.name, cluster.version, time.sleep, lambda m: None).announcing_node()
@@ -90,6 +94,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         errors.append(bgp["router_error"])
 
     sessions = {s["peer"]: s for s in bgp.get("sessions") or []}
+    bfd_peers = {p["peer"]: p["status"] for p in bgp.get("bfd_peers") or []}
     routes = bgp.get("routes") or []
 
     machines: List[Dict[str, Any]] = []
@@ -101,7 +106,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         m = {"kind": kind, "name": name, "vm_name": vm_name, "vm_id": vm_ids.get(vm_name), "role": role,
              "cluster": cluster, "ip": ip, "ip6": ip6, "mac": mac, "fqdn": fqdn or f"{name}.{spec.domain}",
              "state": (states.get(vm_name) or {}).get("state", "missing"),
-             "bgp_state": s["state"] if s else None,
+             "bgp_state": s["state"] if s else None, "bfd_state": bfd_peers.get(ip or ""),
              "bgp_prefixes": [r["prefix"] for r in routes if any(h["ip"] in (ip, ip6) for h in r["nexthops"] if h["ip"])],
              "l2_announces": []}
         machines.append(m)
@@ -141,7 +146,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             "apps_domain": f"apps.{zone}" if c.type == "openshift" else None,
             "load_balancer_ports": sorted(lb_ports), "metallb_enabled": bool(mlb.get("enabled")),
             "metallb_mode": mode, "metallb_pool": mlb.get("pool"), "service_ip": ip,
-            "service_hostname": f"hello.{spec.domain}" if ip else None,
+            "service_hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}" if ip else None,
         })
         if not ip:
             continue
@@ -155,8 +160,8 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             via = [target["name"]] if target else []
             if target:
                 target["l2_announces"].append(ip)
-        vips.append({"address": ip, "kind": f"metallb-{mode}", "name": "hello",
-                     "hostname": f"hello.{spec.domain}", "cluster": c.name, "via": via})
+        vips.append({"address": ip, "kind": f"metallb-{mode}", "name": mlb.get("hostname") or "hello",
+                     "hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}", "cluster": c.name, "via": via})
     for r in routes:
         if r["prefix"] in covered:
             continue

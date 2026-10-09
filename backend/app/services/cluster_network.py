@@ -421,9 +421,10 @@ class GroupClusterNetwork(ClusterNetwork):
             used.append(ip.IPv4Network(wg.subnet))
         return bgp_service.free_range(used)
 
-    def set_bgp_range(self, name: str, prefix: str) -> None:
-        """Enable BGP on the router (if needed) and accept routes for `prefix` from the group network"""
-        from app.schemas.group import BGPAnnounceRange, BGPSpec
+    def set_bgp_range(self, name: str, prefix: str, bfd: bool = False) -> None:
+        """Enable BGP on the router (if needed) and accept routes for `prefix` from the group network;
+        bfd: BFD on too (default timers) if it isn't"""
+        from app.schemas.group import BFDSpec, BGPAnnounceRange, BGPSpec
 
         def op(spec):
             bgp = spec.router.bgp
@@ -431,8 +432,20 @@ class GroupClusterNetwork(ClusterNetwork):
                 bgp = spec.router.bgp = BGPSpec()
             bgp.enabled = True
             bgp.listen = True
+            if bfd and bgp.bfd_on() is None:
+                bgp.bfd = BFDSpec()
             bgp.announce_ranges = [r for r in bgp.announce_ranges if not (r.owner == self.owner and r.name == name)]
             bgp.announce_ranges.append(BGPAnnounceRange(prefix=prefix, name=name, owner=self.owner))
+        self._ops.append(op)
+
+    def enable_bfd(self) -> None:
+        """BFD on the router's BGP sessions (kept when already on, with its timers)"""
+        from app.schemas.group import BFDSpec
+
+        def op(spec):
+            bgp = spec.router.bgp
+            if bgp is not None and bgp.bfd_on() is None:
+                bgp.bfd = BFDSpec()
         self._ops.append(op)
 
     def remove_bgp_range(self, name: Optional[str] = None) -> None:

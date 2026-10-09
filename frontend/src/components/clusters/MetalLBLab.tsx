@@ -194,7 +194,7 @@ const Diagram: React.FC<{ cluster: Cluster; s: MetalLBScenario }> = ({ cluster, 
                 stroke={C.accent} strokeWidth={2} strokeDasharray="5 4" markerEnd="url(#mlb-arrow-on)" />
             ))}
             <text x={W / 2} y={pnY + 20} textAnchor="middle" fontSize={12} fill={C.accent}>
-              service → hello pods over the pod network (OVN-Kubernetes)
+              service → hello pods over the pod network ({cluster.type === 'openshift' ? 'OVN-Kubernetes' : 'Flannel'})
             </text>
           </g>
         )}
@@ -301,7 +301,10 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
   const [s, setS] = useState<MetalLBScenario | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stopNode, setStopNode] = useState<ClusterNode | null>(null);
-  const opts = cluster.spec?.openshift?.metallb || {};
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const isOpenShift = cluster.type === 'openshift';
+  const opts = (isOpenShift ? cluster.spec?.openshift?.metallb : cluster.spec?.kubeadm?.metallb) || {};
+  const tool = isOpenShift ? 'oc' : 'kubectl';
 
   const load = useCallback(async () => {
     try {
@@ -318,10 +321,17 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
     return () => clearInterval(timer);
   }, [load, cluster.updated_at, cluster.task_running]);
 
-  const addon = async (kind: 'metallb' | 'metallb-demo', mode?: 'l2' | 'bgp') => {
+  const addon = async (kind: 'metallb' | 'metallb-demo' | 'remove', mode?: 'l2' | 'bgp', bfd?: boolean) => {
+    const wanted = {
+      enabled: kind !== 'remove', mode: mode || (s?.mode === 'bgp' ? 'bgp' as const : 'l2' as const), addresses: opts.addresses || 16,
+      demo: true, bfd: bfd ?? !!(opts.bfd || s?.bfd),
+    };
     try {
-      await clusterApi.addAddon(cluster.id, kind === 'metallb'
-        ? { kind, metallb: { enabled: true, mode: mode || (s?.mode === 'bgp' ? 'bgp' : 'l2'), addresses: 16, demo: true } } : { kind });
+      if (isOpenShift) {
+        await clusterApi.addAddon(cluster.id, kind === 'metallb' ? { kind, metallb: wanted } : { kind: 'metallb-demo' });
+      } else {
+        await clusterApi.setMetallb(cluster.id, wanted);  // kubeadm: the demo comes with demo: true
+      }
       setError(null);
     } catch (err) {
       setError(errorText(err));
@@ -340,14 +350,16 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
       <EmptyState id="mlb-disabled">
         <EmptyStateHeader titleText="MetalLB is not enabled" headingLevel="h2" />
         <EmptyStateBody>
-          The MetalLB L2 lab installs MetalLB with an address pool from the lab group network, deploys a hello
-          service of type LoadBalancer reachable as hello.{cluster.domain}, and shows which node announces it.
+          The MetalLB lab installs MetalLB ({isOpenShift ? 'operator' : 'upstream, FRR mode'}) with an address pool from the lab
+          group network (L2) or announced to the group router over BGP, deploys a hello service of type LoadBalancer reachable as
+          hello.{cluster.domain}, and shows which node announces it.
           {error && <Alert variant="danger" isInline isPlain title={error} style={{ marginTop: 8 }} />}
         </EmptyStateBody>
         <EmptyStateFooter>
           <EmptyStateActions>
             <Button onClick={() => addon('metallb', 'l2')} isDisabled={!usable} id="mlb-enable">Enable MetalLB (L2) + demo</Button>
             <Button variant="secondary" onClick={() => addon('metallb', 'bgp')} isDisabled={!usable} id="mlb-enable-bgp">Enable MetalLB (BGP) + demo</Button>
+            <Button variant="secondary" onClick={() => addon('metallb', 'bgp', true)} isDisabled={!usable} id="mlb-enable-bgp-bfd">BGP + BFD + demo</Button>
           </EmptyStateActions>
         </EmptyStateFooter>
       </EmptyState>
@@ -365,6 +377,9 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
   return (
     <Stack hasGutter>
       {error && <StackItem><Alert variant="warning" isInline isPlain title={error} /></StackItem>}
+      {s.state === 'error' && s.message && (
+        <StackItem><Alert variant="danger" isInline title="The last MetalLB configuration failed" id="mlb-error">{s.message}</Alert></StackItem>
+      )}
       {!demoDeployed && (
         <StackItem>
           <Alert variant="info" isInline title={opts.demo === false ? 'The demo is not deployed' : 'The demo service has no address yet'}
@@ -389,9 +404,26 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                 {cluster.group_id && <> The <Link to={`/clusters/${cluster.id}?tab=topology`}>Topology</Link> tab follows a packet step by step.</>}
               </FlexItem>
               <FlexItem align={{ default: 'alignRight' }}>
-                <Button variant="secondary" id="mlb-switch-mode" isDisabled={!usable} onClick={() => addon('metallb', bgp ? 'l2' : 'bgp')}>
-                  Switch to {bgp ? 'L2' : 'BGP'} mode
-                </Button>
+                <Flex spaceItems={{ default: 'spaceItemsSm' }}>
+                  {bgp && (
+                    <FlexItem>
+                      <Button variant="secondary" id="mlb-bfd" isDisabled={!usable} onClick={() => addon('metallb', 'bgp', true)}
+                        title="Turns BFD on on the router (if needed) and applies the configuration again with a BFDProfile">
+                        {s.bfd ? 'Re-apply (BFD profile)' : 'Turn BFD on'}
+                      </Button>
+                    </FlexItem>
+                  )}
+                  <FlexItem>
+                    <Button variant="secondary" id="mlb-switch-mode" isDisabled={!usable} onClick={() => addon('metallb', bgp ? 'l2' : 'bgp')}>
+                      Switch to {bgp ? 'L2' : 'BGP'} mode
+                    </Button>
+                  </FlexItem>
+                  {!isOpenShift && (
+                    <FlexItem>
+                      <Button variant="link" isDanger id="mlb-remove" isDisabled={!usable} onClick={() => setConfirmRemove(true)}>Remove MetalLB</Button>
+                    </FlexItem>
+                  )}
+                </Flex>
               </FlexItem>
             </Flex>
           </CardBody>
@@ -412,11 +444,12 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     </StackItem>
                     <StackItem>
                       The router puts one route per node in its table and spreads connections over them (ECMP): every node
-                      takes a share of the traffic, then kube-proxy / OVN forwards it to a hello pod.
+                      takes a share of the traffic, then {isOpenShift ? 'kube-proxy / OVN' : 'kube-proxy'} forwards it to a hello pod.
                     </StackItem>
                     <StackItem>
-                      If a node stops, its BGP session closes (or times out after 30 s) and the router drops its route: traffic
-                      goes to the remaining nodes. Your laptop reaches the pool because it is in the WireGuard config (download it
+                      If a node stops, its BGP session closes ({s.bfd ? 'BFD notices a silent node in well under a second'
+                        : 'or times out after the 30 s hold time; BFD would notice in under a second'}) and the router drops its route:
+                      traffic goes to the remaining nodes. Your laptop reaches the pool because it is in the WireGuard config (download it
                       again after switching modes).
                     </StackItem>
                   </Stack>
@@ -429,7 +462,7 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     so the router learns <em>service IP → that node's MAC</em>.
                   </StackItem>
                   <StackItem>
-                    All traffic for the service enters through the announcing node; kube-proxy / OVN then forwards it
+                    All traffic for the service enters through the announcing node; {isOpenShift ? 'kube-proxy / OVN' : 'kube-proxy'} then forwards it
                     to a hello pod, on that node or another one. L2 mode is failover, not load balancing between nodes.
                   </StackItem>
                   <StackItem>
@@ -466,8 +499,14 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     <DescriptionListGroup>
                       <DescriptionListTerm>BGP sessions</DescriptionListTerm>
                       <DescriptionListDescription>
-                        {(s.bgp_peers || []).map((p) => `${p.node.split('.')[0]}: ${p.state}`).join(', ') || '—'}
+                        {(s.bgp_peers || []).map((p) => `${p.node.split('.')[0]}: ${p.state}${p.bfd ? ` (BFD ${p.bfd})` : ''}`).join(', ') || '—'}
                       </DescriptionListDescription>
+                    </DescriptionListGroup>
+                  )}
+                  {bgp && (
+                    <DescriptionListGroup>
+                      <DescriptionListTerm>BFD</DescriptionListTerm>
+                      <DescriptionListDescription id="mlb-bfd-state">{s.bfd ? 'on (fast failover)' : 'off (failover after the 30 s hold time)'}</DescriptionListDescription>
                     </DescriptionListGroup>
                   )}
                   <DescriptionListGroup>
@@ -506,14 +545,15 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                 {bgp ? (
                   <>
                     <Command title="BGP sessions and routes on the router (router console, as root):" cmd="vtysh -c 'show bgp summary' -c 'show ip route bgp'" />
-                    <Command title="The service and its external IP:" cmd="oc get svc -n metallb-demo -o wide" />
-                    <Command title="Pool, peer and advertisement:" cmd="oc -n metallb-system get ipaddresspools,bgppeers,bgpadvertisements" />
+                    {s.bfd && <Command title="BFD sessions on the router:" cmd="vtysh -c 'show bfd peers brief'" />}
+                    <Command title="The service and its external IP:" cmd={`${tool} get svc -n metallb-demo -o wide`} />
+                    <Command title="Pool, peer and advertisement:" cmd={`${tool} -n metallb-system get ipaddresspools,bgppeers,bgpadvertisements${s.bfd ? ',bfdprofiles' : ''}`} />
                   </>
                 ) : (
                   <>
-                    <Command title="Which node announces the service (speaker logs):" cmd="oc -n metallb-system logs ds/speaker -c speaker --since=10m | grep -i announc" />
-                    <Command title="The service and its external IP:" cmd="oc get svc -n metallb-demo -o wide" />
-                    <Command title="Pool and L2 advertisement:" cmd="oc -n metallb-system get ipaddresspools,l2advertisements" />
+                    <Command title="Which node announces the service (speaker logs):" cmd={`${tool} -n metallb-system logs ds/speaker -c speaker --since=10m | grep -i announc`} />
+                    <Command title="The service and its external IP:" cmd={`${tool} get svc -n metallb-demo -o wide`} />
+                    <Command title="Pool and L2 advertisement:" cmd={`${tool} -n metallb-system get ipaddresspools,l2advertisements`} />
                   </>
                 )}
               </CardBody>
@@ -541,8 +581,8 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                         </Button>
                       </StackItem>
                       <StackItem style={muted}>
-                        Start it again from the Nodes table (Overview tab) or the VMs page; OpenShift may need a few
-                        minutes to mark it Ready again.
+                        Start it again from the Nodes table (Overview tab) or the VMs page; {isOpenShift ? 'OpenShift' : 'Kubernetes'} may
+                        need a few minutes to mark it Ready again.
                       </StackItem>
                     </>
                   )}
@@ -552,6 +592,10 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
           </GridItem>
         </Grid>
       </StackItem>
+      <ConfirmModal title="Remove MetalLB?" isOpen={confirmRemove} confirmLabel="Remove"
+        onConfirm={() => addon('remove')} onClose={() => setConfirmRemove(false)}>
+        Deletes the demo, the MetalLB configuration and MetalLB itself, and gives the address pool back to the group.
+      </ConfirmModal>
       <ConfirmModal title={`Stop ${stopNode?.name}?`} isOpen={!!stopNode} confirmLabel="Stop"
         onConfirm={async () => {
           try {

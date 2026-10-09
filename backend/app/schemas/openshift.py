@@ -35,11 +35,15 @@ class MetalLBOptions(BaseModel):
     one node answers ARP for each service IP.
     mode "bgp": the pool is a /27 outside the group network (BGP_ANNOUNCE_POOL, recorded as a BGP
     announce range of the group router); every node peers with the router (AS 64513 -> 64512) and
-    announces the service IPs, the router spreads traffic over them (ECMP)."""
+    announces the service IPs, the router spreads traffic over them (ECMP).
+    bfd (bgp mode): turn BFD on on the group router (if it isn't) and give the BGPPeer a BFDProfile with the
+    router's timers: a dead node's routes are withdrawn in < 1 s instead of the 30 s hold time. The profile
+    follows the router's BFD setting whenever the configuration is applied (create, mode switch)."""
     enabled: bool = False
     mode: Literal["l2", "bgp"] = "l2"
     addresses: int = Field(16, ge=2, le=64)   # size of the L2 pool (BGP: always a /27)
     demo: bool = True
+    bfd: bool = False
     # assigned by the app: "10.43.5.230-10.43.5.245" (l2) or "10.45.0.0/27" (bgp)
     pool: Optional[str] = None
 
@@ -155,7 +159,10 @@ class MetalLBScenario(BaseModel):
     """State of the "MetalLB lab" scenario for the diagram + checks"""
     enabled: bool
     mode: str = "l2"
-    bgp_peers: List[Dict[str, Any]] = []      # bgp: [{node, ip, state}] sessions of the nodes with the router
+    bgp_peers: List[Dict[str, Any]] = []      # bgp: [{node, ip, state, bfd}] sessions of the nodes with the router
+    bfd: bool = False                         # bgp: BFD on the router (the BGPPeer gets a BFDProfile)
+    state: Optional[str] = None               # kubeadm: pending | installing | done | error (last apply)
+    message: Optional[str] = None
     bgp_nexthops: List[str] = []              # bgp: nodes the router routes the service IP to (ECMP)
     pool: Optional[str] = None
     service_ip: Optional[str] = None
