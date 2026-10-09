@@ -42,7 +42,7 @@ configuration below with the right URL and a token filled in.
 | Area | Tools |
 |---|---|
 | Start / anything | `overview`, `api_describe` (OpenAPI of any endpoint, with nested models), `api_request` (any endpoint) |
-| VMs | `list_vms`, `get_vm`, `create_vm`, `vm_power`, `delete_vm`, `add_disk`, `remove_disk`, `add_nic`, `remove_nic` |
+| VMs | `list_vms`, `get_vm`, `create_vm` (cloud image `debian-13`-style or ISO), `vm_power`, `delete_vm`, `add_disk`, `remove_disk` (+ `delete_volume`), `add_nic`, `remove_nic` |
 | Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host) |
 | Lab groups | `list_groups`, `get_group` (+ leases), `create_group`, `add_group_member`, `wireguard_device` |
 | Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `get_kubeconfig`, `kubectl` (admin), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
@@ -59,6 +59,31 @@ configuration below with the right URL and a token filled in.
   kubelet config, CA, a fresh join command, static pod manifests, certificate expiry.
 - `kubectl` runs on the first running control plane (guest agent) for kubeadm / k3s, with the app's `oc` on the host
   for OpenShift; `stdin` + `apply -f -` applies manifests (e.g. operators on kubeadm).
+
+## Troubleshooting
+
+- `claude mcp list` says **Failed to connect — Dynamic Client Registration rejected (HTTP 404)**: the request had no
+  valid token (missing / revoked / mistyped `Authorization` header). Claude Code then tries OAuth, which vm-manager
+  doesn't offer. Re-add the server with `--header "Authorization: Bearer vmm_…"`.
+- A tool answers *Unknown tool*: it is admin-only (`vm_exec`, `kubectl`…) and the token belongs to a viewer.
+- `vm_exec` fails with *guest agent*: the VM is still booting (the agent starts with the guest, ~30-60 s for a cloud
+  image), or it is an EL VM that isn't a cluster node / router (EL's qemu-ga forbids guest-exec): use `ssh_exec`.
+
+## Protocol
+
+Streamable HTTP, stateless, JSON responses (no SSE, no `Mcp-Session-Id`). Protocol versions 2025-11-25, 2025-06-18,
+2025-03-26, 2024-11-05 (`initialize` echoes the client's if supported, else the newest). `POST` only: `GET` / `DELETE`
+answer 405 (no server-initiated stream, no session). Notifications and client responses get 202 with no body; JSON-RPC
+batches are accepted. An unsupported `MCP-Protocol-Version` header gets 400: Claude Code (2.1.x) first probes a newer
+stateless revision (`server/discover` with version 2026-07-28) and falls back to `initialize` on that 400.
+
+Errors: protocol problems are JSON-RPC errors (parse error -32700 with HTTP 400, unknown method -32601, unknown tool or
+`params` / `arguments` not an object -32602). A tool that fails (API error with its HTTP status, VM not found, guest
+agent not ready) or gets wrong arguments (missing / unexpected ones, reported with the tool's input schema) returns a
+normal result with `isError: true`, which the model reads and can correct.
+
+Test: `cd e2e && node mcp.js` (protocol and error checks, then a VM create / guest exec / file write+read / disk
+add+remove / delete round trip through the tools; `E2E_VIEWER_TOKEN` also checks the viewer view).
 
 ## Design
 
