@@ -1432,7 +1432,7 @@ class GroupService:
             return []  # agent not ready / no lease file yet
         members = {m.mac: m.name for m in spec.members if m.mac}
         reserved = {h.mac for h in spec.dhcp_hosts} | {r.mac for r in spec.reservations}
-        vms = self._network_vms(network_name(spec.name))
+        vms = self._network_vms(network_name(spec.name)) or {}  # None: network gone (group being deleted)
         for lease in leases:
             mac = lease["mac"]
             lease["kind"] = "member" if mac in members else "reservation" if mac in reserved else "dynamic"

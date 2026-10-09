@@ -104,6 +104,10 @@ Scenarios:
 4. **The fix on the hosts**: `network.mtu: 1400` (or `ip link set … mtu 1400`): members send small packets.
 5. **Jumbo lab** (`network.mtu: 9000`, no path): 9000 inside, 1500 outside: PMTUD needed for anything leaving.
 
+Combined with proxy-only egress, proxied traffic is not affected by the black hole: squid terminates the TCP
+connections on the router, whose own stack knows its interface MTUs (a real-world reason why "it works through the
+proxy but not directly").
+
 Checks from a member: `ip link`, `ping -c2 -M do -s <mtu-28> <addr>` (28 = IP + ICMP headers), `tracepath -n`,
 `ip route get <addr>` (learned MTU; `ip route flush cache` to forget it), `ss -ti` (retransmits, mss), and on the
 router `tcpdump -ni any 'icmp[0] == 3 and icmp[1] == 4'`, `nft list ruleset` (the black-hole counter).
