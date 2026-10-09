@@ -51,12 +51,13 @@ backend/app/
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
+  mcp/                MCP server at POST /api/mcp (docs/mcp.md): registry (signature+docstring -> schema), tools, server (JSON-RPC)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useAuth (AuthProvider: login page until logged in), useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks
+  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks, MCP
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/auth.md          authentication: PAM login, groups -> roles, tokens, CLI, CSRF, disabling it
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
@@ -67,6 +68,7 @@ docs/disconnected.md  egress switch + mirror registry on the router (mirror-regi
 docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
+docs/mcp.md           AI assistants: MCP endpoint, Claude Code / Desktop / Cursor / VS Code setup, tools
 docs/updates.md       release installs (/opt/vm-manager), vm-manager-update, GitHub releases (CI, nightly), Host page Update now
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
@@ -290,6 +292,10 @@ e2e/                  Playwright browser tests against the real app (see below)
   `kubeadm init` (v1beta4 config, app token + certificate key, SANs = uplink/router IP + api names),
   Flannel, `kubeadm join` (`--node-name`: EL hostnames are FQDNs; control planes one at a time).
 
+- **MCP** (docs/mcp.md): `/api/mcp` on the app's port, own JSON-RPC (no `mcp` SDK: Python >= 3.10). Tools call the
+  REST API **in-process** (httpx ASGITransport) with the caller's Authorization header: never re-implement endpoint
+  logic in a tool; `api_describe` / `api_request` expose every endpoint. `admin=True` tools (guest-agent exec/files,
+  ssh, kubectl, kubeadm files) call existing services directly. Viewers may POST /api/mcp (`MCP_PATH`).
 - **Releases / updates** (docs/updates.md): checkout mode (the rig, `git pull`) vs release mode
   (`/opt/vm-manager/releases/<ver>` + `current` symlink, data `/var/lib/vm-manager`, config `/etc/vm-manager/vm-manager.env`
   read by Settings before `backend/.env`). `scripts/vm-manager-update` (root, stdlib) install/update/rollback: GitHub

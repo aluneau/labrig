@@ -77,6 +77,8 @@ export const MCPPage: React.FC = () => {
   const claudeCode = `claude mcp add --transport http --scope user vm-manager ${url}`
     + (authOn ? ` \\\n  --header "Authorization: ${auth}"` : '')
     + '\n\n# check: claude mcp list   (inside a session: /mcp)';
+  // literal ${VMM_AUTH}: mcp-remote expands it from "env" (keeps the token out of the args, no Windows quoting issue)
+  // eslint-disable-next-line no-template-curly-in-string
   const desktopArgs = ['-y', 'mcp-remote', url, ...(authOn ? ['--header', 'Authorization:${VMM_AUTH}'] : []),
     ...(remoteHttp ? ['--allow-http'] : [])];
   const claudeDesktop = JSON.stringify({
