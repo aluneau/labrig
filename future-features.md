@@ -21,6 +21,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
 | Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
+| Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
 | Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
 | CI, per-group resource budget | open (§4) |
 
@@ -336,6 +337,9 @@ idea as the live DHCP reservations, but with the router as the target.
 - **Customer-case templates**: a library of specs (`templates/*.yaml`) such as "split DNS",
   "BGP + MetalLB", "proxy-only egress", "MTU 1400 path", "disconnected (no uplink) + mirror registry".
   You'd pick a template, fill in a case number, and press Create.
+  **✅ done (2026-10-09, docs/templates.md):** engine + 7 built-in templates (basic lab, DHCP/DNS records,
+  WireGuard, BGP anycast, disconnected registry, kubeadm, OpenShift SNO), wizard, Case guide tab, user templates
+  from a group, OpenTofu export. Not yet: a `vmmanager_template` data source, editing user templates in the UI.
 
 > **Router primitives for customer cases — ✅ done** (2026-10, docs/router-cases.md): `router.dns.zones` (conditional
 > forwarding to a member's own resolver / an address, + `stop_rebind`, `no_negcache`, `cache_size`), egress mode

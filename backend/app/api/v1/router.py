@@ -1,7 +1,7 @@
 """API Router"""
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift
+from app.api.v1.endpoints import auth, vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift, templates
 
 api_router = APIRouter()
 
@@ -19,3 +19,4 @@ api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(openshift.router, prefix="/openshift", tags=["openshift"])
 api_router.include_router(openshift.cluster_router, prefix="/clusters/{cluster_id}/openshift", tags=["openshift"])
 api_router.include_router(clusters.router, prefix="/clusters", tags=["clusters"])
+api_router.include_router(templates.router, prefix="/templates", tags=["templates"])

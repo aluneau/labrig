@@ -12,6 +12,7 @@ import {
   ImageCopyRequest, RegistryImages, RegistryCredentials,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
   AuthStatus, ApiToken, ApiTokenCreated,
+  TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -279,4 +280,15 @@ export const libvirtApi = {
   status: () => request<LibvirtStatus>('/hosts/libvirt'),
   start: () => post<LibvirtAction>('/hosts/libvirt/start'),
   stop: (mode: LibvirtStopMode, timeout?: number) => post<LibvirtAction>('/hosts/libvirt/stop', { mode, timeout }),
+};
+
+export const templateApi = {
+  list: () => request<TemplateList>('/templates'),
+  get: (id: string) => request<TemplateDetail>(`/templates/${encodeURIComponent(id)}`),
+  render: (id: string, params: Record<string, unknown>, yaml?: string | null) =>
+    post<TemplateRender>(`/templates/${encodeURIComponent(id)}/render`, { params, yaml: yaml || null }),
+  create: (id: string, params: Record<string, unknown>, yaml?: string | null) =>
+    post<TemplateCreated>(`/templates/${encodeURIComponent(id)}/create`, { params, yaml: yaml || null }),
+  saveGroup: (body: TemplateSave) => post<TemplateDetail>('/templates', body),
+  delete: (id: string) => del(`/templates/${encodeURIComponent(id)}`),
 };

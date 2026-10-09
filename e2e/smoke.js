@@ -9,7 +9,7 @@ process.chdir(require('path').join(__dirname, 'screenshots'));
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') problems.push(`[${m.type()}] ${page.url()} ${m.text().slice(0, 300)}`); });
   page.on('pageerror', (e) => problems.push(`[pageerror] ${page.url()} ${e.message}`));
   page.on('response', (r) => { if (r.status() >= 400) problems.push(`[http ${r.status()}] ${r.request().method()} ${r.url()}`); });
-  for (const [path, name] of [['/', 'dashboard'], ['/vms', 'vms'], ['/groups', 'groups'], ['/storage', 'storage'], ['/networks', 'networks'], ['/clusters', 'clusters'], ['/hosts', 'host'], ['/tasks', 'tasks']]) {
+  for (const [path, name] of [['/', 'dashboard'], ['/vms', 'vms'], ['/groups', 'groups'], ['/templates', 'templates'], ['/templates/basic-lab', 'template-wizard'], ['/storage', 'storage'], ['/networks', 'networks'], ['/clusters', 'clusters'], ['/hosts', 'host'], ['/tasks', 'tasks']]) {
     await page.goto(BASE + path);
     await page.waitForTimeout(2500);
     await page.screenshot({ path: `${name}.png` });

@@ -7,12 +7,13 @@ resources: {vcpus: 3, memory_mb: 2048, disk_gb: 30}
 params:
   - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
   - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
-  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
   - {name: zone, label: Internal DNS zone, type: string, default: corp.example, pattern: '^[a-z0-9-]+(\.[a-z0-9-]+)+$'}
 name: "c{{case}}-dns"
 group:
   name: "c{{case}}-dns"
-  cidr: 10.42.240.0/24
+  cidr: "{{cidr}}"
   router:
     dns:
       forwarders: [1.1.1.1, 9.9.9.9]
@@ -26,7 +27,7 @@ group:
     - name: dns1
       image: "{{image}}"
       memory: 512
-      ip: 10.42.240.53
+      ip: "{{ip:53}}"
       role: dns
       user_data: |
         #cloud-config
@@ -44,9 +45,9 @@ group:
               bind-dynamic
               no-resolv
               local=/{{zone}}/
-              host-record=app.{{zone}},10.42.240.80
-              host-record=intranet.{{zone}},10.42.240.81
-              host-record=ldap.{{zone}},10.42.240.82
+              host-record=app.{{zone}},{{ip:80}}
+              host-record=intranet.{{zone}},{{ip:81}}
+              host-record=ldap.{{zone}},{{ip:82}}
         runcmd:
           - systemctl enable --now qemu-guest-agent
           - systemctl restart dnsmasq
@@ -57,7 +58,7 @@ guide: |
   public resolvers, and a client (or a resolver in between) asks the wrong one.
 
   ## What the lab contains
-  - The router resolves `*.c{{case}}-dns.lab` itself, forwards **`{{zone}}`** to `dns1` (10.42.240.53, the
+  - The router resolves `*.c{{case}}-dns.lab` itself, forwards **`{{zone}}`** to `dns1` ({{ip:53}}, the
     "internal DNS"), and everything else to 1.1.1.1 / 9.9.9.9 (Network & DNS tab: *Split DNS zones*).
   - `dns1` runs dnsmasq, authoritative for `{{zone}}` (app, intranet, ldap). It knows nothing else.
   - `client` uses the router as its resolver (DHCP), like a machine on the customer's LAN.
@@ -65,14 +66,14 @@ guide: |
   ## Reproduce
   On `client` (console, user admin; `sudo apt install -y dnsutils` for dig):
   ```
-  getent hosts app.{{zone}}            # 10.42.240.80, through the router's conditional forwarding
+  getent hosts app.{{zone}}            # {{ip:80}}, through the router's conditional forwarding
   dig +short app.{{zone}} @1.1.1.1     # empty: the public internet doesn't know the zone
-  dig +short app.{{zone}} @10.42.240.53   # 10.42.240.80: dns1 asked directly
-  dig +short www.redhat.com @10.42.240.53 # empty / REFUSED: the internal server does not recurse
+  dig +short app.{{zone}} @{{ip:53}}   # {{ip:80}}: dns1 asked directly
+  dig +short www.redhat.com @{{ip:53}} # empty / REFUSED: the internal server does not recurse
   ```
   Break it like the customer: remove the zone in the UI (Network & DNS, *Remove*), or point a client at a public
   resolver only (`nameserver 1.1.1.1` in /etc/resolv.conf, or `resolvectl dns enp1s0 1.1.1.1` with systemd-resolved) -> internal names stop resolving, public ones keep working.
-  The reverse mistake: only `nameserver 10.42.240.53` -> internal names work, the internet doesn't.
+  The reverse mistake: only `nameserver {{ip:53}}` -> internal names work, the internet doesn't.
 
   ## What to check / try
   - `resolvectl status`, `/etc/resolv.conf`: which server does the client really use? Search domains?

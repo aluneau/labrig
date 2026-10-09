@@ -1,0 +1,74 @@
+id: wireguard-remote
+title: WireGuard remote access to a customer-like network
+summary: Reach a private lab network (web app, internal DNS names) from your laptop through a WireGuard tunnel on the router.
+tags: [wireguard, vpn, remote-access, dns]
+requires: [wireguard]
+resources: {vcpus: 2, memory_mb: 1536, disk_gb: 20}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: zone, label: DNS zone, type: string, default: corp.lab, pattern: '^[a-z0-9]([a-z0-9.-]{0,60}[a-z0-9])?$',
+     help: 'The customer-like internal domain served by the router'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-wg"
+group:
+  cidr: "{{cidr}}"
+  domain: "{{zone}}"
+  router:
+    wireguard: {enabled: true}
+    dns:
+      records:
+        - {name: intranet, cname: app1}
+        - {name: portal, a: "{{ip:20}}"}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - name: app1
+      image: debian-13
+      ip: "{{ip:20}}"
+      user_data: |
+        #cloud-config
+        hostname: app1
+        fqdn: app1.{{domain}}
+        manage_etc_hosts: true
+        package_update: true
+        packages: [qemu-guest-agent, nginx]
+        users:
+          - default
+          - {name: admin, sudo: "ALL=(ALL) NOPASSWD:ALL", shell: /bin/bash, lock_passwd: false, plain_text_passwd: "{{password}}"}
+        ssh_pwauth: true
+        runcmd:
+          - [systemctl, enable, --now, qemu-guest-agent]
+          - sh -c 'echo "case {{case}}: intranet app on app1" > /var/www/html/index.html'
+          - [systemctl, enable, --now, nginx]
+guide: |
+  # Case {{case}}: remote access to the lab over WireGuard
+
+  **Customer symptom (typical):** "Our road-warrior VPN connects, but users can't open the intranet by
+  name" / "the tunnel is up but no traffic flows". This lab gives you a working reference to compare with.
+
+  ## What is in the lab
+  - Network **{{cidr}}**, internal zone **{{domain}}** served by the router `{{ip:1}}`
+  - `app1.{{domain}}` (**{{ip:20}}**): nginx, also reachable as `intranet.{{domain}}` (CNAME) and
+    `portal.{{domain}}` (A record)
+  - WireGuard on the router (`wg0`); the host relays one UDP port to it (shown on the **Remote access** tab)
+
+  ## Steps
+  1. Wait until the group is **running**.
+  2. **Remote access** tab: **Add device** (e.g. `laptop`), download the config (it holds the private key:
+     it is shown once).
+  3. On the laptop: `nmcli connection import type wireguard file <file>.conf` (or `wg-quick up`), see
+     docs/wireguard.md.
+  4. Break it the way the customer did (wrong `AllowedIPs`, missing `DNS =`, MTU, firewall on the host port)
+     and compare.
+
+  ## Checks (from the laptop, tunnel up)
+  - `ping {{ip:1}}` (router) and `ping {{ip:20}}` (app1)
+  - `resolvectl query intranet.{{domain}}` (or `dig @<router tunnel IP> intranet.{{domain}}`) answers {{ip:20}}
+  - `curl http://intranet.{{domain}}/` prints "case {{case}}: intranet app on app1"
+  - On the Remote access tab the device shows a recent **handshake**; `wg show` on the router (Router tab →
+    console) lists transfer counters
+
+  ## Things to try
+  - Remove `DNS =` from the client config: names stop resolving, IPs still work (classic split-DNS issue)
+  - Set `AllowedIPs = 0.0.0.0/0`: all the laptop's traffic goes through the lab's NAT
+  - Lower the client MTU (`MTU = 1280`) to reproduce fragmentation symptoms on large transfers

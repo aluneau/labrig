@@ -45,13 +45,15 @@ backend/app/
                       router_cases (split DNS, proxy, MTU render helpers), bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
-                      cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
-  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
+                      cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
+                      template_service (customer-case templates: load/validate, render, create, save group as template)
+  templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useAuth (AuthProvider: login page until logged in), useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
+  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/auth.md          authentication: PAM login, groups -> roles, tokens, CLI, CSRF, disabling it
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
@@ -60,6 +62,7 @@ docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli im
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
+docs/templates.md     customer-case templates: file format, placeholders, API, adding one
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), router-cases (split DNS, proxy, MTU), sriov-pool, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
@@ -227,6 +230,15 @@ e2e/                  Playwright browser tests against the real app (see below)
   `OperatorHub.disableAllDefaultSources`, CatalogSource READY; `AddonRunner.sources` maps redhat-operators -> the
   mirrored CatalogSource. Day-2 add-ons mirror first with the union of the cluster's operators (one filtered catalog
   image per index: a smaller request would drop packages).
+- **Templates** (docs/templates.md): `backend/app/templates/*.yaml` (built-in, read-only) + `DATA_DIR/templates/*.yaml`
+  (user, "Save as template" on a group). Loaded on every request; a bad file is reported in `GET /templates` `errors`,
+  never fatal (`scripts/check-templates.py` validates offline: parse, placeholders, render with sample params through
+  GroupSpec / ClusterCreate). Plain `{{param}}` substitution (exact placeholder keeps the type), built-ins `{{group}}`
+  `{{domain}}` `{{ip:N}}` `{{<cidr param>:N}}`, `_if:` drops a mapping; `cidr: auto` = first free /24 of
+  `TEMPLATE_SUBNET_POOL`. Render = preview + host checks (`group_service.normalize` dry run) + estimate vs free RAM +
+  OpenTofu HCL; create = `group_service.create_group` with `spec.template` (id, case, params, rendered guide: kept
+  by `_keep_owned`, shown on the group's "Case guide" tab) + a `template_cluster` task that waits for the group and
+  creates the cluster (kubeadm / openshift; `image:` slug -> cloud_image_id).
 - **Clusters**: `cluster_service.network_for()` picks the node network: k3s = `LibvirtClusterNetwork`
   (own NAT network `vmm-k-<name>`, no router); kubeadm (`driver.needs_group`) = `GroupClusterNetwork`: the
   nodes are spec `reservations` (static lease + `<name>.<domain>`), DNS records and a `load_balancers` entry
@@ -292,6 +304,8 @@ KUBECTL=… node clusters.js                                      # k3s: create,
 node groups.js                                                  # lab group: create, in-guest IP/DNS/internet checks, live record, stop/start, delete
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
+node templates.js                                               # templates: gallery, wizard (YAML edit, OpenTofu, guide), Basic lab boots, Case guide tab, save-as-template round trip
+scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
