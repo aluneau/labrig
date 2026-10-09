@@ -421,8 +421,8 @@ def ensure_ready(db: Session, group: Group, task: Optional[Task] = None,
                 if st and not active:
                     if phase == "ready" and st.get("healthy") == "1":
                         break
-                    raise RuntimeError(f"Registry setup failed ({phase}): {st.get('error') or 'see '
-                                       + rr.SETUP_LOG + ' on the router'}")
+                    detail = st.get("error") or f"see {rr.SETUP_LOG} on the router"
+                    raise RuntimeError(f"Registry setup failed ({phase}): {detail}")
                 frac = SETUP_PHASES.get(phase, 0.0)
                 if phase == "download" and st.get("download"):
                     frac += 0.35 * min(int(st["download"]) / MIRROR_REGISTRY_SIZE, 1)
