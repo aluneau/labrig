@@ -34,6 +34,23 @@ SECRET_READS_RE = re.compile(
     r"^/api/v1/(clusters/\d+/(kubeconfig|openshift/(credentials|ssh-key))"
     r"|groups/\d+/(registry/credentials|wireguard/peers/[^/]+/config))$")
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Secrets inside ordinary JSON reads (group specs: members' login password, proxy credentials, raw cloud-init):
+# masked for viewers
+SECRET_KEYS = {"password", "user_data", "url_with_auth", "private_key", "kubeadmin_password", "token", "secret"}
+URL_CREDS_RE = re.compile(r"(//)[^/@\s:]+:[^/@\s]+@")
+REDACTED = "***"
+
+
+def redact(value):
+    """Viewer copy of a JSON value: secret keys masked, user:password@ removed from URLs"""
+    if isinstance(value, dict):
+        return {k: (REDACTED if k in SECRET_KEYS and value[k] not in (None, "") else redact(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    if isinstance(value, str) and "@" in value:
+        return URL_CREDS_RE.sub(r"\1***@", value)
+    return value
 
 
 def _headers(scope) -> Dict[str, str]:
@@ -130,6 +147,10 @@ class AuthMiddleware:
             if (writes and not VIEWER_WRITES_RE.match(path)) or SECRET_READS_RE.match(path):
                 return await self._deny(scope, receive, send, 403, "read-only account (viewer)")
 
+        if (user is not None and user.role != "admin" and scope["type"] == "http" and method == "GET"
+                and not public):
+            return await self._viewer_read(scope, receive, send)
+
         if method in SAFE_METHODS or user is None:
             return await self.app(scope, receive, send)
 
@@ -150,6 +171,36 @@ class AuthMiddleware:
             audit_log.info(f"user={user.name} role={user.role} via={user.via}"
                            f"{f' token={user.token_id}' if user.token_id else ''} ip={ip} "
                            f"{method} {scope['path']}{'?' + query if query else ''} -> {status['code'] or 'error'}")
+
+    async def _viewer_read(self, scope, receive, send):
+        """Pass the response through redact() when it is JSON (the SSE stream and files stream unchanged)"""
+        start = {}
+        chunks = []
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                ctype = dict(message.get("headers") or []).get(b"content-type", b"")
+                if not ctype.startswith(b"application/json"):
+                    start["passthrough"] = True
+                    return await send(message)
+                start["message"] = message
+                return None
+            if start.get("passthrough"):
+                return await send(message)
+            chunks.append(message.get("body", b""))
+            if message.get("more_body"):
+                return None
+            body = b"".join(chunks)
+            try:
+                body = json.dumps(redact(json.loads(body))).encode()
+            except ValueError:
+                pass
+            headers = [(k, v) for k, v in start["message"].get("headers") or [] if k != b"content-length"]
+            headers.append((b"content-length", str(len(body)).encode()))
+            await send({**start["message"], "headers": headers})
+            await send({"type": "http.response.body", "body": body})
+
+        await self.app(scope, receive, send_wrapper)
 
     async def _deny(self, scope, receive, send, code: int, detail: str):
         if code == 403:

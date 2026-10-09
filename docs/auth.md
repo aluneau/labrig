@@ -21,7 +21,9 @@ group also cuts their sessions and tokens. No restart is needed.
 **Viewers** can read every page and get the live events. They can't change anything (any write → 403),
 except their own API tokens and logging out. They can't open VM consoles either: a VNC console takes
 keyboard and mouse input, so the WebSocket counts as a write. They can't fetch credentials either: kubeconfig, OpenShift credentials /
-SSH key, registry credentials and WireGuard device configs. The UI still shows the action buttons, but
+SSH key, registry credentials and WireGuard device configs. Secrets inside ordinary JSON reads are masked
+as `***` for them (`password`, `user_data`, `token`, … keys, `user:password@` in URLs: members' login password,
+proxy credentials in group specs). The UI still shows the action buttons, but
 they fail with "read-only account (viewer)". A "read-only" label is shown next to the user menu.
 
 ## Logging in
