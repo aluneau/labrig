@@ -49,6 +49,9 @@ async function measure(groupId, n1, anycast, label, timeoutMs) {
     // 1. group + BGP (BFD off)
     if (process.env.REUSE) {
       groupId = (await api('/groups')).find((g) => g.name === GROUP).id;
+      for (const m of (await api(`/groups/${groupId}`)).members) {
+        if (m.vm_id) await post(`/vms/${m.vm_id}/start`).catch(() => {});  // left stopped by an interrupted run
+      }
       await put(`/groups/${groupId}/bgp`, { enabled: true, bfd: { enabled: false, detect_multiplier: 3, receive_interval: 200, transmit_interval: 200 } });
     } else {
       const res = await post('/groups', {
@@ -77,8 +80,11 @@ async function measure(groupId, n1, anycast, label, timeoutMs) {
         + `cat > /etc/systemd/system/vmm-www.service <<'EOF'\n[Service]\nExecStartPre=/bin/sh -c 'mkdir -p /srv/www && echo hello from ${n} > /srv/www/index.html'\n`
         + 'ExecStart=/usr/bin/python3 -m http.server 80 -d /srv/www\n[Install]\nWantedBy=multi-user.target\nEOF\n'
         + 'pkill -f "^python3 -m http[.]server"; systemctl daemon-reload && systemctl enable --now vmm-lo.service vmm-www.service && systemctl restart vmm-www.service');
-      await must(vm, `vtysh -c 'configure terminal' -c 'router bgp 64513' -c 'no bgp ebgp-requires-policy' -c 'neighbor ${routerIp} remote-as 64512'`
-        + ` -c 'no neighbor ${routerIp} bfd' -c 'address-family ipv4 unicast' -c 'network ${anycast}/32' -c 'end' -c 'write memory'`);
+      // explicit router-id: after a reboot FRR may start before the address exists and stay Idle ("Router ID changed")
+      const ip = group.members.find((m) => m.name === n).ip;
+      await must(vm, `vtysh -c 'configure terminal' -c 'router bgp 64513' -c 'bgp router-id ${ip}' -c 'no bgp ebgp-requires-policy'`
+        + ` -c 'neighbor ${routerIp} remote-as 64512' -c 'no neighbor ${routerIp} bfd' -c 'address-family ipv4 unicast' -c 'network ${anycast}/32'`
+        + " -c 'end' -c 'write memory' && vtysh -c 'clear bgp *'");
     }));
     const members = Object.fromEntries(group.members.map((m) => [m.name, m]));
     await waitFor(async () => {

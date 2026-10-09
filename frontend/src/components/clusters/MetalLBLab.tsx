@@ -444,7 +444,7 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     </StackItem>
                     <StackItem>
                       The router puts one route per node in its table and spreads connections over them (ECMP): every node
-                      takes a share of the traffic, then kube-proxy / OVN forwards it to a hello pod.
+                      takes a share of the traffic, then {isOpenShift ? 'kube-proxy / OVN' : 'kube-proxy'} forwards it to a hello pod.
                     </StackItem>
                     <StackItem>
                       If a node stops, its BGP session closes ({s.bfd ? 'BFD notices a silent node in well under a second'
@@ -462,7 +462,7 @@ export const MetalLBLab: React.FC<{ cluster: Cluster; onChanged: () => void }> =
                     so the router learns <em>service IP → that node's MAC</em>.
                   </StackItem>
                   <StackItem>
-                    All traffic for the service enters through the announcing node; kube-proxy / OVN then forwards it
+                    All traffic for the service enters through the announcing node; {isOpenShift ? 'kube-proxy / OVN' : 'kube-proxy'} then forwards it
                     to a hello pod, on that node or another one. L2 mode is failover, not load balancing between nodes.
                   </StackItem>
                   <StackItem>

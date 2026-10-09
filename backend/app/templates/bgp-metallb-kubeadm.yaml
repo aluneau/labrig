@@ -1,0 +1,72 @@
+id: bgp-metallb-kubeadm
+title: BGP + MetalLB (kubeadm, BFD)
+summary: A kubeadm cluster whose LoadBalancer services are announced over BGP to the lab router (ECMP), with BFD for sub-second failover.
+tags: [bgp, metallb, kubernetes, bfd]
+requires: [kubeadm]
+resources: {vcpus: 7, memory_mb: 7168, disk_gb: 70}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
+  - {name: image, label: Node image, type: cloud_image, default: debian-13}
+  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+name: "c{{case}}-bgp"
+group:
+  name: "c{{case}}-bgp"
+  cidr: 10.42.244.0/24
+  router:
+    # the customer's top-of-rack router: FRR, AS 64512, sessions from any lab address (AS 64513), BFD on every session
+    bgp:
+      enabled: true
+      bfd: {enabled: true, detect_multiplier: 3, receive_interval: 200, transmit_interval: 200}
+    wireguard: {enabled: true}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members: []
+cluster:
+  name: "c{{case}}-k8s"
+  type: kubeadm
+  ctlplanes: 1
+  workers: 2
+  ctlplane: {memory: 2560, vcpu: 2, disk_size: 20}
+  worker: {memory: 2048, vcpu: 2, disk_size: 20}
+  username: admin
+  password: "{{password}}"
+  kubeadm:
+    # MetalLB (upstream, FRR mode) installed by the app: pool = a /27 announce range of the router, BGPPeer to the
+    # router LAN IP with a BFDProfile, hello demo (2 pods) behind a LoadBalancer Service published as hello.<domain>
+    metallb: {enabled: true, mode: bgp, bfd: true, demo: true}
+guide: |
+  ## Customer symptom
+  - "Our LoadBalancer IP stops answering for 30 to 90 seconds when a node dies" (no BFD: the router keeps routing
+    to the dead node until the BGP hold time expires), or "it never comes back" (route never withdrawn: the
+    speaker's session was not the one carrying the route, graceful restart, static route left behind).
+  - "All the traffic goes to one node" / "ECMP is unbalanced": the router hashes on addresses only
+    (`fib_multipath_hash_policy` 0), `maximum-paths` 1, `externalTrafficPolicy: Local` with pods on one node,
+    different AS paths without `multipath-relax`.
+  - "The BGP session is up but the service IP isn't reachable": prefix filtered by the router (outside the
+    accepted range), no BGPAdvertisement, the speaker excluded from the node (`node.kubernetes.io/exclude-from-external-load-balancers`).
+
+  ## What the lab contains
+  - Lab group `c{{case}}-bgp` (10.42.244.0/24): router = FRR AS 64512 with BFD (3 x 200 ms), accepts a /27 of
+    the host's BGP pool, ECMP over up to 8 next hops, hashing on ports. WireGuard remote access is on.
+  - kubeadm cluster `c{{case}}-k8s`: 1 control plane + 2 workers, Flannel, MetalLB in BGP mode (FRR speakers,
+    AS 64513) with a BFDProfile, and the hello demo (`hello.c{{case}}-bgp.lab`).
+  - The cluster's **MetalLB lab** tab draws the path and runs live checks (sessions, BFD, ECMP route, curl from
+    the router, DNS); the group's **BGP** tab lists sessions, BFD peers and routes; **Topology** follows a packet.
+
+  ## Reproduce
+  1. From the router console (or a WireGuard laptop) run a request loop:
+     `while true; do curl -s -m 1 http://hello.c{{case}}-bgp.lab/ || echo FAIL; sleep 0.2; done`
+  2. Stop a worker (MetalLB lab tab → Failover demo, or force-stop its VM): with BFD the router drops its route in
+     about 0.6 s, a handful of requests fail at most. Then turn BFD off on the router (group BGP tab, untick BFD,
+     Apply: FRR restarts, sessions come back within ~10 s) and do it again: requests fail for up to 30 s (hold time).
+  3. ECMP: `for i in $(seq 1 20); do curl -s http://hello.c{{case}}-bgp.lab/; done | sort | uniq -c` spreads over
+     both workers. Set `net.ipv4.fib_multipath_hash_policy=0` on the router to see a single client stick to one node.
+
+  ## What to check
+  - Router: `vtysh -c 'show ip bgp'` (one path per worker, `multipath`), `vtysh -c 'show bgp summary'`,
+    `vtysh -c 'show bfd peers'` (status up, detect time), `ip route show proto bgp` (nexthop lines),
+    `journalctl -u frr | grep -i bfd` (session down events at failover).
+  - Cluster: `kubectl -n metallb-system get ipaddresspools,bgppeers,bfdprofiles,bgpadvertisements`,
+    `kubectl -n metallb-system logs ds/speaker -c frr`, `kubectl get svc -n metallb-demo -o wide`,
+    `kubectl -n metallb-system exec ds/speaker -c frr -- vtysh -c 'show bfd peers'`.
+  - Things to try: BFD timers mismatch (the slower side wins), `externalTrafficPolicy: Local` with one replica,
+    a BGPPeer without `bfdProfile`, a pool outside the router's accepted range (session up, no route).
