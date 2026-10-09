@@ -20,6 +20,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
+| Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
 | Authentication, CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
@@ -329,6 +330,9 @@ idea as the live DHCP reservations, but with the router as the target.
 - **Customer-case templates**: a library of specs (`templates/*.yaml`) such as "split DNS",
   "BGP + MetalLB", "proxy-only egress", "MTU 1400 path", "disconnected (no uplink) + mirror registry".
   You'd pick a template, fill in a case number, and press Create.
+  **✅ done (2026-10-09, docs/templates.md):** engine + 7 built-in templates (basic lab, DHCP/DNS records,
+  WireGuard, BGP anycast, disconnected registry, kubeadm, OpenShift SNO), wizard, Case guide tab, user templates
+  from a group, OpenTofu export. Not yet: a `vmmanager_template` data source, editing user templates in the UI.
 
 > **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the
 > group CIDR, AS 64512 ← 64513, announce ranges from `BGP_ANNOUNCE_POOL` filtered `le 32`, ECMP over ports), live
