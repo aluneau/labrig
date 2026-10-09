@@ -10,12 +10,14 @@ import {
   TaskIcon,
   ClusterIcon,
   TopologyIcon,
+  CatalogIcon,
 } from '@patternfly/react-icons';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: TachometerAltIcon },
   { path: '/vms', label: 'Virtual Machines', icon: VirtualMachineIcon },
   { path: '/groups', label: 'Lab groups', icon: TopologyIcon },
+  { path: '/templates', label: 'Templates', icon: CatalogIcon },
   { path: '/storage', label: 'Storage', icon: StorageDomainIcon },
   { path: '/networks', label: 'Networks', icon: NetworkIcon },
   { path: '/clusters', label: 'Clusters', icon: ClusterIcon },

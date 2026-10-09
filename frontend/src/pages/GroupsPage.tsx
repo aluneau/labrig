@@ -62,7 +62,10 @@ export const GroupsPage: React.FC = () => {
     <>
       <PageHeader title="Lab groups"
         description="An isolated network with a router VM (DHCP, DNS, NAT) and member VMs: start, stop and delete them together."
-        actions={<Button onClick={() => setIsCreateOpen(true)}>Create group</Button>} />
+        actions={<>
+          <Button variant="secondary" onClick={() => navigate('/templates')} style={{ marginRight: 8 }}>From a template…</Button>
+          <Button onClick={() => setIsCreateOpen(true)}>Create group</Button>
+        </>} />
       <PageSection>
         {(error || loadError) && (
           <Alert variant="danger" isInline title={error || loadError} style={{ marginBottom: 16 }}
@@ -101,6 +104,12 @@ export const GroupsPage: React.FC = () => {
                           {g.member_count} + router ({running}/{g.member_count + 1} running)
                         </DescriptionListDescription>
                       </DescriptionListGroup>
+                      {g.spec.template && (
+                        <DescriptionListGroup>
+                          <DescriptionListTerm>Case</DescriptionListTerm>
+                          <DescriptionListDescription>{g.spec.template.case || '—'} ({g.spec.template.title || g.spec.template.id})</DescriptionListDescription>
+                        </DescriptionListGroup>
+                      )}
                       <DescriptionListGroup>
                         <DescriptionListTerm>Uplink</DescriptionListTerm>
                         <DescriptionListDescription>{g.uplink || 'none'}</DescriptionListDescription>

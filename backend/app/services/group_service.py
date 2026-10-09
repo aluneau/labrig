@@ -675,6 +675,7 @@ class GroupService:
         new.address_pools = ([p for p in new.address_pools if not p.owner]
                              + [p for p in old.address_pools if p.owner])
         new.owner = old.owner
+        new.template = old.template  # set at creation from a template, never by a spec PUT
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
         # egress / registry blocks left out (older clients) keep the stored ones; the registry's
         # read-back fields are the app's

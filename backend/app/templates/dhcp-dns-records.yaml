@@ -1,0 +1,57 @@
+id: dhcp-dns-records
+title: Static DHCP reservations and DNS records
+summary: A network with fixed leases for machines you add later, A / CNAME / wildcard / absolute DNS records, and a member with a fixed address.
+tags: [dns, dhcp, reservations, basic]
+requires: []
+resources: {vcpus: 2, memory_mb: 1536, disk_gb: 20}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: corp_domain, label: Customer domain (absolute records), type: string, default: corp.example.com,
+     pattern: '^[a-z0-9]([a-z0-9.-]{0,60}[a-z0-9])$'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-dns"
+group:
+  cidr: "{{cidr}}"
+  router:
+    dns:
+      records:
+        - {name: www, cname: app1}
+        - {name: api, a: "{{ip:50}}"}
+        - {name: "*.apps", a: "{{ip:51}}"}
+        - {name: "ldap.{{corp_domain}}.", a: "{{ip:10}}"}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - {name: app1, image: debian-13, ip: "{{ip:10}}"}
+  dhcp_hosts:
+    - {mac: "52:54:00:aa:00:31", ip: "{{ip:31}}", hostname: legacy1}
+    - {mac: "52:54:00:aa:00:32", ip: "{{ip:32}}", hostname: legacy2}
+guide: |
+  # Case {{case}}: static leases and DNS records
+
+  **Customer symptom (typical):** "a host gets a different IP after reboot", "the name resolves on some
+  machines but not others", "wildcard record doesn't match", "CNAME to an external name fails".
+
+  ## What is in the lab
+  - Router `{{ip:1}}` (dnsmasq) for **{{domain}}** on **{{cidr}}**
+  - `app1.{{domain}}` = **{{ip:10}}** (member, fixed address); `www.{{domain}}` CNAME → app1
+  - `api.{{domain}}` → {{ip:50}}, `*.apps.{{domain}}` → {{ip:51}} (e.g. an OpenShift-like layout)
+  - `ldap.{{corp_domain}}` → {{ip:10}}: an absolute name outside the lab zone, answered by the router
+  - Reservations for machines that are not members (add them later): MAC `52:54:00:aa:00:31` →
+    **{{ip:31}}** `legacy1.{{domain}}`, MAC `52:54:00:aa:00:32` → **{{ip:32}}** `legacy2.{{domain}}`
+
+  ## Steps
+  1. Wait until the group is **running**.
+  2. Create a VM on the group network (VMs page → Create, network `vmm-g-{{group}}`) with MAC
+     `52:54:00:aa:00:31` (or install the customer's OS from an ISO as a "Custom VM…" member).
+  3. Reproduce the customer's change: edit records / reservations on the **Network & DNS** tab (live).
+
+  ## Checks (on app1)
+  - `getent hosts www.{{domain}} foo.apps.{{domain}} ldap.{{corp_domain}}`
+  - `dig +short api.{{domain}} @{{ip:1}}`
+  - The new VM gets {{ip:31}} and resolves as `legacy1.{{domain}}`; the **Network & DNS** tab shows its lease
+    as a reservation
+
+  ## Things to try
+  - Change a reservation's IP while the VM runs: it keeps the old lease until renewal (release it on the tab)
+  - Add a record with the same name as a member: the API refuses it (the clash the customer may have)
