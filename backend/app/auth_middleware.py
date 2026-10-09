@@ -28,7 +28,7 @@ PUBLIC = {
 # Public certificate, fetched with a plain `curl` from the registry page's commands
 PUBLIC_RE = re.compile(r"^/api/v1/groups/\d+/registry/ca\.crt$")
 # Viewers may still manage their own session and API tokens
-VIEWER_WRITES_RE = re.compile(r"^/api/v1/auth/(logout|tokens(/\d+)?)$")
+VIEWER_WRITES_RE = re.compile(r"^/api/v1/auth/(logout|tokens(/\d+|/cli)?)$")
 # Reads that hand out credentials: admins only
 SECRET_READS_RE = re.compile(
     r"^/api/v1/(clusters/\d+/(kubeconfig|openshift/(credentials|ssh-key))"

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Alert, AlertActionCloseButton, Button, ClipboardCopy, Form, FormGroup, Modal, ModalVariant, PageSection,
+  Alert, AlertActionCloseButton, Button, Card, CardBody, CardTitle, ClipboardCopy, Form, FormGroup, Modal, ModalVariant, PageSection,
   Spinner, Stack, StackItem, Switch, TextInput,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
@@ -10,6 +10,7 @@ import { errorText, formatDate } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { useAuth } from '../hooks/useAuth';
+import { useCliToken } from '../hooks/useCliToken';
 
 const CreateTokenModal: React.FC<{ onClose: () => void; onCreated: () => void }> = ({ onClose, onCreated }) => {
   const [name, setName] = useState('');
@@ -73,6 +74,66 @@ const CreateTokenModal: React.FC<{ onClose: () => void; onCreated: () => void }>
   );
 };
 
+/** The personal "cli" token the UI puts in its copy-paste commands */
+const CliTokenCard: React.FC<{ mine: ApiToken[] | null; onChange: () => void }> = ({ mine, onChange }) => {
+  const cli = useCliToken();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const server = mine?.find((t) => t.name === 'cli');
+  const stale = !!cli.token && !!mine && (!server || !cli.token.startsWith(server.prefix));
+
+  const rotate = async () => {
+    setBusy(true);
+    try {
+      await cli.rotate();
+      setError(null);
+      onChange();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card id="cli-token" style={{ marginBottom: 16 }}>
+      <CardTitle>CLI token</CardTitle>
+      <CardBody>
+        <Stack hasGutter>
+          <StackItem>
+            Your personal token for the command line: the copy-paste commands of the UI (kubeconfig downloads…)
+            include it. Rotating it revokes the previous one. Also available with{' '}
+            <code>python -m app.cli token cli --user {'<user>'}</code> on the host.
+          </StackItem>
+          {error && <StackItem><Alert variant="danger" isInline isPlain title={error} /></StackItem>}
+          {cli.token && !stale && (
+            <StackItem>
+              <ClipboardCopy isReadOnly isCode hoverTip="Copy" clickTip="Copied">{`export VMM_TOKEN=${cli.token}`}</ClipboardCopy>
+            </StackItem>
+          )}
+          {stale && (
+            <StackItem>
+              <Alert variant="warning" isInline isPlain
+                title="This browser's copy was revoked (rotated elsewhere): rotate to get a working one." />
+            </StackItem>
+          )}
+          {!cli.token && (
+            <StackItem>
+              {server ? 'You have a CLI token, but this browser doesn\'t know it (created elsewhere): rotate it to use it here.'
+                : 'No CLI token yet: it is created the first time a command needs it, or now.'}
+            </StackItem>
+          )}
+          <StackItem>
+            <Button id="cli-token-rotate" variant="secondary" onClick={rotate} isLoading={busy} isDisabled={busy}>
+              {cli.token || server ? 'Rotate' : 'Create'}
+            </Button>
+          </StackItem>
+        </Stack>
+      </CardBody>
+    </Card>
+  );
+};
+
 /** API tokens of the logged-in user (admins: everyone's) */
 export const TokensPage: React.FC = () => {
   const { status } = useAuth();
@@ -107,6 +168,7 @@ export const TokensPage: React.FC = () => {
       <PageSection>
         {error && <Alert variant="danger" isInline title={error} style={{ marginBottom: 16 }}
           actionClose={<AlertActionCloseButton onClose={() => setError(null)} />} />}
+        <CliTokenCard mine={tokens && tokens.filter((t) => t.username === status.user?.name)} onChange={load} />
         {isAdmin && (
           <Switch id="tokens-all" label="All users' tokens" isChecked={all} onChange={(_e, v) => setAll(v)}
             style={{ marginBottom: 16 }} />

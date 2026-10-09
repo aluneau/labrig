@@ -85,7 +85,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   `api_tokens`) are exempt. Sessions = `auth_sessions` (sha256 of the cookie). Public: /health, static UI, auth
   status/login/logout, registry `ca.crt`. New endpoints are protected automatically; a new *read* that returns
   secrets must be added to `SECRET_READS_RE`. Frontend: every request goes through `api.ts` (adds `X-VMM-Request`;
-  401 -> login page); raw `fetch`/XHR elsewhere must add `CSRF_HEADERS`. e2e scripts load `./auth` (not
+  401 -> login page); raw `fetch`/XHR elsewhere must add `CSRF_HEADERS`. Copy-paste commands that call the API
+  embed the user's **CLI token** (`useCliToken`: token named `cli`, rotated by `POST /auth/tokens/cli` or
+  `app.cli token cli`, kept in localStorage per user; none when auth is off). e2e scripts load `./auth` (not
   playwright-core): `VMM_TOKEN` (`app.cli token create`) or `E2E_USER`/`E2E_PASSWORD`.
 
 - **libvirt is the source of truth.** The DB mirrors VMs/pools/volumes/networks only to give them stable

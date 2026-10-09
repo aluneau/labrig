@@ -283,6 +283,8 @@ export const authApi = {
   createToken: (name: string, expiresDays?: number) =>
     post<ApiTokenCreated>('/auth/tokens', { name, expires_days: expiresDays || null }),
   revokeToken: (id: number) => del(`/auth/tokens/${id}`),
+  /** (Re)create my personal CLI token (name "cli"): the previous one is revoked */
+  rotateCliToken: () => post<ApiTokenCreated>('/auth/tokens/cli', {}),
 };
 
 export const libvirtApi = {

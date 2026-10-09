@@ -36,7 +36,7 @@ import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/reac
 import { Cluster, ClusterCommandOutput, InstallStatus } from '../types';
 import { clusterApi, vmApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
-import { useAuth } from '../hooks/useAuth';
+import { useCliToken } from '../hooks/useCliToken';
 import { errorText, formatDate } from '../utils/format';
 
 import { StatusLabel } from '../components/common/StatusLabel';
@@ -95,10 +95,38 @@ export const clusterDeleteText = (c: Cluster) => {
 const KubectlCommands: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
   const url = new URL(clusterApi.kubeconfigUrl(cluster.id), window.location.origin).href;
   const file = `$HOME/.kube/${cluster.name}.yaml`; // not ~: fish doesn't expand it inside X=~/…
-  const { status } = useAuth();
-  // With authentication on, curl needs an API token (user menu > API tokens): export VMM_TOKEN=… first
-  const auth = status.enabled ? ' -H "Authorization: Bearer $VMM_TOKEN"' : '';
-  const fetch = `mkdir -p $HOME/.kube && curl -fsS${auth} --create-file-mode 600 ${url} -o ${file} && chmod 600 ${file}`;
+  const cli = useCliToken();
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (cli.needed && !cli.token) {
+    const show = async () => {
+      setBusy(true);
+      try {
+        await cli.ensure();
+        setTokenError(null);
+      } catch (err) {
+        setTokenError(errorText(err));
+      } finally {
+        setBusy(false);
+      }
+    };
+    return (
+      <Stack hasGutter>
+        <StackItem>
+          The download from the command line needs an API token. Your personal CLI token is put in the commands
+          (it is kept by this browser; <Link to="/tokens">API tokens</Link> to rotate it).
+        </StackItem>
+        <StackItem>
+          <Button id="kubectl-cmd-token" variant="secondary" onClick={show} isLoading={busy} isDisabled={busy}>
+            Show the commands with my token
+          </Button>
+        </StackItem>
+        {tokenError && <StackItem><Alert variant="danger" isInline isPlain title={tokenError} /></StackItem>}
+      </Stack>
+    );
+  }
+  const auth = cli.token ? ` -H "Authorization: Bearer ${cli.token}"` : '';
+  const fetch =`mkdir -p $HOME/.kube && curl -fsS${auth} --create-file-mode 600 ${url} -o ${file} && chmod 600 ${file}`;
   const thisShell = `${fetch} && export KUBECONFIG=${file} && kubectl get nodes`;
   // The cluster's file comes first so it wins over a stale context of the same name
   const merge = `${fetch} && KUBECONFIG=${file}:$HOME/.kube/config kubectl config view --flatten > $HOME/.kube/config.new`
@@ -118,9 +146,9 @@ const KubectlCommands: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
         Needs <code>kubectl</code> on the machine running the command
         (<a href="https://kubernetes.io/docs/tasks/tools/#kubectl" target="_blank" rel="noreferrer">install</a>;
         Arch: <code>pacman -S kubectl</code>) and access to {url.replace(/\/api\/.*$/, '')}.
-        {status.enabled && (
-          <> The download needs an API token in <code>VMM_TOKEN</code>: create one in{' '}
-            <Link to="/tokens">API tokens</Link> (user menu), then <code>export VMM_TOKEN=…</code>.</>
+        {cli.token && (
+          <> The commands contain your personal CLI token: treat them like a password
+            (<Link to="/tokens">API tokens</Link> to rotate it).</>
         )}
       </StackItem>
     </Stack>
