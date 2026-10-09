@@ -39,7 +39,7 @@ backend/app/
   services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
-                      bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
+                      router_cases (split DNS, proxy, MTU render helpers), bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network)
@@ -55,8 +55,9 @@ docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, Me
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)
+docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), k3s, kubeadm (clusters)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), router-cases (split DNS, proxy, MTU), k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -166,6 +167,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   via guest-exec (survives app restarts; done runs only read back); the pull secret goes to `/run` (tmpfs) for the run
   only. Spec PUTs without `egress`/`registry` keep the stored ones (`model_fields_set`). Own images: skopeo copy on the
   router, archive uploads spooled to disk and pushed from the host by `registry_client` (registry v2 API, no tools).
+- **Router cases** (docs/router-cases.md; `services/router_cases.py` = render helpers called by router_service, kept
+  separate): `router.dns.zones` (split DNS: `server=/zone/ip`, a server may be a member name resolved at render;
+  + `stop_rebind`/`no_negcache`/`cache_size`); egress `mode: proxy` = the blocked forward rules + squid on the router
+  (`router.egress.proxy`: port, `allow_domains` dstdomain, `connect_ports`, basic auth hashed on the router with
+  `openssl passwd -apr1`, `dns_nameservers 127.0.0.1`; dnf-installed on first use, stopped otherwise); cloud-image
+  members created in proxy mode get the proxy env via cloud-init (`member_env`; `bootcmd` writes apt/dnf proxy before
+  packages) — raw `user_data` members don't. `network.mtu` = libvirt `<mtu>` (saved def, next group start) + router
+  LAN + DHCP option 26 (running Debian members need `networkctl reconfigure`); `router.path` = MTU of both router
+  NICs (live `ip link` + NM profile by MAC; uplink reset via a marker file), `drop_frag_needed` (nft output chain),
+  `clamp_mss` (`maxseg size set rt mtu`). Spec PUTs without `network`/`path`/`proxy`/dns zones keep the stored ones.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -260,6 +271,7 @@ node groups.js                                                  # lab group: cre
 node group-dhcp.js                                              # group reservations: make static from a lease, edit, conflicts, release
 CLIENT_SH="ssh client" node wireguard.js                        # remote access: device config imported with nmcli on a client VM (not this host)
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
+node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```

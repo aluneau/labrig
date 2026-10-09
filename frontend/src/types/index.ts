@@ -388,7 +388,7 @@ export interface Cluster {
   has_kubeconfig: boolean;
   console_url?: string | null; // OpenShift web console
   // OpenShift disconnected: the group's mirror registry and egress state
-  registry?: { url: string; uplink_url?: string | null; enabled: boolean; egress: 'open' | 'blocked' } | null;
+  registry?: { url: string; uplink_url?: string | null; enabled: boolean; egress: 'open' | 'blocked' | 'proxy' } | null;
   ctlplanes: number;
   workers: number;
   spec?: Record<string, any> | null;
@@ -718,22 +718,66 @@ export interface RouterSpec {
   memory?: number;
   vcpu?: number;
   disk_size?: number;
-  dns?: { forwarders?: string[]; records?: DNSRecord[] };
+  dns?: DNSSpec;
   bgp?: BGPSpec | null;
   wireguard?: WireGuardSpec | null;
   vlans?: unknown[];
   egress?: EgressSpec;
   registry?: RegistrySpec;
+  path?: PathSpec;
   ip?: string | null;
   lan_mac?: string | null;
   uplink_mac?: string | null;
   uplink_ip?: string | null; // fixed (reserved) address on the uplink network
 }
 
-/** Egress switch of the group router (disconnected labs, docs/disconnected.md) */
+/** Router DNS: forwarders, records, split DNS zones + resolver knobs (docs/router-cases.md) */
+export interface DNSSpec {
+  forwarders?: string[];
+  records?: DNSRecord[];
+  zones?: DNSZone[];
+  stop_rebind?: boolean;
+  no_negcache?: boolean;
+  cache_size?: number | null;
+}
+
+/** Conditional forwarding: names in domain go to servers (IPv4, ip#port or a member name) */
+export interface DNSZone {
+  domain: string;
+  servers: string[];
+  allow_private?: boolean;
+}
+
+/** Squid on the router (egress mode proxy) */
+export interface ProxySpec {
+  port?: number;
+  allow_domains?: string[];
+  connect_ports?: number[];
+  username?: string | null;
+  password?: string | null;
+  member_env?: boolean;
+}
+
+/** The router as a narrow hop (MTU / PMTUD cases) */
+export interface PathSpec {
+  mtu?: number | null;
+  drop_frag_needed?: boolean;
+  clamp_mss?: boolean;
+}
+
+/** Egress switch of the group router (disconnected labs, docs/disconnected.md; proxy: docs/router-cases.md) */
 export interface EgressSpec {
-  mode: 'open' | 'blocked';
-  allow?: string[]; // CIDRs / addresses still reachable when blocked
+  mode: 'open' | 'blocked' | 'proxy';
+  allow?: string[]; // CIDRs / addresses still reachable when blocked / proxy
+  proxy?: ProxySpec;
+}
+
+export interface ProxyInfo {
+  url: string;
+  url_with_auth: string;
+  fqdn_url: string;
+  no_proxy: string;
+  env: Record<string, string>;
 }
 
 /** Mirror registry (mirror-registry / Quay) on the group router */
@@ -966,6 +1010,14 @@ export interface GroupTopology {
     dns_forwarders: string[];
     load_balancers: { name: string; port: number; backends: string[]; owner?: string | null }[];
     config_applied: boolean;
+    // router cases (docs/router-cases.md)
+    proxy_port?: number | null;
+    dns_zones?: string[];
+    network_mtu?: number;
+    lan_mtu?: number;
+    path_mtu?: number | null;
+    drop_frag_needed?: boolean;
+    clamp_mss?: boolean;
   };
   wireguard: {
     enabled: boolean;
@@ -1057,6 +1109,7 @@ export interface GroupSpec {
   load_balancers?: LoadBalancerSpec[];
   owner?: string | null; // "cluster:<name>": created for that cluster, deleted with it
   dhcp_hosts?: GroupDHCPHost[];
+  network?: { mtu?: number | null };
 }
 
 export interface GroupHostInfo {
@@ -1130,6 +1183,7 @@ export interface GroupLease {
 export interface GroupDetail extends Group {
   router_uplink_ips: string[];
   leases: GroupLease[];
+  proxy?: ProxyInfo | null; // egress mode proxy
 }
 
 export interface RouterConfig {

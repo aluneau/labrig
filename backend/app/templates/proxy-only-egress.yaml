@@ -1,0 +1,69 @@
+id: proxy-only-egress
+title: Internet only through an HTTP proxy
+summary: The lab can't reach the internet directly; squid on the router (optional allowlist and authentication) is the only way out.
+tags: [proxy, egress]
+requires: []
+resources: {vcpus: 3, memory_mb: 2560, disk_gb: 30}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
+  - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+  - {name: proxy_user, label: Proxy username, type: string, default: proxyuser, pattern: '^[A-Za-z0-9._-]{1,64}$'}
+  - {name: proxy_password, label: Proxy password, type: string, default: proxypass, pattern: '^[A-Za-z0-9._~!*+=,;-]{1,128}$'}
+name: "c{{case}}-proxy"
+group:
+  name: "c{{case}}-proxy"
+  cidr: 10.42.241.0/24
+  router:
+    egress:
+      mode: proxy
+      proxy:
+        port: 3128
+        username: "{{proxy_user}}"
+        password: "{{proxy_password}}"
+        # empty = any destination; e.g. [.redhat.com, quay.io, .debian.org] for a customer allowlist
+        allow_domains: []
+        connect_ports: [443]
+        member_env: true
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    # configured: cloud-init sets http(s)_proxy / no_proxy, apt and dnf use the proxy
+    - {name: configured, image: "{{image}}", memory: 1024}
+    # same, to strip down into an unconfigured customer host (see the guide)
+    - {name: bare, image: "{{image}}", memory: 1024}
+guide: |
+  ## Customer symptom
+  "Pulls / downloads time out", "`curl` works but the application doesn't", "x509 / 407 Proxy Authentication
+  Required", "the installer can't reach the API but it's local": the site's only way out is an HTTP proxy, and
+  some tool doesn't use it, uses it for the wrong destinations (NO_PROXY), or lacks the credentials.
+
+  ## What the lab contains
+  - Router: forwards nothing to the internet (direct connections are refused at once, like egress *blocked*) and
+    runs **squid** on `router.c{{case}}-proxy.lab:3128` (10.42.241.1:3128), basic auth `{{proxy_user}}`. HTTPS goes
+    through CONNECT (no TLS interception). Registry & egress tab: URL, environment to copy, allowlist, auth.
+  - `configured` and `bare` both got the proxy environment from cloud-init (`/etc/environment`,
+    `/etc/profile.d/vmm-proxy.sh`, apt / dnf proxy): without it their first boot couldn't even install the guest
+    agent. To reproduce an unconfigured host, untick *Set the proxy environment on new members*, then add a member,
+    or remove the files on `bare`: `sudo rm /etc/profile.d/vmm-proxy.sh /etc/apt/apt.conf.d/90vmm-proxy` and the
+    proxy lines of `/etc/environment`, then log in again.
+
+  ## Reproduce
+  On a member (console, user admin):
+  ```
+  curl -sS -m 5 https://www.redhat.com -o /dev/null --noproxy '*'   # refused: no direct way out
+  curl -sS -m 10 -x http://10.42.241.1:3128 https://www.redhat.com -o /dev/null -w '%{http_code}\n'
+                                                                  # 407: the proxy wants credentials
+  env | grep -i proxy; curl -sS https://www.redhat.com -o /dev/null -w '%{http_code}\n'   # 200 with the env
+  ```
+  Allowlist: put `.debian.org` in *Allowed destinations* -> `apt update` works, `curl https://www.redhat.com`
+  gets **403** from squid (the customer's "only some sites work").
+
+  ## What to check / try
+  - `env | grep -i proxy` in the right context: systemd services (`systemctl show <svc> -p Environment`), sudo
+    (`env_keep`), containers (podman / CRI-O `/etc/systemd/system/crio.service.d/`), Java (`-Dhttps.proxyHost`).
+  - NO_PROXY: the lab domain, the cluster / service networks, the API name; CIDRs in NO_PROXY are ignored by some
+    clients (older curl, Python requests): list names too.
+  - Router side: `sudo tail -f /var/log/squid/access.log` on the router console shows every request with its
+    status (TCP_DENIED/407 = no credentials, TCP_DENIED/403 = not allowed, TCP_TUNNEL/200 = HTTPS CONNECT).
+  - Port 443 only for CONNECT: an HTTPS service on another port (e.g. 6443, 8443) is refused unless added to
+    *CONNECT ports* — another classic.
