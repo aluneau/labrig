@@ -10,7 +10,7 @@ import {
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
-  VMNicCreate, VMNicUpdate, SriovStatus, SriovPF,
+  VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
 } from '../types';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
@@ -250,6 +250,8 @@ export const hostApi = {
   sriov: () => request<SriovStatus>('/hosts/sriov'),
   setNumVfs: (pf: string, numVfs: number) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),
+  updatePf: (pf: string, data: SriovPFUpdate) =>
+    request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify(data) }),
 };
 
 export const libvirtApi = {

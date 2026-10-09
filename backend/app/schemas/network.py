@@ -16,6 +16,9 @@ class NetworkBase(BaseModel):
     dhcp_end: Optional[str] = None
     forward_mode: str = "nat"
     forward_dev: Optional[str] = None
+    # SR-IOV VF pools (forward_mode hostdev) only: VLAN tag the PF applies to every VF of the pool
+    # (<vlan><tag id/></vlan>; the guest sees untagged traffic). A NIC can override it.
+    vlan: Optional[int] = Field(None, ge=1, le=4094)
     autostart: bool = False
 
 

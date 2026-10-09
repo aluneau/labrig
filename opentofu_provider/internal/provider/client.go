@@ -154,6 +154,7 @@ type apiNetwork struct {
 	BridgeName  *string `json:"bridge_name"`
 	ForwardMode string  `json:"forward_mode"`
 	ForwardDev  *string `json:"forward_dev"`
+	VLAN        *int64  `json:"vlan"`
 	Domain      *string `json:"domain"`
 	IPAddress   *string `json:"ip_address"`
 	Prefix      *int64  `json:"prefix"`
@@ -189,6 +190,7 @@ type apiVM struct {
 		LinkState *string `json:"link_state"`
 		Pending   *string `json:"pending"`
 		VF        bool    `json:"vf"`
+		VLAN      *int64  `json:"vlan"`
 	} `json:"nics"`
 	Iommu *struct {
 		Enabled bool  `json:"enabled"`

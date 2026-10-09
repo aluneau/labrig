@@ -33,6 +33,7 @@ class Network(Base):
     # Forwarding (for NAT networks)
     forward_mode = Column(String(20), default="nat")  # nat, route, open
     forward_dev = Column(String(50), nullable=True)  # Interface to forward to
+    vlan = Column(Integer, nullable=True)  # SR-IOV VF pools: VLAN tag libvirt sets on every VF it hands out
     
     # State
     active = Column(Boolean, default=False)
