@@ -1,0 +1,94 @@
+id: disconnected-kubeadm
+title: Air-gapped kubeadm cluster
+summary: Kubernetes without internet access, pulling only from a mirror registry; reproduce ImagePullBackOff on un-mirrored images.
+tags: [kubernetes, kubeadm, disconnected, registry, containerd]
+requires: [kubeadm, registry]
+resources: {vcpus: 6, memory_mb: 8192, disk_gb: 100}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: version, label: Kubernetes version, type: string, default: v1.37, pattern: '^v?\d+\.\d+(\.\d+)?$',
+     help: 'Minor (latest patch, resolved on the router) or patch'}
+  - {name: image, label: Node cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-air"
+group:
+  cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}"}
+  router:
+    # the router is the site's bastion: mirror registry (Quay) at registry.<domain>:8443, internet kept
+    registry: {enabled: true, port: 8443, disk_gb: 60, memory_mb: 4096, vcpus: 2}
+cluster:
+  name: "c{{case}}"
+  type: kubeadm
+  version: "{{version}}"
+  ctlplanes: 1
+  workers: 1
+  image: "{{image}}"
+  username: admin
+  password: "{{password}}"
+  disconnected: true
+  mirror_images: [docker.io/library/redis:7-alpine]
+guide: |
+  ## Customer symptom
+
+  On a site without internet access, pods stay in `ImagePullBackOff` / `ErrImagePull`. Typical events:
+
+  ```
+  Failed to pull image "busybox:1.37": failed to resolve image: unexpected status from HEAD request to
+  https://registry.<domain>:8443/v2/docker/library/busybox/manifests/1.37?ns=docker.io: 401 UNAUTHORIZED
+  ```
+
+  or, without a mirror configured, `dial tcp ...:443: connect: connection refused / i/o timeout` towards
+  `registry-1.docker.io`, `registry.k8s.io`, `ghcr.io`.
+
+  ## What the lab contains
+
+  - Group router = bastion: internet access, a mirror registry (`registry.<domain>:8443`, Quay, own CA),
+    **egress blocked** for everything else on the group network (nftables on the router).
+  - kubeadm cluster (1 control plane + 1 worker, Flannel). Mirrored at create: kubeadm's control plane images
+    for the exact version, Flannel, `nginx:alpine`, `redis:7-alpine`.
+  - Each node's containerd sends pulls of registry.k8s.io, docker.io, ghcr.io, quay.io to the mirror:
+    `/etc/containerd/certs.d/<registry>/hosts.toml` with `override_path = true` to the namespace
+    (`/v2/k8s`, `/v2/docker`, `/v2/ghcr`, `/v2/quay`), CA in `/etc/containerd/certs.d/vmm-registry-ca.crt`.
+    Pods keep their usual image names.
+  - Packages (containerd.io, kubelet, kubeadm) were installed at first boot through a temporary per-node
+    egress exemption, removed before kubeadm pulled anything: think "golden image".
+
+  ## Reproduce
+
+  ```bash
+  kubectl run web --image=nginx:alpine                 # mirrored: Running
+  kubectl run bb --image=busybox:1.37 -- sleep 1d      # not mirrored: ErrImagePull, then ImagePullBackOff
+  kubectl describe pod bb | tail                       # 401 from the mirror = the repository doesn't exist there
+  ```
+
+  containerd tries the mirror, then the upstream `server` of `hosts.toml` (refused: egress blocked) and reports
+  the first error, the mirror's: Quay answers `401 UNAUTHORIZED` to an anonymous pull of a repository it
+  doesn't have, which reads like a credentials problem but means "not mirrored".
+
+  Then fix it like the customer would: mirror the image (cluster page, *Mirror more images*, or
+  `POST /api/v1/clusters/<id>/mirror {"images": ["busybox:1.37"]}`) and delete / recreate the pod.
+  A new upstream registry (e.g. `gcr.io/...`) gets its own `hosts.toml` on every node (namespace `gcr-io`).
+
+  ## What to check on a node (console, or the customer's equivalent)
+
+  ```bash
+  ls /etc/containerd/certs.d/ ; cat /etc/containerd/certs.d/docker.io/hosts.toml
+  grep -n config_path /etc/containerd/config.toml       # must point at /etc/containerd/certs.d
+  ctr -n k8s.io images pull --hosts-dir /etc/containerd/certs.d docker.io/library/nginx:alpine   # through the mirror
+  curl -sS -m 10 https://registry-1.docker.io/v2/       # refused: no internet
+  curl -sS https://registry.<domain>:8443/health/instance   # the mirror answers, CA trusted
+  ```
+
+  (`crictl` is not installed by the Debian kubeadm packages; `ctr` comes with containerd.)
+
+  ## Things to try
+
+  - Remove a node's `hosts.toml` for docker.io: the pull now goes to registry-1.docker.io and times out:
+    the "mirror not configured" variant of the case.
+  - Drop the CA from the `hosts.toml`: `x509: certificate signed by unknown authority`.
+  - Group page, *Registry & egress*: set egress back to `open` and watch the same un-mirrored pull succeed
+    (containerd falls back to the upstream `server`).
+  - Alternative pattern seen at customers: `imageRepository: registry.<domain>:8443/k8s` in the kubeadm
+    ClusterConfiguration instead of mirrors (only covers the control plane images).

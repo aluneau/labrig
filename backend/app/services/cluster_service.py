@@ -238,6 +238,8 @@ class ClusterService:
             task_progress = task.progress if task else None
 
         spec = {k: v for k, v in (cluster.spec or {}).items() if k not in SECRET_SPEC_KEYS}
+        if isinstance(spec.get("mirror"), dict):  # disconnected kubeadm: the Flannel manifest is internal
+            spec["mirror"] = {k: v for k, v in spec["mirror"].items() if k != "flannel"}
         port = self._api_port(cluster)
         group = db.query(Group).filter(Group.id == cluster.group_id).first() if cluster.group_id else None
         lb = None
@@ -250,13 +252,20 @@ class ClusterService:
                       "router_ip": (gspec.get("router") or {}).get("ip"),
                       "uplink_ip": (gspec.get("router") or {}).get("uplink_ip")}
         registry = None
-        if group is not None and ((cluster.spec or {}).get("openshift") or {}).get("disconnected"):
+        if group is not None and (((cluster.spec or {}).get("openshift") or {}).get("disconnected")
+                                  or (cluster.spec or {}).get("disconnected")):
             router = (group.spec or {}).get("router") or {}
             reg = router.get("registry") or {}
-            port = reg.get("port") or 8443
-            registry = {"url": f"registry.{group.domain}:{port}",
-                        "uplink_url": f"{router['uplink_ip']}:{port}" if router.get("uplink_ip") else None,
+            reg_port = reg.get("port") or 8443
+            registry = {"url": f"registry.{group.domain}:{reg_port}",
+                        "uplink_url": f"{router['uplink_ip']}:{reg_port}" if router.get("uplink_ip") else None,
                         "enabled": bool(reg.get("enabled")), "egress": (router.get("egress") or {}).get("mode", "open")}
+            mirror = (cluster.spec or {}).get("mirror") or {}
+            if cluster.type != "openshift":
+                registry.update(images=mirror.get("images") or [], failed=mirror.get("failed") or [],
+                                kube_version=mirror.get("kube_version"), demo_image=mirror.get("demo_image"),
+                                exempt=[e.get("source") for e in (router.get("egress") or {}).get("exempt") or []
+                                        if e.get("owner") == f"cluster:{cluster.name}"])
         return {
             "id": cluster.id, "name": cluster.name, "type": cluster.type, "version": cluster.version,
             "network": cluster.network, "network_owned": bool(cluster.network_owned), "domain": cluster.domain,
@@ -335,6 +344,15 @@ class ClusterService:
         from app.services import kubeadm_metallb
         kubeadm_metallb.check_create(data)
         driver = get_driver(data.type)  # rejects unsupported types
+        if data.disconnected and data.type != "kubeadm":
+            raise ValueError("Disconnected installs: kubeadm (or OpenShift with openshift.disconnected); "
+                             "k3s uses its own NAT network without a router to hold the mirror registry")
+        if data.mirror_images and not data.disconnected:
+            raise ValueError("mirror_images is for disconnected clusters")
+        if data.mirror_images:
+            from app.services import k8s_mirror
+            for ref in data.mirror_images:
+                k8s_mirror.parse(ref)  # validates
         if driver.needs_group and data.network:
             raise ValueError(f"{data.type} clusters live in a lab group (router DNS + API load balancer): "
                              "pick a group_id or let the app create one, not a network")
@@ -411,6 +429,13 @@ class ClusterService:
         """kubeadm: nodes in an existing lab group, or in a group created for (and deleted with) the cluster"""
         names = self._node_names(data.name, data.ctlplanes, data.workers)
         group, gspec, owned, node_subnet = self._resolve_group(db, data, names, [data.pod_cidr, data.service_cidr])
+        if data.disconnected and group is None:
+            # the router is created with the mirror registry's RAM / disk (no restart later)
+            from app.services.k8s_mirror import REGISTRY_SIZES
+            reg = gspec.router.registry
+            reg.enabled = True
+            reg.memory_mb, reg.vcpus, reg.disk_gb = (REGISTRY_SIZES["memory_mb"], REGISTRY_SIZES["vcpus"],
+                                                     REGISTRY_SIZES["disk_gb"])
         task = None
         if group is None:
             group, task = group_service.create_group(db, gspec)
@@ -431,6 +456,8 @@ class ClusterService:
         db.refresh(cluster)
         self._publish(cluster)
         where = f"new lab group {group.name}" if owned else f"lab group {group.name}"
+        if data.disconnected:
+            where += ", disconnected (mirror registry on the router)"
         task = task_service.start(db, TaskCreate(
             name=f"Create {data.type} cluster {data.name}", type="cluster_create", target_type="cluster",
             target_id=cluster.id, target_name=data.name,
@@ -559,10 +586,15 @@ class ClusterService:
                         "Starting the lab group's router" if cluster.group_id else "Creating network")
             network = network_for(cluster)
             network.ensure()
+            if spec.get("disconnected"):
+                self._prepare_mirror(db, task, cluster, network, (21, 30))
+                spec = cluster.spec
 
             names = self._node_names(cluster.name, spec["ctlplanes"], spec["workers"])
             roles = ["ctlplane"] * spec["ctlplanes"] + ["worker"] * spec["workers"]
             p_from, p_to = (22, 30) if cluster.group_id else (5, 30)
+            if spec.get("disconnected"):
+                p_from, p_to = 30, 32
             nodes = self._add_nodes(db, task, cluster, network, list(zip(names, roles)), p_from, p_to)
 
             first = self._first_ctlplane(cluster)
@@ -626,6 +658,18 @@ class ClusterService:
             if node is first and not network.fronts_api:
                 hostnames += [api_hostname, f"api-int.{zone}"]
             network.publish(node.ip, hostnames)
+        if spec.get("disconnected") and isinstance(network, GroupClusterNetwork):
+            # egress blocked before any node boots; each new node may go out until its packages are in
+            # (the customer's golden image / package repo), never once kubeadm pulls images
+            mirror = dict(spec.get("mirror") or {})
+            if "egress_before" not in mirror:
+                mirror["egress_before"] = network.spec().router.egress.mode
+                cluster.spec = {**spec, "mirror": mirror}
+                spec = cluster.spec
+                db.commit()
+            network.set_egress("blocked")
+            for node in created:
+                network.exempt_egress(node.ip)
         network.commit()  # group: one router config push for all the nodes
         for i, node in enumerate(created):
             self._check(task, cluster, db, int(progress_from + i * step), f"Creating {node.name}")
@@ -633,6 +677,109 @@ class ClusterService:
         for node in sorted(created, key=lambda n: n.role != "ctlplane"):
             libvirt_client.start_vm(node.name)
         return created
+
+    # -------------------------------------------------- disconnected kubeadm (k8s_mirror)
+
+    def _prepare_mirror(self, db: Session, task: Task, cluster: Cluster, network: ClusterNetwork,
+                        window: tuple) -> None:
+        """Registry on the group router (set up once), then the images the cluster needs copied into it.
+        Idempotent: a retry reuses the registry and skopeo skips what is there."""
+        from app.services import k8s_mirror
+        from app.services import registry_service as rs
+        from app.services.cluster_drivers import kubeadm_version
+        lo, hi = window
+        if not network.spec().router.registry.enabled:
+            self._check(task, cluster, db, lo, "Enabling the mirror registry on the group router")
+            network.enable_registry(**k8s_mirror.REGISTRY_SIZES)
+            network.commit()
+        self._check(task, cluster, db, lo, "Mirror registry: setting up the router (Quay: ~1.3 GB download, "
+                                           "10-30 min the first time)")
+        group = db.query(Group).filter(Group.id == cluster.group_id).first()
+        progress = rs._Progress(db, task, window)
+        # the group's own setup task (started when the group was created with the registry): show its progress
+        setup = rs._running_task(db, group, "registry_setup")
+        while setup and task_service.is_running(setup):
+            other = task_service.get_task(db, setup)
+            db.refresh(other)
+            progress.span(0, 60)(min((other.progress or 0) / 100, 0.99), other.description or "Registry setup")
+            self._sleep(task, 5)
+        try:
+            rs.ensure_ready(db, group, task, progress.span(0, 60))
+            progress.check()
+            spec = cluster.spec
+            ver = kubeadm_version(spec.get("version"))
+            self._check(task, cluster, db, None, "Listing the Kubernetes images (kubeadm config images list, on the router)")
+            resolved = k8s_mirror.resolve_kubeadm(rs._rtr(group), ver["minor"], ver["patch"])
+            sources = resolved["images"] + [k8s_mirror.DEMO_IMAGE]
+            core = len(sources)
+            sources += spec.get("mirror_images") or []
+            images, failed = k8s_mirror.mirror(group, sources, progress.span(62, 100), f"cluster:{cluster.name}")
+        except RuntimeError as e:
+            if str(e) == "Cancelled":
+                raise Cancelled()
+            raise
+        canon = [k8s_mirror.canonical(s) for s in sources]
+        failed_core = [s for s in failed if s in canon[:core]]
+        if failed_core:
+            raise RuntimeError("Could not mirror " + ", ".join(failed_core) + " (skopeo on the router: see "
+                               "/var/lib/vmm-registry/copies/*/log); retry the create: copied images are kept")
+        db.refresh(group)
+        pause = next((k8s_mirror.canonical(i) for i in resolved["images"] if "/pause:" in k8s_mirror.canonical(i)), "")
+        mirror = {**(cluster.spec.get("mirror") or {}),
+                  "registry": rs._hosts(rs._spec(group))[0], "kube_version": resolved["version"],
+                  "pause": pause, "flannel": resolved["flannel"], "images": images, "failed": failed,
+                  "demo_image": k8s_mirror.DEMO_IMAGE}
+        cluster.spec = {**cluster.spec, "mirror": mirror}
+        db.commit()
+        self._check(task, cluster, db, hi, f"Mirrored {len(images)} images into {mirror['registry']}"
+                    + (f" ({len(failed)} failed: {', '.join(failed)})" if failed else ""))
+
+    def mirror_images(self, db: Session, cluster: Cluster, images: List[str]) -> Task:
+        """Day 2: copy more images into the group's registry for a disconnected kubeadm cluster (a new
+        upstream registry gets its containerd mirror config on the running nodes)"""
+        from app.services import k8s_mirror
+        if not (cluster.spec or {}).get("disconnected") or not (cluster.spec.get("mirror") or {}).get("registry"):
+            raise ValueError("Only disconnected kubeadm clusters (installed) mirror images; for OpenShift use the "
+                             "group's registry tab")
+        for ref in images:
+            k8s_mirror.parse(ref)
+
+        def run(db: Session, task: Task, cluster_id: int, images: List[str]) -> Dict[str, Any]:
+            def body(cluster: Cluster) -> Dict[str, Any]:
+                from app.services import registry_service as rs
+                group = db.query(Group).filter(Group.id == cluster.group_id).first()
+                if group is None:
+                    raise ValueError("The cluster's lab group no longer exists")
+                progress = rs._Progress(db, task)
+                try:
+                    rs.ensure_ready(db, group, task, progress.span(0, 10))
+                    copied, failed = k8s_mirror.mirror(group, images, progress.span(10, 90), f"cluster:{cluster.name}")
+                except RuntimeError as e:
+                    if str(e) == "Cancelled":
+                        raise Cancelled()
+                    raise
+                db.refresh(cluster)
+                mirror = dict(cluster.spec.get("mirror") or {})
+                known = {i["source"]: i for i in mirror.get("images") or []}
+                for item in copied:
+                    known[item["source"]] = item
+                before = set(k8s_mirror.registries(mirror.get("images") or []))
+                mirror["images"] = list(known.values())
+                cluster.spec = {**cluster.spec, "mirror": mirror}
+                db.commit()
+                new_regs = [r for r in k8s_mirror.registries(mirror["images"]) if r not in before]
+                if new_regs:
+                    self._check(task, cluster, db, 92, f"Adding the mirror config of {', '.join(new_regs)} to the nodes")
+                    for node in cluster.nodes:
+                        if (libvirt_client.get_vm(node.name) or {}).get("state") == "running":
+                            k8s_mirror.push_hosts_toml(node.name, mirror)
+                self._set_status(db, cluster, "ready" if cluster.status == "ready" else cluster.status, None)
+                if failed:
+                    raise RuntimeError("Could not mirror " + ", ".join(failed) + " (does the image exist? "
+                                       "skopeo log on the router: /var/lib/vmm-registry/copies/*/log)")
+                return {"mirrored": copied}
+            return self._guarded(db, task, cluster_id, body, failed_status=cluster.status)
+        return self._run_task(db, cluster, "mirror", "Mirror images for", run, images)
 
     def _ctx(self, cluster: Cluster) -> Dict[str, Any]:
         """What drivers need to render a node's cloud-init / bootstrap the cluster"""
@@ -648,8 +795,16 @@ class ClusterService:
             "certificate_key": spec.get("certificate_key"),
         }
         if cluster.group_id:
-            router_ip = network_for(cluster).gateway()
+            network = network_for(cluster)
+            router_ip = network.gateway()
             ctx["api_sans"] = [n for n in (api_hostname, f"api-int.{zone}", cluster.api_ip, router_ip) if n]
+            mirror = spec.get("mirror") if spec.get("disconnected") else None
+            if mirror and mirror.get("registry"):
+                ctx["mirror"] = mirror
+                ctx["mirror_ca"] = network.spec().router.registry.ca_pem or ""
+                ctx["flannel_manifest"] = mirror.get("flannel")
+                # the packages must match the mirrored images: the patch resolved by the router
+                ctx["version"] = mirror.get("kube_version") or ctx["version"]
         return ctx
 
     @staticmethod
@@ -684,6 +839,18 @@ class ClusterService:
             @staticmethod
             def api_node() -> str:
                 return service._api_node(cluster).name
+
+            @staticmethod
+            def prereqs_done(nodes: List[Dict[str, Any]]) -> None:
+                """Disconnected: packages installed, the nodes lose their egress exemption"""
+                if not (cluster.spec or {}).get("disconnected") or not cluster.group_id:
+                    return
+                service._check(task, cluster, db, 55, "Packages installed: removing the nodes' egress exemption "
+                                                      "(from now on images come from the mirror only)")
+                network = network_for(cluster)
+                for node in nodes:
+                    network.unexempt_egress(node["ip"])
+                network.commit()
 
         return Ops()
 
@@ -1030,6 +1197,12 @@ class ClusterService:
                     if cluster.type == "openshift":
                         from app.services.openshift_installer import openshift_installer
                         openshift_installer.release_group(cluster, network)  # queued, applied by destroy()
+                    elif (cluster.spec or {}).get("disconnected"):
+                        # the group's egress back as it was before the cluster; the registry and its
+                        # content stay (the group's)
+                        before = ((cluster.spec or {}).get("mirror") or {}).get("egress_before")
+                        if before and before != "blocked":
+                            network.set_egress(before)
                     network.destroy()  # only the cluster's reservations / records / load balancer
                 except (ValueError, RuntimeError) as e:
                     logger.warning(f"Could not remove cluster {cluster.name}'s entries from its group: {e}")

@@ -261,13 +261,43 @@ copy() {
     echo $? > $R/rc
 }
 
+# Several images, one "<source> <destination>" pair per line of $R/job (kubeadm / k3s disconnected
+# clusters). Each image is tried 3 times; "IMAGE n/N <rc> <source>" lines in $R/log for the app.
+copylist() {
+    id=$1
+    R=$DATA/copies/$id
+    A=/run/vmm-copy-$id
+    trap 'rm -rf $A' EXIT
+    exec > $R/log 2>&1
+    rm -f $R/rc
+    rpm -q skopeo >/dev/null || dnf -y -q install skopeo || { echo 1 > $R/rc; exit 1; }
+    export TMPDIR=$DATA/tmp
+    mkdir -p $TMPDIR
+    total=$(grep -c . $R/job)
+    n=0
+    failed=0
+    while read -r src dest; do
+        [ -n "$src" ] || continue
+        n=$((n + 1))
+        rc=1
+        for attempt in 1 2 3; do
+            skopeo copy --all --retry-times 3 --authfile $A/auth.json "docker://$src" "docker://$dest" </dev/null && { rc=0; break; }
+            sleep 10
+        done
+        echo "IMAGE $n/$total $rc $src"
+        [ $rc = 0 ] || failed=$((failed + 1))
+    done < $R/job
+    [ $failed = 0 ] && echo 0 > $R/rc || echo 2 > $R/rc
+}
+
 case "$1" in
     setup) setup ;;
     apply) apply ;;
     status) status ;;
     mirror) mirror "$2" ;;
     copy) copy "$2" ;;
-    *) echo "usage: $0 setup|apply|status|mirror <id>|copy <id>"; exit 2 ;;
+    copylist) copylist "$2" ;;
+    *) echo "usage: $0 setup|apply|status|mirror <id>|copy <id>|copylist <id>"; exit 2 ;;
 esac
 """
 

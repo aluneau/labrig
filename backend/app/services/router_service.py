@@ -185,8 +185,11 @@ class ELRouterBackend(RouterBackend):
             # `ct status dnat`: connections to a port the router publishes for a container (the registry's Quay pod,
             # podman DNAT) are forwarded to the container's address: they stay allowed.
             reachable = nets + [a for a in spec.router.egress.allow if ":" not in a]
+            # exempt sources (a jump host; disconnected cluster nodes installing their packages)
+            exempt = sorted({e.source for e in spec.router.egress.exempt})
             egress = ("        ct status dnat accept\n"
-                      f"        ip saddr {spec.cidr} ip daddr {{ {', '.join(reachable)} }} accept\n"
+                      + (f"        ip saddr {{ {', '.join(exempt)} }} accept\n" if exempt else "")
+                      + f"        ip saddr {spec.cidr} ip daddr {{ {', '.join(reachable)} }} accept\n"
                       f"        ip saddr {spec.cidr} counter reject with icmp type admin-prohibited"
                       f" comment \"vmm egress {spec.router.egress.mode}\"\n")
         egress = router_cases.nft_forward_rules(spec) + egress

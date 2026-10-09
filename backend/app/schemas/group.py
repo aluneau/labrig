@@ -433,6 +433,19 @@ class VLANSpec(BaseModel):
     cidr: str
 
 
+class EgressExempt(BaseModel):
+    """A group address (or CIDR) that keeps going out when egress is blocked: e.g. a jump host, or a
+    disconnected cluster node installing its packages at first boot (owner "cluster:<name>", removed
+    by the app once the packages are in: it stands for the customer's golden image / package repo)."""
+    source: str
+    owner: Optional[str] = None
+
+    @field_validator("source")
+    @classmethod
+    def _source(cls, v: str) -> str:
+        return _ipv4_net(v, "Egress exempt source")
+
+
 PROXY_USER = r"^[A-Za-z0-9._-]{1,64}$"
 PROXY_PASSWORD = r"^[A-Za-z0-9._~!*+=,;-]{1,128}$"  # no ':' '@' '/' (proxy URLs) nor shell / squid specials
 
@@ -489,6 +502,9 @@ class EgressSpec(BaseModel):
     mode: Literal["open", "blocked", "proxy"] = "open"
     allow: List[str] = []  # CIDRs / addresses still reachable when blocked / proxy
     proxy: ProxySpec = ProxySpec()
+    # group sources still allowed out when blocked / proxy (jump host; disconnected cluster nodes
+    # installing their packages, owner cluster:<name>)
+    exempt: List[EgressExempt] = []
 
     @field_validator("allow")
     @classmethod

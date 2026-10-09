@@ -44,6 +44,8 @@ backend/app/
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
+                      k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml)
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates
@@ -62,7 +64,7 @@ docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 eg
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -234,6 +236,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   `OperatorHub.disableAllDefaultSources`, CatalogSource READY; `AddonRunner.sources` maps redhat-operators -> the
   mirrored CatalogSource. Day-2 add-ons mirror first with the union of the cluster's operators (one filtered catalog
   image per index: a smaller request would drop packages).
+- **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
+  `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
+  `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into
+  `spec.mirror.flannel`: nodes can't download it) -> `registry_images.copy_list` (router script `copylist`, skopeo
+  --all) to one Quay namespace per upstream (`k8s/ docker/ ghcr/ quay/`, others host with `-`). Egress `blocked` +
+  owned `router.egress.exempt` per new node (nft `ip saddr … accept`) in `_add_nodes`; `ops.prereqs_done` drops the
+  exemptions before kubeadm pulls anything (packages = "golden image"). Nodes: `hosts.toml` per registry
+  (`override_path`, CA), containerd `config_path` + sandbox image, no `images pull` in prereqs, packages pinned to the
+  mirrored patch. Day 2: `POST /clusters/{id}/mirror` (new registry -> hosts.toml pushed via guest-exec). Delete from a
+  shared group restores `spec.mirror.egress_before`. Quay 401 on a missing repo = "not mirrored" (ImagePullBackOff).
 - **Templates** (docs/templates.md): `backend/app/templates/*.yaml` (built-in, read-only) + `DATA_DIR/templates/*.yaml`
   (user, "Save as template" on a group). Loaded on every request; a bad file is reported in `GET /templates` `errors`,
   never fatal (`scripts/check-templates.py` validates offline: parse, placeholders, render with sample params through
@@ -314,6 +326,7 @@ node bgp.js                                                     # BGP: FRR membe
 node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
+node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host

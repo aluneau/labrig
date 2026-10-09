@@ -55,6 +55,8 @@ type clusterModel struct {
 	RouterMemory   types.Int64     `tfsdk:"router_memory"`
 	CIDR           types.String    `tfsdk:"cidr"`
 	ExtraArgs      types.String    `tfsdk:"extra_args"`
+	Disconnected   types.Bool      `tfsdk:"disconnected"`
+	MirrorImages   types.List      `tfsdk:"mirror_images"`
 	Username       types.String    `tfsdk:"username"`
 	Password       types.String    `tfsdk:"password"`
 	SSHKeys        types.List      `tfsdk:"ssh_keys"`
@@ -202,8 +204,16 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Description: "kubeadm with an auto-created group: router memory in MiB (default: the server's group default, 512)."},
 			"cidr":       schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "Subnet of the new network. Default: first free /24 of the server's CLUSTER_SUBNET_POOL."},
 			"extra_args": schema.StringAttribute{Optional: true, PlanModifiers: replaceStr, Description: "Extra k3s server flags, e.g. \"--disable traefik\"."},
-			"username":   schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("admin"), PlanModifiers: replaceStr},
-			"password":   schema.StringAttribute{Optional: true, Sensitive: true, PlanModifiers: replaceStr},
+			"disconnected": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
+				Description: "kubeadm: air-gapped install (default false). The group router runs a mirror registry (4 GiB RAM, 60 GiB thin disk when it had none) " +
+					"holding the cluster's images (kubeadm's control plane images, Flannel, nginx:alpine + mirror_images); the nodes pull through containerd mirrors " +
+					"and the group's egress is blocked. openshift: use openshift.disconnected."},
+			"mirror_images": schema.ListAttribute{Optional: true, ElementType: types.StringType,
+				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
+				Description:   "kubeadm disconnected: extra images mirrored at create, e.g. docker.io/library/redis:7-alpine (more later: POST /clusters/{id}/mirror)."},
+			"username": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("admin"), PlanModifiers: replaceStr},
+			"password": schema.StringAttribute{Optional: true, Sensitive: true, PlanModifiers: replaceStr},
 			"ssh_keys": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()}},
 			"running":            schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Desired power state of all nodes."},
@@ -276,6 +286,8 @@ func (r *clusterResource) waitIdle(ctx context.Context, id string) error {
 	timeout := clusterTimeout
 	if c, err := r.get(ctx, id); err == nil && c.Type == "openshift" {
 		timeout = openshiftTimeout
+	} else if err == nil && c.Spec["disconnected"] == true {
+		timeout = 2 * time.Hour // the first registry setup downloads mirror-registry (~1.3 GB) on the router
 	}
 	return Poll(ctx, 10*time.Second, timeout, func() (bool, error) {
 		c, err := r.get(ctx, id)
@@ -338,10 +350,16 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			return plan.RouterMemory.ValueInt64()
 		}(),
-		"cidr":       strPtr(plan.CIDR),
-		"extra_args": strPtr(plan.ExtraArgs),
-		"username":   strPtr(plan.Username),
-		"password":   strPtr(plan.Password),
+		"cidr":         strPtr(plan.CIDR),
+		"extra_args":   strPtr(plan.ExtraArgs),
+		"disconnected": !plan.Disconnected.IsNull() && !plan.Disconnected.IsUnknown() && plan.Disconnected.ValueBool(),
+		"username":     strPtr(plan.Username),
+		"password":     strPtr(plan.Password),
+	}
+	if !plan.MirrorImages.IsNull() && !plan.MirrorImages.IsUnknown() {
+		var images []string
+		resp.Diagnostics.Append(plan.MirrorImages.ElementsAs(ctx, &images, false)...)
+		body["mirror_images"] = images
 	}
 	if v := intPtr(plan.Ctlplanes); v != nil {
 		body["ctlplanes"] = *v
@@ -550,6 +568,11 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 		fillOpenShift(ctx, m.OpenShift, c.Spec)
 	} else if c.Type != "openshift" {
 		m.OpenShift = nil
+	}
+	if d, ok := c.Spec["disconnected"].(bool); ok {
+		m.Disconnected = types.BoolValue(d)
+	} else if m.Disconnected.IsNull() || m.Disconnected.IsUnknown() {
+		m.Disconnected = types.BoolValue(false)
 	}
 	if u, ok := c.Spec["username"].(string); ok && u != "" {
 		m.Username = types.StringValue(u) // imported clusters: the server's value, not null

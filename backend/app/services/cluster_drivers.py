@@ -195,6 +195,8 @@ STATE=@STATE@
 MINOR=@MINOR@
 PKGVER=@PKGVER@
 ROLE=@ROLE@
+DISCONNECTED=@DISCONNECTED@
+PAUSE=@PAUSE@
 mkdir -p "$STATE"
 rm -f "$STATE/prereqs-done" "$STATE/prereqs-failed"
 fail() { echo "$1 (see /var/log/vmm-k8s-prereqs.log)" > "$STATE/prereqs-failed"; exit 1; }
@@ -270,11 +272,21 @@ if ! grep -q 'SystemdCgroup = true' /etc/containerd/config.toml; then
     sed -i "/runtimes\.runc\.options\]/a\            SystemdCgroup = true" /etc/containerd/config.toml
 fi
 grep -q 'SystemdCgroup = true' /etc/containerd/config.toml || fail "containerd SystemdCgroup"
+if [ "$DISCONNECTED" = 1 ]; then
+    # images come from the lab's mirror registry: hosts.toml per upstream registry (written by cloud-init),
+    # the registry CA system-wide (token realm, curl / crictl checks)
+    sed -i -E "s#^(\s*config_path = )(''|\"\")#\1'/etc/containerd/certs.d'#" /etc/containerd/config.toml
+    grep -qE "config_path = .*/etc/containerd/certs.d" /etc/containerd/config.toml || fail "containerd registry config_path"
+    update-ca-certificates >/dev/null 2>&1 || update-ca-trust || fail "registry CA"
+fi
+if [ -n "$PAUSE" ]; then  # the sandbox image kubeadm expects (and that is mirrored)
+    sed -i -E "s#^(\s*sandbox(_image)? = )['\"][^'\"]*['\"]#\1'$PAUSE'#" /etc/containerd/config.toml
+fi
 systemctl enable containerd
 systemctl restart containerd || fail "containerd start"
 echo "runtime-endpoint: unix:///run/containerd/containerd.sock" > /etc/crictl.yaml
 systemctl enable kubelet
-if [ "$ROLE" = ctlplane ]; then
+if [ "$ROLE" = ctlplane ] && [ "$DISCONNECTED" != 1 ]; then  # disconnected: kubeadm init pulls from the mirror
     retry kubeadm config images pull --kubernetes-version "$(kubeadm version -o short)" || fail "control plane images"
 fi
 touch "$STATE/prereqs-done"
@@ -315,8 +327,11 @@ class KubeadmDriver(ClusterDriver):
         """ctx: name, zone, api_hostname, api_port, api_sans, token, certificate_key, version,
         pod_cidr, service_cidr, el. node: name, role, ip, first."""
         ver = kubeadm_version(ctx.get("version"))
+        mirror = ctx.get("mirror")  # disconnected: {"registry", "images", "pause", ...}; ctx["mirror_ca"]
         script = (_PREREQS.replace("@STATE@", K8S_STATE).replace("@MINOR@", ver["minor"])
-                  .replace("@PKGVER@", ver["patch"] or "").replace("@ROLE@", node["role"]))
+                  .replace("@PKGVER@", ver["patch"] or "").replace("@ROLE@", node["role"])
+                  .replace("@DISCONNECTED@", "1" if mirror else "0")
+                  .replace("@PAUSE@", shlex.quote(mirror.get("pause") or "") if mirror else "''"))
         files = [
             {"path": "/etc/modules-load.d/k8s.conf", "permissions": "0644", "content": "overlay\nbr_netfilter\nnf_conntrack\n"},
             {"path": "/etc/sysctl.d/99-kubernetes.conf", "permissions": "0644",
@@ -326,6 +341,9 @@ class KubeadmDriver(ClusterDriver):
         ]
         if node["role"] == "ctlplane" and node["first"]:
             files.append({"path": INIT_CONFIG, "permissions": "0600", "content": self.init_config(ctx, node)})
+        if mirror:
+            from app.services import k8s_mirror
+            files += k8s_mirror.node_files(mirror, ctx["mirror_ca"])
         extra: Dict[str, Any] = {"write_files": files, "runcmd": [["sh", PREREQS_SCRIPT]]}
         if ctx.get("el"):
             prep = _el_guest_agent_prep()
@@ -366,6 +384,8 @@ class KubeadmDriver(ClusterDriver):
             ops.progress(35 + 20 * i // count, f"Installing containerd + kubeadm on {node['name']}")
             ops.wait_agent(node["name"])
             self._wait_prereqs(ops, node["name"])
+        # disconnected: the nodes lose their temporary egress exemption (packages are in)
+        ops.prereqs_done(nodes)
 
         first = next((n for n in nodes if n.get("first")), None)
         if initial and first is not None:
@@ -376,9 +396,13 @@ class KubeadmDriver(ClusterDriver):
                 f"kubeadm init --config {INIT_CONFIG}.rendered --upload-certs > /var/log/vmm-kubeadm-init.log 2>&1 "
                 "|| { tail -n 40 /var/log/vmm-kubeadm-init.log; exit 1; }"), INIT_TIMEOUT, "kubeadm init")
             ops.progress(62, "Installing the pod network (Flannel)")
+            if ctx.get("flannel_manifest"):  # disconnected: downloaded by the router (base64)
+                get = f"echo {ctx['flannel_manifest']} | base64 -d > /root/kube-flannel.yml; "
+            else:
+                get = ("n=0; until curl -fsSL -o /root/kube-flannel.yml " + FLANNEL_MANIFEST + "; do "
+                       "n=$((n+1)); [ $n -ge 20 ] && exit 1; sleep 10; done; ")
             self._sh(ops, first["name"], (
-                "n=0; until curl -fsSL -o /root/kube-flannel.yml " + FLANNEL_MANIFEST + "; do "
-                "n=$((n+1)); [ $n -ge 20 ] && exit 1; sleep 10; done; "
+                get +
                 f"sed -i 's#10.244.0.0/16#{ctx['pod_cidr']}#' /root/kube-flannel.yml && "
                 f"kubectl --kubeconfig {ADMIN_CONF} apply -f /root/kube-flannel.yml"), 600, "Flannel")
 

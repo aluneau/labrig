@@ -456,17 +456,42 @@ class GroupClusterNetwork(ClusterNetwork):
                                        if not (r.owner == self.owner and (name is None or r.name == name))]
         self._ops.append(op)
 
-    def enable_registry(self) -> None:
-        """Mirror registry on the router (disconnected OpenShift). Stays enabled when the cluster goes:
-        the mirrored content is the group's (docs/disconnected.md)"""
+    def enable_registry(self, memory_mb: Optional[int] = None, vcpus: Optional[int] = None,
+                        disk_gb: Optional[int] = None) -> None:
+        """Mirror registry on the router (disconnected clusters). Stays enabled when the cluster goes:
+        the mirrored content is the group's (docs/disconnected.md). The sizes only apply when the
+        registry was not enabled yet (kubeadm needs less than an OpenShift release mirror)."""
         def op(spec):
-            spec.router.registry.enabled = True
+            reg = spec.router.registry
+            if not reg.enabled:
+                reg.memory_mb = memory_mb or reg.memory_mb
+                reg.vcpus = vcpus or reg.vcpus
+                reg.disk_gb = disk_gb or reg.disk_gb
+            reg.enabled = True
         self._ops.append(op)
 
     def set_egress(self, mode: str) -> None:
         """Group egress (open / blocked): blocked = the group's machines can't reach the outside"""
         def op(spec):
             spec.router.egress.mode = mode
+        self._ops.append(op)
+
+    def exempt_egress(self, ip: str) -> None:
+        """Let a node of the cluster out while egress is blocked (package install at first boot)"""
+        from app.schemas.group import EgressExempt
+
+        def op(spec):
+            source = f"{ip}/32"
+            spec.router.egress.exempt = [e for e in spec.router.egress.exempt
+                                         if not (e.owner == self.owner and e.source == source)]
+            spec.router.egress.exempt.append(EgressExempt(source=source, owner=self.owner))
+        self._ops.append(op)
+
+    def unexempt_egress(self, ip: Optional[str] = None) -> None:
+        """Drop the cluster's egress exemptions (of `ip`, or all)"""
+        def op(spec):
+            spec.router.egress.exempt = [e for e in spec.router.egress.exempt
+                                         if not (e.owner == self.owner and (ip is None or e.source == f"{ip}/32"))]
         self._ops.append(op)
 
     def free_lb_port(self, start: int = 6443) -> int:
@@ -499,6 +524,7 @@ class GroupClusterNetwork(ClusterNetwork):
             spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != self.owner]
             spec.load_balancers = [lb for lb in spec.load_balancers if lb.owner != self.owner]
             spec.address_pools = [p for p in spec.address_pools if p.owner != self.owner]
+            spec.router.egress.exempt = [e for e in spec.router.egress.exempt if e.owner != self.owner]
             if spec.router.bgp is not None:
                 spec.router.bgp.announce_ranges = [r for r in spec.router.bgp.announce_ranges if r.owner != self.owner]
                 spec.router.bgp.neighbors = [n for n in spec.router.bgp.neighbors if n.owner != self.owner]

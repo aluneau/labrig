@@ -56,6 +56,12 @@ class ClusterCreate(BaseModel):
     password: Optional[str] = None
     ssh_keys: List[str] = []
     keyboard: Optional[str] = Field(None, pattern=r"^[a-z]{2,10}$")
+    # kubeadm (create only): air-gapped install. The group router gets the mirror registry, the images the
+    # cluster needs are copied into it, the nodes pull only from it (containerd mirrors) and the group's
+    # egress is blocked (docs/disconnected.md). OpenShift: openshift.disconnected instead.
+    disconnected: bool = False
+    # Disconnected: extra images to mirror at create (e.g. docker.io/library/redis:7)
+    mirror_images: List[str] = Field([], max_length=50)
     # type "openshift": version, topology (sno / compact / ha), storage, operators, SR-IOV, MetalLB.
     # ctlplanes / workers / ctlplane / worker sizes follow the topology (workers: ha only).
     openshift: Optional[OpenShiftOptions] = None
@@ -65,6 +71,11 @@ class ClusterCreate(BaseModel):
 
 class ClusterScale(BaseModel):
     count: int = Field(1, ge=1, le=10)  # workers to add
+
+
+class ClusterMirrorRequest(BaseModel):
+    """Day 2, disconnected kubeadm cluster: copy more images into the group's registry"""
+    images: List[str] = Field(..., min_length=1, max_length=50)
 
 
 class ClusterNodeOut(BaseModel):

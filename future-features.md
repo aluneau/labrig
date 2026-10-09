@@ -20,6 +20,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
+| Disconnected kubeadm (`disconnected: true`: images mirrored with skopeo, containerd `hosts.toml` mirrors, egress blocked, per-node exemption for packages, day-2 "Mirror more images"; template `disconnected-kubeadm`) | ✅ done (2026-10-09); k3s air gap open: needs k3s in a lab group first (no router today) |
 | Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
 | Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
 | IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); cluster dual stack next |

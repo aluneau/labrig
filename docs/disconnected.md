@@ -252,3 +252,90 @@ Known limits:
 - Operators from certified / community catalogs are mirrored from their index too, without the dependency
   lookup (only `redhat-operators` is read).
 - The cluster's IDMS keeps the `<uplink IP>:8443` mirror second: harmless (the nodes resolve the first one).
+
+## Kubernetes (kubeadm)
+
+A kubeadm cluster created with **Disconnected** (`disconnected: true`, create time only; optional
+`mirror_images`) reproduces the usual air-gapped Kubernetes case: nodes without internet access, every image
+from a mirror registry. Same bastion as OpenShift: the group router runs the registry and keeps its access.
+
+```
+registry.k8s.io / docker.io / ghcr.io / quay.io
+        │  (router only: skopeo copy --all)
+        ▼
+router: mirror registry  registry.<domain>:8443   k8s/…  docker/…  ghcr/…  quay/…
+        ▲  egress blocked
+        │  containerd hosts.toml: registry.k8s.io -> https://registry.<domain>:8443/v2/k8s (override_path) …
+nodes: kubeadm control plane, Flannel, your pods (usual image names, nothing rewritten)
+```
+
+What the create task does:
+
+1. **Registry**: enabled on the group router with kubeadm sizes (4 GiB RAM, 2 vCPUs, 60 GiB thin disk;
+   skopeo needs far less than oc-mirror). An auto-created group's router is created with them; an existing
+   group's router is restarted once (as for OpenShift); a registry already enabled is used as it is.
+   No OpenShift pull secret is needed (mirror-registry is a public download).
+2. **Images**: on the router, the Kubernetes version is resolved (a minor -> its latest patch,
+   `dl.k8s.io/release/stable-<minor>.txt`), kubeadm of that version is downloaded and
+   `kubeadm config images list` gives the control plane images; the Flannel manifest is downloaded there too
+   (its images are added, and the manifest is handed to the first control plane: it can't download it).
+   Then `nginx:alpine` (a first test) and `mirror_images`. `skopeo copy --all` copies each one (detached unit
+   `vmm-copy-<id>`, `copylist`, 3 attempts per image); the node packages are pinned to the same patch.
+3. **Layout**: one namespace per upstream registry (Quay needs one: `registry.k8s.io/pause` can't be pushed
+   as `pause`): `k8s/`, `docker/`, `ghcr/`, `quay/`, others `<host with - for . :>` (`gcr.io` -> `gcr-io/`).
+   `docker.io/library/nginx:alpine` -> `registry.<domain>:8443/docker/library/nginx:alpine`.
+4. **Egress blocked** in the router push that adds the node reservations, before any node boots.
+5. **Nodes** (cloud-init): `/etc/containerd/certs.d/<registry>/hosts.toml` for the 4 registries (+ those of
+   `mirror_images`), mirror `https://registry.<domain>:8443/v2/<namespace>` with `override_path = true`, the
+   upstream kept as `server`; the registry CA in `/etc/containerd/certs.d/vmm-registry-ca.crt` and the system
+   trust store; containerd's `config_path` and sandbox (pause) image set accordingly. Pods use their usual
+   image names.
+6. **kubeadm init / join** as for a connected cluster (images through the mirror), Flannel from the manifest
+   the router fetched.
+
+Afterwards the cluster page lists the **mirrored images** (`registry.images` in the API) and has *Mirror
+more images*: `POST /api/v1/clusters/{id}/mirror {"images": ["busybox:1.37"]}` (task; a new upstream
+registry gets its `hosts.toml` on the running nodes, containerd reads them on the next pull).
+
+### Packages: why a temporary per-node exemption
+
+containerd.io and kubelet / kubeadm / kubectl come from download.docker.com and pkgs.k8s.io (plus the
+distribution's own repositories for a few dependencies). Options considered:
+
+- a package repository on the router (apt + dnf repos with dependency resolution for every node
+  distribution: heavy, and not what the case is about);
+- allow-listing the repositories in `egress.allow`: CDN addresses, changing all the time;
+- installing them before egress is blocked: the whole lab would be open during that time, and nodes added
+  day 2 would need it opened again.
+
+Chosen: **`router.egress.exempt`** entries (`{source: <node IP>/32, owner: cluster:<name>}`): only the node
+being installed may go out, from its first boot until its packages are in, then the app removes the entry
+(before kubeadm pulls a single image, so an image missing from the mirror can't sneak in from the internet).
+It stands for what customers have: a golden image or an internal package mirror. Nodes added day 2 get the
+same treatment. While a node is exempt, the cluster page and the API (`registry.exempt`) say so. `exempt`
+can also be set by hand in the group spec (e.g. a jump host that keeps internet access); entries owned by a
+cluster can't be changed through spec PUTs.
+
+### Checks (the customer-case point)
+
+```bash
+kubectl run web --image=nginx:alpine                  # Running: mirrored
+kubectl run bb --image=busybox:1.37 -- sleep 1d       # ErrImagePull / ImagePullBackOff
+kubectl describe pod bb    # ... HEAD https://registry.<domain>:8443/v2/docker/library/busybox/manifests/1.37?ns=docker.io: 401 UNAUTHORIZED
+kubectl exec web -- wget -T 8 -O /dev/null http://example.com   # Host is unreachable (egress blocked)
+# on a node:
+ctr -n k8s.io images pull --hosts-dir /etc/containerd/certs.d docker.io/library/nginx:alpine
+```
+
+containerd tries the mirror, then the upstream `server` (refused), and reports the first error: Quay's
+`401 UNAUTHORIZED` for an anonymous pull of a repository it doesn't have, i.e. "not mirrored". `crictl` isn't
+installed by the Debian packages; `ctr` comes with containerd. Template: `disconnected-kubeadm`.
+
+**Delete**: an auto-created group goes with the cluster (registry included). In an existing group the egress
+returns to what it was before the cluster (`spec.mirror.egress_before`), the cluster's exemptions go, the
+registry and its images stay.
+
+**k3s**: not supported yet. k3s clusters use their own NAT network without a router, so there is no bastion
+to hold the registry and no egress switch. The plan: k3s in a lab group (`GroupClusterNetwork`, API through
+the router's haproxy), then the k3s air-gap recipe: binary + `k3s-airgap-images` through the same exemption /
+registry, `registries.yaml` with `mirrors` + `rewrite` to the namespaces above.
