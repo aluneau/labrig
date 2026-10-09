@@ -74,13 +74,17 @@ const CreateTokenModal: React.FC<{ onClose: () => void; onCreated: () => void }>
   );
 };
 
-/** The personal "cli" token the UI puts in its copy-paste commands */
+/** The default "cli" token the UI puts in its copy-paste commands */
 const CliTokenCard: React.FC<{ mine: ApiToken[] | null; onChange: () => void }> = ({ mine, onChange }) => {
   const cli = useCliToken();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const server = mine?.find((t) => t.name === 'cli');
-  const stale = !!cli.token && !!mine && (!server || !cli.token.startsWith(server.prefix));
+  const listed = !!mine?.some((t) => t.name === 'cli');
+
+  // the server makes it on first use: refresh the list once it exists
+  useEffect(() => {
+    if (cli.token && mine && !listed) onChange();
+  }, [cli.token, mine, listed, onChange]);
 
   const rotate = async () => {
     setBusy(true);
@@ -101,31 +105,19 @@ const CliTokenCard: React.FC<{ mine: ApiToken[] | null; onChange: () => void }> 
       <CardBody>
         <Stack hasGutter>
           <StackItem>
-            Your personal token for the command line: the copy-paste commands of the UI (kubeconfig downloads…)
-            include it. Rotating it revokes the previous one. Also available with{' '}
+            Your default token for the command line (every account has one): the copy-paste commands of the UI
+            (kubeconfig downloads…) include it, in every browser. Rotating it revokes the previous value. Also available with{' '}
             <code>python -m app.cli token cli --user {'<user>'}</code> on the host.
           </StackItem>
-          {error && <StackItem><Alert variant="danger" isInline isPlain title={error} /></StackItem>}
-          {cli.token && !stale && (
+          {(error || cli.error) && <StackItem><Alert variant="danger" isInline isPlain title={error || cli.error} /></StackItem>}
+          {cli.token && (
             <StackItem>
               <ClipboardCopy isReadOnly isCode hoverTip="Copy" clickTip="Copied">{`export VMM_TOKEN=${cli.token}`}</ClipboardCopy>
             </StackItem>
           )}
-          {stale && (
-            <StackItem>
-              <Alert variant="warning" isInline isPlain
-                title="This browser's copy was revoked (rotated elsewhere): rotate to get a working one." />
-            </StackItem>
-          )}
-          {!cli.token && (
-            <StackItem>
-              {server ? 'You have a CLI token, but this browser doesn\'t know it (created elsewhere): rotate it to use it here.'
-                : 'No CLI token yet: it is created the first time a command needs it, or now.'}
-            </StackItem>
-          )}
           <StackItem>
             <Button id="cli-token-rotate" variant="secondary" onClick={rotate} isLoading={busy} isDisabled={busy}>
-              {cli.token || server ? 'Rotate' : 'Create'}
+              Rotate
             </Button>
           </StackItem>
         </Stack>

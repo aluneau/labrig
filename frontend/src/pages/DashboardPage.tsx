@@ -19,6 +19,7 @@ import { usePolling } from '../hooks/usePolling';
 import { useLiveEvents } from '../hooks/useEvents';
 import { formatBytes } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
+import { UpdateButton } from '../components/host/UpdateButton';
 
 const Stat: React.FC<{ title: string; value: React.ReactNode; detail?: React.ReactNode; to?: string }> = ({ title, value, detail, to }) => {
   const navigate = useNavigate();
@@ -43,7 +44,8 @@ export const DashboardPage: React.FC = () => {
 
   return (
     <>
-      <PageHeader title="Dashboard" description={host ? `${host.hostname} · ${host.libvirt_uri}` : undefined} />
+      <PageHeader title="Dashboard" description={host ? `${host.hostname} · ${host.libvirt_uri}` : undefined}
+        actions={<UpdateButton />} />
       <PageSection>
         {error && (
           <Alert variant="danger" title="Cannot reach libvirt" style={{ marginBottom: 16 }}>

@@ -9,6 +9,20 @@ import { useAuth } from '../../hooks/useAuth';
 import { errorText } from '../../utils/format';
 import { Markdown } from '../common/Markdown';
 
+/** While an update runs the service restarts: reload the page once /health answers with another version */
+export function useReloadOnNewVersion(active: boolean, from: string | undefined) {
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const h = await (await fetch('/health', { cache: 'no-store' })).json();
+        if (h.version && h.version !== from) window.location.reload();
+      } catch { /* restarting */ }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [active, from]);
+}
+
 /** Running version, latest GitHub release of the channel, update command / button (docs/updates.md) */
 export const UpdateCard: React.FC = () => {
   const { readOnly } = useAuth();
@@ -30,18 +44,7 @@ export const UpdateCard: React.FC = () => {
 
   useEffect(() => { load(); }, [load]);
 
-  // while an update runs, the service restarts: reload the page once it answers with another version
-  useEffect(() => {
-    if (!st?.updating && message?.variant !== 'success') return undefined;
-    const from = st?.version;
-    const timer = window.setInterval(async () => {
-      try {
-        const h = await (await fetch('/health', { cache: 'no-store' })).json();
-        if (h.version && h.version !== from) window.location.reload();
-      } catch { /* restarting */ }
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [st?.updating, st?.version, message?.variant]);
+  useReloadOnNewVersion(!!st?.updating || message?.variant === 'success', st?.version);
 
   const update = async () => {
     if (!st?.latest) return;

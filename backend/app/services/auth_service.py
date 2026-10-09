@@ -5,8 +5,10 @@ Passwords never touch the DB: PAM checks them (in-process, or through the root h
 users other than the app's own account). Roles are resolved from the user's groups on every use
 (cached a minute), so removing someone from the group also disables their sessions and tokens.
 """
+import base64
 import grp
 import hashlib
+import hmac
 import logging
 import os
 import pwd
@@ -254,13 +256,59 @@ def create_token(db: Session, username: str, name: str, expires_days: Optional[f
 
 
 CLI_TOKEN_NAME = "cli"
+_CLI_KEY_FILE = "cli-token.key"
+
+
+def _cli_key() -> bytes:
+    """Secret the default tokens are derived from (DATA_DIR, 0600, made once). Losing it only revokes them."""
+    path = settings.DATA_DIR / _CLI_KEY_FILE
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path.read_bytes()
+    with os.fdopen(fd, "wb") as f:
+        f.write(secrets.token_bytes(32))
+    return path.read_bytes()
+
+
+def _cli_value(username: str, row_id: int) -> str:
+    digest = hmac.new(_cli_key(), f"cli:{row_id}:{username}".encode(), hashlib.sha256).digest()
+    return TOKEN_PREFIX + base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
 def rotate_cli_token(db: Session, username: str) -> Tuple[ApiToken, str]:
-    """The user's personal command-line token (used in the UI's copy-paste commands): replaces the
-    previous one, never expires."""
+    """New default token of the user (name "cli", never expires; the previous one is revoked). Its value is
+    derived from the row id and a key file, so the app can hand it out again (cli_token) while the DB only
+    holds its hash, like other tokens."""
     db.query(ApiToken).filter(ApiToken.username == username, ApiToken.name == CLI_TOKEN_NAME).delete()
-    return create_token(db, username, CLI_TOKEN_NAME)
+    row = ApiToken(username=username, name=CLI_TOKEN_NAME, token_hash="pending-" + secrets.token_hex(16),
+                   prefix="", created_at=datetime.utcnow())
+    db.add(row)
+    db.flush()
+    value = _cli_value(username, row.id)
+    row.token_hash = _sha256(value)
+    row.prefix = value[:12]
+    db.commit()
+    db.refresh(row)
+    return row, value
+
+
+def cli_token(db: Session, username: str) -> Tuple[ApiToken, str, bool]:
+    """The user's default token (every account has one: made on first use), put in the UI's copy-paste
+    commands. Returns (row, value, created). A "cli" token from before derived values is replaced."""
+    row = db.query(ApiToken).filter(ApiToken.username == username, ApiToken.name == CLI_TOKEN_NAME) \
+        .order_by(ApiToken.id.desc()).first()
+    if row is not None and (row.expires_at is None or row.expires_at > datetime.utcnow()):
+        value = _cli_value(username, row.id)
+        if row.token_hash == _sha256(value):
+            return row, value, False
+    row, value = rotate_cli_token(db, username)
+    return row, value, True
 
 
 def token_row(db: Session, value: str, ip: str = "") -> Optional[ApiToken]:

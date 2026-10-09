@@ -283,7 +283,9 @@ export const authApi = {
   createToken: (name: string, expiresDays?: number) =>
     post<ApiTokenCreated>('/auth/tokens', { name, expires_days: expiresDays || null }),
   revokeToken: (id: number) => del(`/auth/tokens/${id}`),
-  /** (Re)create my personal CLI token (name "cli"): the previous one is revoked */
+  /** My default token (name "cli", made on first use) */
+  cliToken: () => request<ApiTokenCreated>('/auth/tokens/cli'),
+  /** Rotate my default token: the previous value stops working */
   rotateCliToken: () => post<ApiTokenCreated>('/auth/tokens/cli', {}),
 };
 

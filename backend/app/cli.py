@@ -4,8 +4,8 @@
   venv/bin/python -m app.cli user show <user>                a Linux user's groups and VM Manager role
   venv/bin/python -m app.cli user check <user>               test a password through PAM (prompted, or on stdin)
   venv/bin/python -m app.cli token create --user <user> [--name NAME] [--expires-days N]
-  venv/bin/python -m app.cli token cli --user <user>         (re)create the user's personal CLI token, the one the
-                                                             web UI puts in its copy-paste commands
+  venv/bin/python -m app.cli token cli --user <user> [--rotate]  the user's default token (made on first use), the
+                                                             one the web UI puts in its copy-paste commands
   venv/bin/python -m app.cli token list [--user <user>]
   venv/bin/python -m app.cli token revoke <id>
   venv/bin/python -m app.cli session revoke --user <user>    log a user out of every browser
@@ -61,14 +61,20 @@ def cmd_token_create(args) -> int:
               f"{settings.AUTH_ADMIN_GROUPS} / {settings.AUTH_VIEWER_GROUPS or '-'})", file=sys.stderr)
         return 1
     with SessionLocal() as db:
-        if args.cli:
+        if args.cli and not args.rotate:
+            row, value, created = auth_service.cli_token(db, args.user)
+            if not created:
+                print(value)
+                print(f"default token {row.id} of {args.user} ({role})", file=sys.stderr)
+                return 0
+        elif args.cli:
             row, value = auth_service.rotate_cli_token(db, args.user)
         else:
             row, value = auth_service.create_token(db, args.user, args.name, args.expires_days)
     auth_service.audit_log.info(f"token created id={row.id} name={row.name!r} user={args.user} (cli)")
     print(value)
     print(f"token {row.id} '{row.name}' for {args.user} ({role})"
-          f"{', expires ' + _fmt(row.expires_at) if row.expires_at else ''}: shown once, keep it safe",
+          f"{', expires ' + _fmt(row.expires_at) if row.expires_at else ''}: {'keep it safe' if args.cli else 'shown once, keep it safe'}",
           file=sys.stderr)
     return 0
 
@@ -126,8 +132,9 @@ def main(argv=None) -> int:
     p.add_argument("--name", default="token")
     p.add_argument("--expires-days", type=float)
     p.set_defaults(func=cmd_token_create, cli=False)
-    p = token.add_parser("cli", help="(re)create the user's personal CLI token (replaces the previous one)")
+    p = token.add_parser("cli", help="print the user's default token (made on first use)")
     p.add_argument("--user", required=True)
+    p.add_argument("--rotate", action="store_true", help="replace it: the previous value stops working")
     p.set_defaults(func=cmd_token_create, cli=True)
     p = token.add_parser("list", help="list tokens")
     p.add_argument("--user")

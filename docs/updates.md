@@ -50,7 +50,8 @@ switches back** and restarts the previous one. The 3 newest releases are kept. L
 The **Host page** shows the running version, the latest release of the channel (checked at most every 6 h) with its
 release notes, and the command. On a release install, admins get **Update now**: the app asks the privileged
 helper (`self-update`), which starts the updater detached (`vm-manager-update.service`, it survives the app's
-restart); the page reloads when the new version answers. The helper only installs the **current latest release
+restart); the page reloads when the new version answers. The **Dashboard** header has the same action
+(**Update to <version>**, with a confirmation) when an update is available, else the running version. The helper only installs the **current latest release
 of the channel** from the repo in `/etc/vm-manager/update.conf`: the app can't pick another source or an older
 version.
 

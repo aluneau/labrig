@@ -96,37 +96,13 @@ const KubectlCommands: React.FC<{ cluster: Cluster }> = ({ cluster }) => {
   const url = new URL(clusterApi.kubeconfigUrl(cluster.id), window.location.origin).href;
   const file = `$HOME/.kube/${cluster.name}.yaml`; // not ~: fish doesn't expand it inside X=~/…
   const cli = useCliToken();
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   if (cli.needed && !cli.token) {
-    const show = async () => {
-      setBusy(true);
-      try {
-        await cli.ensure();
-        setTokenError(null);
-      } catch (err) {
-        setTokenError(errorText(err));
-      } finally {
-        setBusy(false);
-      }
-    };
-    return (
-      <Stack hasGutter>
-        <StackItem>
-          The download from the command line needs an API token. Your personal CLI token is put in the commands
-          (it is kept by this browser; <Link to="/tokens">API tokens</Link> to rotate it).
-        </StackItem>
-        <StackItem>
-          <Button id="kubectl-cmd-token" variant="secondary" onClick={show} isLoading={busy} isDisabled={busy}>
-            Show the commands with my token
-          </Button>
-        </StackItem>
-        {tokenError && <StackItem><Alert variant="danger" isInline isPlain title={tokenError} /></StackItem>}
-      </Stack>
-    );
+    return cli.error
+      ? <Alert variant="danger" isInline isPlain title={`Your CLI token could not be read: ${cli.error}`} />
+      : <Spinner size="md" aria-label="Loading the commands" />;
   }
   const auth = cli.token ? ` -H "Authorization: Bearer ${cli.token}"` : '';
-  const fetch =`mkdir -p $HOME/.kube && curl -fsS${auth} --create-file-mode 600 ${url} -o ${file} && chmod 600 ${file}`;
+  const fetch = `mkdir -p $HOME/.kube && curl -fsS${auth} --create-file-mode 600 ${url} -o ${file} && chmod 600 ${file}`;
   const thisShell = `${fetch} && export KUBECONFIG=${file} && kubectl get nodes`;
   // The cluster's file comes first so it wins over a stale context of the same name
   const merge = `${fetch} && KUBECONFIG=${file}:$HOME/.kube/config kubectl config view --flatten > $HOME/.kube/config.new`

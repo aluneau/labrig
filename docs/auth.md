@@ -42,7 +42,7 @@ they fail with "read-only account (viewer)". A "read-only" label is shown next t
 
   ```bash
   venv/bin/python -m app.cli token create --user $USER --name opentofu   # prints the token once
-  venv/bin/python -m app.cli token cli --user $USER      # the user's CLI token (replaces the previous one)
+  venv/bin/python -m app.cli token cli --user $USER      # the user's default CLI token (--rotate: replace it)
   venv/bin/python -m app.cli token list [--user U]       |  token revoke <id>
   venv/bin/python -m app.cli status                      # settings, PAM service, admin/viewer groups
   venv/bin/python -m app.cli user show alice             # groups + resulting role
@@ -60,17 +60,18 @@ export VMMANAGER_TOKEN=$VMM_TOKEN; tofu apply      # OpenTofu provider (or provi
 
 ### CLI token
 
-Every user has (at most) one personal **CLI token**: an API token named `cli`, without expiry. The UI puts it
-in its copy-paste commands that call the API (a cluster's "Use with kubectl" commands download the kubeconfig
-with `curl -H "Authorization: Bearer vmm_…"`), so they work as pasted.
+Every account has one default **CLI token**: an API token named `cli`, without expiry, made the first time it is
+needed. The UI puts it in its copy-paste commands that call the API (a cluster's "Use with kubectl" commands
+download the kubeconfig with `curl -H "Authorization: Bearer vmm_…"`), so they work as pasted, in any browser.
 
-- It is created the first time such a command is shown ("Show the commands with my token"), and kept by
-  the browser (`localStorage`, per user): only its hash is on the server.
-- **API tokens** page, **CLI token** card: shows it (`export VMM_TOKEN=…`), **Rotate** creates a new one and
-  revokes the previous one. A browser whose copy was rotated elsewhere says so; rotate there too.
-- On the host: `venv/bin/python -m app.cli token cli --user $USER` (same rotation, prints the token).
-- API: `POST /api/v1/auth/tokens/cli` (viewers too). Commands containing it are credentials: treat them
-  like a password.
+- Its value is derived (HMAC-SHA256) from the token's id and a key file, `DATA_DIR/cli-token.key` (0600, made
+  once): the DB still only holds its hash, and the app can hand the same value out again. Deleting the key file
+  revokes every default token (new ones are made on next use).
+- **API tokens** page, **CLI token** card: shows it (`export VMM_TOKEN=…`); **Rotate** replaces it (the previous
+  value stops working, everywhere). Revoking it in the list works too: a new one is made on next use.
+- On the host: `venv/bin/python -m app.cli token cli --user $USER` prints it (`--rotate` to replace it).
+- API: `GET /api/v1/auth/tokens/cli` (made on first call), `POST` rotates (viewers too: it carries their role).
+  Commands containing it are credentials: treat them like a password.
 
 With authentication off, commands carry no token.
 
@@ -176,4 +177,5 @@ directory with a `vm-manager` file that accepts a fixed password through `pam_ex
 | `POST /api/v1/auth/login` `{username, password}` | sets the session cookie; with an empty body and a Bearer token, opens a session for the token's user |
 | `POST /api/v1/auth/logout` | |
 | `GET /api/v1/auth/tokens` (`?all=true` for admins), `POST` `{name, expires_days?}`, `DELETE …/{id}` | API tokens |
-| `POST /api/v1/auth/tokens/cli` | rotate my CLI token (name `cli`, no expiry), returns it once |
+| `GET /api/v1/auth/tokens/cli` | my default CLI token (name `cli`, no expiry; made on first call) |
+| `POST /api/v1/auth/tokens/cli` | rotate my default CLI token |
