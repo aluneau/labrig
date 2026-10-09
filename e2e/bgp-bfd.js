@@ -84,7 +84,7 @@ async function measure(groupId, n1, anycast, label, timeoutMs) {
       const ip = group.members.find((m) => m.name === n).ip;
       await must(vm, `vtysh -c 'configure terminal' -c 'router bgp 64513' -c 'bgp router-id ${ip}' -c 'no bgp ebgp-requires-policy'`
         + ` -c 'neighbor ${routerIp} remote-as 64512' -c 'no neighbor ${routerIp} bfd' -c 'address-family ipv4 unicast' -c 'network ${anycast}/32'`
-        + " -c 'end' -c 'write memory' && vtysh -c 'clear bgp *'");
+        + " -c 'end' -c 'write memory' && vtysh -c 'clear bgp *' && sync"); // sync: the failover test cuts the power
     }));
     const members = Object.fromEntries(group.members.map((m) => [m.name, m]));
     await waitFor(async () => {
