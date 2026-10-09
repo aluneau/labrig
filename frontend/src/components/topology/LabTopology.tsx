@@ -75,7 +75,7 @@ const ago = (epoch?: number | null) => {
 };
 const ROLE_LABEL: Record<string, string> = {
   dhcp: 'DHCP', dns: 'DNS', nat: 'NAT', ntp: 'NTP', lb: 'Load balancer', wireguard: 'WireGuard', bgp: 'BGP',
-  registry: 'Registry', egress: 'Internet blocked',
+  registry: 'Registry', egress: 'Internet blocked', proxy: 'Proxy only', 'split-dns': 'Split DNS', mtu: 'MTU',
 };
 
 // ---------------------------------------------------------------- box contents
@@ -114,6 +114,7 @@ function routerBadges(t: GroupTopology): Badge[] {
       return { key: 'lb', text: `LB :${ports.slice(0, 4).join(' :')}${ports.length > 4 ? '…' : ''}` };
     }
     if (role === 'bgp') return { key: 'bgp', text: `BGP AS${t.bgp.asn ?? ''}` };
+    if (role === 'mtu') return { key: 'mtu', text: `MTU ${t.router.lan_mtu ?? ''}${t.router.path_mtu ? ` · path ${t.router.path_mtu}` : ''}` };
     return { key: role, text: ROLE_LABEL[role] || role };
   });
 }
@@ -419,6 +420,9 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
       wireguard: `The end of your laptop's tunnel: wg0 at ${r.tunnel_ip}. Packets from the tunnel are decrypted here and routed into the lab like any other.`,
       registry: `Mirror registry (Quay) at registry.${t.domain}: images copied from the internet by the router (oc-mirror) or pushed by you. Lab machines and clusters pull from it, even with internet blocked. Registry & egress tab.`,
       egress: `Disconnected lab: the router refuses what lab machines send towards the internet (connections fail at once). DNS, NTP, load balancers, the registry and WireGuard still work. Switch it in the Registry & egress tab.`,
+      proxy: `Proxy-only egress: lab machines can't reach the internet directly (refused, like "Internet blocked"); squid on the router at ${r.lan_ip}:${r.proxy_port ?? 3128} is the only way out. Settings and the environment to copy: Registry & egress tab.`,
+      'split-dns': `Split DNS: names in ${(r.dns_zones || []).join(', ')} are forwarded to their own DNS servers (conditional forwarding), everything else to ${r.dns_forwarders.join(', ') || 'the uplink\'s DNS'}. Network & DNS tab.`,
+      mtu: `MTU: the lab network uses ${r.network_mtu ?? 1500} bytes${r.path_mtu ? `; the router is a narrow hop of ${r.path_mtu} bytes towards the outside${r.drop_frag_needed ? ' and drops the ICMP "fragmentation needed" it should send back (PMTUD black hole)' : ''}${r.clamp_mss ? '; it clamps the TCP MSS of forwarded connections' : ''}` : ''}. Network & DNS tab.`,
       bgp: `FRR listens for BGP sessions from any machine of ${t.cidr} (AS ${t.bgp.peer_asn ?? 'any'} → router AS ${t.bgp.asn}). A machine says "send traffic for this address to me"; the router writes it in its routing table and, with several machines for one address, uses them all (ECMP). Accepted: ${t.bgp.announce_ranges.map((a) => a.prefix).join(', ') || 'nothing yet'}.${t.bgp.bfd?.enabled
         ? ` BFD is on: each session is checked every ${t.bgp.bfd.receive_interval} ms, so a machine that dies loses its routes after about ${t.bgp.bfd.detect_multiplier * Math.max(t.bgp.bfd.receive_interval, t.bgp.bfd.transmit_interval)} ms instead of the 30 s BGP hold time.`
         : ' Without BFD, a machine that dies keeps its routes until the 30 s BGP hold time expires.'}`,

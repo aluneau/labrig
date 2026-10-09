@@ -485,7 +485,9 @@ class LibvirtClient:
                     el_live = domain_xml.find_interface(live, info["mac"])
                     el_config = domain_xml.find_interface(config, info["mac"])
                     if info["type"] == "hostdev" and el_config is not None:
-                        info["network"] = domain_xml.nic_info(el_config)["network"]
+                        saved = domain_xml.nic_info(el_config)
+                        info["network"] = saved["network"]
+                        info["vlan"] = info["vlan"] or saved["vlan"]
                     if el_live is None:
                         info["pending"] = "attach"
                     elif el_config is None:
@@ -611,6 +613,15 @@ class LibvirtClient:
             return None
         forward = root.find("forward")
         return forward.get("mode", "nat") if forward is not None else "isolated"
+
+    def network_pf(self, name: str) -> Optional[str]:
+        """PF of an SR-IOV VF pool network (<forward mode='hostdev'><pf dev/>), None otherwise"""
+        try:
+            root = ET.fromstring(self.connect().networkLookupByName(name).XMLDesc(0))
+        except libvirt.libvirtError:
+            return None
+        pf = root.find("./forward[@mode='hostdev']/pf")
+        return pf.get("dev") if pf is not None else None
 
     def get_vm_interfaces(self, name: str) -> List[Dict[str, Any]]:
         """Interfaces with IPs from DHCP leases (only for running VMs)"""

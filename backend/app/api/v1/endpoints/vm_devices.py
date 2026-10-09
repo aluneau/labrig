@@ -74,7 +74,8 @@ def add_nic(vm_id: int, data: VMNicCreate, db: Session = Depends(get_db)):
     """Add a NIC on a libvirt network (hot-plugged when running; target = its MAC). Models: virtio,
     e1000e, igb (Intel 82576, emulated SR-IOV: up to 7 VFs in the guest), e1000, rtl8139. On an SR-IOV
     VF pool network (forward mode hostdev) the VM gets a VF from the host instead (needs a host IOMMU)."""
-    return _run(vm_service.add_nic, db, _vm(vm_id, db), data.network, data.model, data.mac, data.link_state)
+    return _run(vm_service.add_nic, db, _vm(vm_id, db), data.network, data.model, data.mac, data.link_state,
+                data.vlan)
 
 
 @router.put("/{vm_id}/nics/{mac}", response_model=DeviceChange)

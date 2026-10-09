@@ -325,6 +325,7 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
   const [network, setNetwork] = useState('');
   const [model, setModel] = useState<NicModel>('virtio');
   const [mac, setMac] = useState('');
+  const [vlan, setVlan] = useState('');
   const [busy, setBusy] = useState(false);
   const running = vm.status === 'running' || vm.status === 'paused';
 
@@ -353,6 +354,7 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
     setNetwork((nets.find((n) => n.name === 'default') || nets[0])?.name || '');
     setModel('virtio');
     setMac('');
+    setVlan('');
     setAdding(true);
   };
 
@@ -367,6 +369,8 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
   const ipsOf = (nic: VMNic) =>
     vm.interfaces.filter((i) => i.mac && nic.mac && i.mac.toLowerCase() === nic.mac.toLowerCase()).flatMap((i) => i.addresses);
   const macValid = !mac || MAC_RE.test(mac);
+  const vlanNum = Number(vlan);
+  const vlanValid = !vfPool || vlan === '' || (Number.isInteger(vlanNum) && vlanNum >= 1 && vlanNum <= 4094);
 
   return (
     <>
@@ -395,6 +399,7 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
                 </Td>
                 <Td dataLabel="Model">
                   {vf ? <Label isCompact color="purple">SR-IOV VF</Label> : nic.model}
+                  {vf && nic.vlan ? <> <Label isCompact>VLAN {nic.vlan}</Label></> : null}
                   {nic.model === 'igb' && <> <Label isCompact color="purple">SR-IOV PF</Label></>}
                 </Td>
                 <Td dataLabel="MAC"><code>{nic.mac}</code></Td>
@@ -425,8 +430,10 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
 
       <Modal variant={ModalVariant.small} title={`Add a network interface to ${vm.name}`} isOpen={adding} onClose={() => setAdding(false)}
         actions={[
-          <Button key="add" variant="primary" isLoading={busy} isDisabled={busy || !network || !macValid}
-            onClick={() => run(() => vmApi.addNic(vm.id, { network, model, mac: mac || undefined }))}>Add</Button>,
+          <Button key="add" variant="primary" isLoading={busy} isDisabled={busy || !network || !macValid || !vlanValid}
+            onClick={() => run(() => vmApi.addNic(vm.id, {
+              network, model, mac: mac || undefined, ...(vfPool && vlan ? { vlan: vlanNum } : {}),
+            }))}>Add</Button>,
           <Button key="cancel" variant="link" onClick={() => setAdding(false)}>Cancel</Button>,
         ]}>
         <Form onSubmit={(e) => e.preventDefault()}>
@@ -445,9 +452,16 @@ export const NicsTable: React.FC<{ vm: VMDetail; onResult: OnResult; onError: On
             <TextInput id="nic-mac" value={mac} placeholder="generated" validated={macValid ? 'default' : 'error'}
               onChange={(_e, v) => setMac(v.trim())} />
           </FormGroup>
+          {vfPool && (
+            <FormGroup label="VLAN tag (optional)" fieldId="nic-vlan">
+              <TextInput id="nic-vlan" type="number" min={1} max={4094} value={vlan}
+                placeholder={selected?.vlan ? `pool: ${selected.vlan}` : 'untagged'}
+                validated={vlanValid ? 'default' : 'error'} onChange={(_e, v) => setVlan(v)} style={{ width: 140 }} />
+            </FormGroup>
+          )}
           <div className="pf-v5-u-font-size-sm pf-v5-u-color-200">
             {vfPool
-              ? 'libvirt hands the VM a free VF of this pool (PCI passthrough, needs an IOMMU on the host).'
+              ? 'libvirt hands the VM a free VF of this pool (PCI passthrough, needs an IOMMU on the host) and sets this MAC (and VLAN) on it through the PF.'
               : model === 'igb'
                 ? 'In the guest: echo 4 > /sys/class/net/<nic>/device/sriov_numvfs creates igbvf VFs. For vfio / DPDK, also enable the virtual IOMMU below.'
                 : ''}

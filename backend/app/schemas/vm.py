@@ -147,6 +147,7 @@ class VMNic(BaseModel):
     link_state: str = "up"  # "down" = cable unplugged
     device: Optional[str] = None  # host tap device while running (vnetN)
     vf: bool = False  # an SR-IOV VF passed through from the host (VF pool network)
+    vlan: Optional[int] = None  # VF pool NICs: VLAN tag set on this NIC (overrides the pool's)
     # Running VM only: "attach" = appears at next start, "detach" = goes away when the guest releases it,
     # "change" = network / link state saved for the next start differ from the running ones
     pending: Optional[str] = None
@@ -158,6 +159,8 @@ class VMNicCreate(BaseModel):
     model: NicModel = "virtio"
     mac: Optional[str] = Field(None, pattern=MAC_PATTERN)
     link_state: LinkState = "up"
+    # SR-IOV VF pool networks only: VLAN tag the PF applies to this VF (overrides the pool's tag)
+    vlan: Optional[int] = Field(None, ge=1, le=4094)
 
 
 class VMNicUpdate(BaseModel):

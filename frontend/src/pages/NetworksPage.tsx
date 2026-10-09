@@ -58,7 +58,10 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
   const [busy, setBusy] = useState(false);
   const [sriov, setSriov] = useState<SriovStatus | null>(null);
   const [pf, setPf] = useState('');
+  const [vlan, setVlan] = useState('');
   const vfPool = mode === 'hostdev';
+  const vlanNum = Number(vlan);
+  const vlanValid = vlan === '' || (Number.isInteger(vlanNum) && vlanNum >= 1 && vlanNum <= 4094);
 
   const loadSriov = () =>
     hostApi.sriov().then((s) => {
@@ -70,7 +73,7 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
     setBusy(true);
     try {
       await networkApi.create(vfPool
-        ? { name, forward_mode: 'hostdev', forward_dev: pf, dhcp_enabled: false, autostart }
+        ? { name, forward_mode: 'hostdev', forward_dev: pf, dhcp_enabled: false, autostart, ...(vlan ? { vlan: vlanNum } : {}) }
         : { name, forward_mode: mode, ip_address: ip, prefix: Number(prefix), dhcp_enabled: dhcp, autostart });
       setName('');
       onDone();
@@ -85,7 +88,7 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
   return (
     <Modal variant={ModalVariant.small} title="Create network" isOpen={isOpen} onClose={onClose}
       actions={[
-        <Button key="ok" onClick={submit} isDisabled={!name || (vfPool ? !pf : !ip) || busy} isLoading={busy}>Create</Button>,
+        <Button key="ok" onClick={submit} isDisabled={!name || (vfPool ? !pf || !vlanValid : !ip) || busy} isLoading={busy}>Create</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); submit(); }}>
@@ -123,8 +126,16 @@ const CreateNetworkModal: React.FC<{ isOpen: boolean; onClose: () => void; onDon
                     <NumVfsControl pf={p} onDone={loadSriov} onError={setError} />
                   </FormGroup>
                 ))}
+                <FormGroup label="VLAN tag (optional)" fieldId="net-vlan">
+                  <TextInput id="net-vlan" type="number" min={1} max={4094} value={vlan} placeholder="untagged"
+                    validated={vlanValid ? 'default' : 'error'} onChange={(_e, v) => setVlan(v)} style={{ width: 140 }} />
+                  <div className="pf-v5-u-font-size-sm pf-v5-u-color-200" style={{ marginTop: 4 }}>
+                    The PF tags every VF of this pool on the wire (the guest sees untagged traffic). A NIC can override it.
+                  </div>
+                </FormGroup>
                 <div className="pf-v5-u-font-size-sm pf-v5-u-color-200">
-                  Each VM NIC on this network gets a free VF as a PCI device (managed: bound to vfio-pci while the VM runs).
+                  Each VM NIC on this network gets a free VF as a PCI device (managed: bound to vfio-pci while the VM runs,
+                  MAC set by libvirt). VF trust / spoof checking and keeping VFs across reboots: Host page, SR-IOV.
                 </div>
               </>
             )}
@@ -190,7 +201,7 @@ export const NetworksPage: React.FC = () => {
                   <Td expand={{ rowIndex, isExpanded: expanded === net.id, onToggle: () => setExpanded(expanded === net.id ? null : net.id) }} />
                   <Td><Link to={`/networks/${net.id}`}><strong>{net.name}</strong></Link></Td>
                   <Td><StatusLabel status={net.active ? 'active' : 'inactive'} /></Td>
-                  <Td>{net.forward_mode}{net.forward_dev ? ` → ${net.forward_dev}` : ''}</Td>
+                  <Td>{net.forward_mode === 'hostdev' ? 'SR-IOV VF pool' : net.forward_mode}{net.forward_dev ? ` → ${net.forward_dev}` : ''}{net.vlan ? `, VLAN ${net.vlan}` : ''}</Td>
                   <Td>{net.bridge_name || '—'}</Td>
                   <Td>{net.ip_address ? `${net.ip_address}/${net.prefix ?? ''}` : '—'}</Td>
                   <Td>{net.dhcp_enabled ? `${net.dhcp_start} – ${net.dhcp_end}` : 'Off'}</Td>
