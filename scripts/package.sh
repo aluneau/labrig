@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Build a release tarball with the web UI prebuilt, so target hosts only need Python (no Node.js).
 #   scripts/package.sh [version]   ->  dist/vm-manager-<version>.tar.gz
+#   NO_UI_BUILD=1 scripts/package.sh   reuses an up-to-date frontend/build (no npm needed)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' backend/pyproject.toml)}"
 NAME="vm-manager-$VERSION"
 
-echo "Building the web UI…"
-(cd frontend && npm ci --legacy-peer-deps --no-audit --no-fund --loglevel=error && CI=true npm run build --silent)
+if [ -n "${NO_UI_BUILD:-}" ] && [ -f frontend/build/index.html ]; then
+  echo "Using the existing frontend/build (NO_UI_BUILD set)"
+else
+  echo "Building the web UI…"
+  (cd frontend && npm ci --legacy-peer-deps --no-audit --no-fund --loglevel=error && CI=true npm run build --silent)
+fi
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
