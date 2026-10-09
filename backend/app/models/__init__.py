@@ -5,6 +5,7 @@ from app.models.network import Network
 from app.models.task import Task
 from app.models.group import Group, GroupMember
 from app.models.cluster import Cluster, ClusterNode
+from app.models.auth import AuthSession, ApiToken
 
 __all__ = [
     "VM",
@@ -19,4 +20,6 @@ __all__ = [
     "GroupMember",
     "Cluster",
     "ClusterNode",
+    "AuthSession",
+    "ApiToken",
 ]

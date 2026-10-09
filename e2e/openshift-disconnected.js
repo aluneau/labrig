@@ -9,7 +9,7 @@
 // (24 GiB node + 8 GiB router): the app refuses the create otherwise (exit code 2, nothing created).
 //   env: BASE_URL, CHROME_PATH, CLUSTER_NAME (e2e-dc-sno), VERSION (e.g. 4.20.39; default: latest of CHANNEL),
 //        CHANNEL (stable-4.20), OC (oc binary; default: the app's cached one, needs OC_DATA = backend data dir), KEEP
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

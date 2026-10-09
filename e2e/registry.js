@@ -11,7 +11,7 @@
 //  5. UI: open egress again -> internet works; block it again through the API (spec PUT) -> refused; open.
 //  6. Delete the group: the registry disk is gone too.
 // Budget: router MEM_GIB (default 6) GiB + member 1 GiB, a DISK_GB (default 50) GiB thin disk.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

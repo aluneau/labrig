@@ -8,7 +8,7 @@
 //    without errors, is deleted from the gallery
 //  - delete the group (unless KEEP=1)
 // Env: BASE_URL, CHROME_PATH, GROUP (default e2e-tp-basic), CASE (default e2etp1). Budget: router 512 MiB + 2 x 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

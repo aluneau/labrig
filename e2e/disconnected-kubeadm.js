@@ -7,7 +7,7 @@
 // Creates and deletes real VMs + a group named e2e-dk-ui (CLUSTER_NAME). ~8 GiB RAM (router 4 + 2 nodes).
 // First run: 25-40 min (mirror-registry download on the router).
 //   env: BASE_URL, CHROME_PATH, KUBECTL, IMAGE ("debian 13"), KEEP=1 (don't delete)
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

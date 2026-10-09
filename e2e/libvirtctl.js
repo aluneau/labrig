@@ -2,7 +2,7 @@
 // STOPS LIBVIRT on the target: run it against a throwaway (nested) install, never a shared host:
 //   ssh -L 8101:127.0.0.1:8000 lab@<nested-vm> ; BASE_URL=http://localhost:8101 E2E_VM=e2e-a-cirros node libvirtctl.js
 // E2E_VM: an existing small VM on network 'default' (e.g. cirros) whose lease gets released.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const BASE = process.env.BASE_URL || 'http://localhost:8000';
 const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome-stable';
 const VM = process.env.E2E_VM || 'e2e-a-cirros';

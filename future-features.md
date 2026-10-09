@@ -24,7 +24,8 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
 | Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
 | IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); cluster dual stack next |
-| Authentication, CI, per-group resource budget | open (§4) |
+| Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
+| CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
@@ -543,8 +544,8 @@ Next, in order:
    templates, export with disks, PXE (`dhcp-boot`) for empty-disk members, NIC options in member specs.
 3. SR-IOV on OpenShift: run the SR-IOV Network Operator on these VMs (igb, `docs/sriov.md`) and turn the
    steps into a group/cluster option; real VF pools on RHEL lab hosts with SR-IOV NICs.
-4. Cross-cutting, before sharing widely: **authentication** (at least a local user + token; the API
-   can create VMs on the host), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
+4. Cross-cutting, before sharing widely: ~~**authentication**~~ (done: docs/auth.md; next maybe OIDC / per-group
+   ownership), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
    `go vet`, `e2e/smoke.js`), and a per-group **resource budget** check (CPU/RAM/disk) before creating,
    so a lab doesn't starve the host.
 

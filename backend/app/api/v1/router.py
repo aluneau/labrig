@@ -1,9 +1,11 @@
 """API Router"""
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift, templates
+from app.api.v1.endpoints import auth, vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift, templates
 
 api_router = APIRouter()
+
+api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 
 # Before vms: its POST /{vm_id}/{action} would otherwise catch POST /{vm_id}/disks
 api_router.include_router(vm_devices.router, prefix="/vms", tags=["vms"])

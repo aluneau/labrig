@@ -13,7 +13,7 @@
 //
 // Env: BASE_URL, CHROME_PATH, GROUP (default e2e-v6-a), CIDR (10.42.208.0/24), EL=0 (no EL member), REUSE=1 (group
 // exists and runs), KEEP=1. Budget: router 512 MiB + 2 x 768 MiB + 1 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

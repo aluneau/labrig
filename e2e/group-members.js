@@ -10,7 +10,7 @@
 // e2e-g-netboot.iso: downloaded from boot.netboot.xyz if missing, kept afterwards).
 //  - an empty-disk member from the VMs page Create VM form ("Lab group" select)
 // Budget: router 1 GiB + 1 + 1.5 + 1 + 0.25 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

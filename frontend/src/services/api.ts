@@ -11,6 +11,7 @@ import {
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
+  AuthStatus, ApiToken, ApiTokenCreated,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
 } from '../types';
 
@@ -21,6 +22,12 @@ export function vncUrl(vmId: number): string {
   const base = API_BASE || window.location.origin;
   return `${base.replace(/^http/, 'ws')}/api/v1/vms/${vmId}/vnc`;
 }
+
+/** window event fired when an API call fails with 401 (no / expired session): the app shows the login page */
+export const UNAUTHORIZED_EVENT = 'vmm-unauthorized';
+
+/** Sent on every request: the backend refuses cookie-authenticated writes without it (CSRF) */
+export const CSRF_HEADERS = { 'X-VMM-Request': '1' };
 
 /** window event fired when an API call fails with 503 "libvirt is stopped" */
 export const LIBVIRT_STOPPED_EVENT = 'vmm-libvirt-stopped';
@@ -50,10 +57,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isForm = options.body instanceof FormData;
   const response = await fetch(`${API_BASE}/api/v1${path}`, {
     ...options,
-    headers: isForm ? options.headers : { 'Content-Type': 'application/json', ...options.headers },
+    credentials: 'same-origin',
+    headers: isForm ? { ...CSRF_HEADERS, ...options.headers }
+      : { 'Content-Type': 'application/json', ...CSRF_HEADERS, ...options.headers },
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
+    if (response.status === 401 && body?.auth === 'required') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
     // The daemon is down: tell the libvirt state provider (header pill, "libvirt is stopped" pages)
     if (response.status === 503 && body?.libvirt === 'stopped') window.dispatchEvent(new Event(LIBVIRT_STOPPED_EVENT));
     throw new ApiError(response.status, errorMessage(body, response.status));
@@ -194,6 +204,7 @@ export const groupApi = {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE}/api/v1/groups/${id}/registry/upload?${q}`);
       xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-VMM-Request', '1');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
       xhr.onload = () => {
         let body: { task_id?: number; detail?: unknown } = {};
@@ -257,6 +268,16 @@ export const hostApi = {
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),
   updatePf: (pf: string, data: SriovPFUpdate) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify(data) }),
+};
+
+export const authApi = {
+  status: () => request<AuthStatus>('/auth/status'),
+  login: (username: string, password: string) => post<AuthStatus>('/auth/login', { username, password }),
+  logout: () => post<void>('/auth/logout'),
+  tokens: (all = false) => request<ApiToken[]>(`/auth/tokens${all ? '?all=true' : ''}`),
+  createToken: (name: string, expiresDays?: number) =>
+    post<ApiTokenCreated>('/auth/tokens', { name, expires_days: expiresDays || null }),
+  revokeToken: (id: number) => del(`/auth/tokens/${id}`),
 };
 
 export const libvirtApi = {

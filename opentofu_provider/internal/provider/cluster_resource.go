@@ -313,7 +313,7 @@ func (r *clusterResource) kubeconfig(ctx context.Context, id string) (string, er
 	if err != nil {
 		return "", err
 	}
-	resp, err := r.client.HTTP.Do(req)
+	resp, err := r.client.Send(req)
 	if err != nil {
 		return "", err
 	}

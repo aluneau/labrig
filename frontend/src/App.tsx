@@ -16,6 +16,7 @@ import { GroupsPage } from './pages/GroupsPage';
 import { GroupDetailPage } from './pages/GroupDetailPage';
 import { ClustersPage } from './pages/ClustersPage';
 import { ClusterDetailPage } from './pages/ClusterDetailPage';
+import { TokensPage } from './pages/TokensPage';
 import { TemplatesPage } from './pages/TemplatesPage';
 import { TemplateWizardPage } from './pages/TemplateWizardPage';
 
@@ -39,6 +40,7 @@ export const App: React.FC = () => (
       <Route path="/clusters/:id" element={gated(<ClusterDetailPage />)} />
       <Route path="/hosts" element={<HostsPage />} />
       <Route path="/tasks" element={<TasksPage />} />
+      <Route path="/tokens" element={<TokensPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   </Page>

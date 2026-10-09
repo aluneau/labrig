@@ -1,4 +1,4 @@
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const BASE = process.env.BASE_URL || 'http://localhost:8000';
 const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome-stable';
 process.chdir(require('path').join(__dirname, 'screenshots'));

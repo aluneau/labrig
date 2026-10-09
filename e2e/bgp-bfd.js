@@ -9,7 +9,7 @@
 //
 // Env: BASE_URL, CHROME_PATH, GROUP (default e2e-bx-bfd), CIDR (10.42.195.0/24), REUSE=1, KEEP=1.
 // Budget: router 512 MiB + 2 x 768 MiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const L = require('./lib-router');
 const { log, guestSh, must, waitFor, api, post, put, waitTask } = L;
 

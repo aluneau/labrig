@@ -46,6 +46,8 @@ variable "operators" {
   default = ["kubernetes-nmstate-operator"] # add one and apply again: installed in place
 }
 
+# Authentication: export VMMANAGER_TOKEN=<API token> (web UI: user menu > API tokens, or
+# backend/venv/bin/python -m app.cli token create --user $USER --name opentofu), or set token = "...".
 provider "vmmanager" {
   endpoint = var.endpoint
 }

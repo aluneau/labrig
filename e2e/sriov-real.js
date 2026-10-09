@@ -6,7 +6,7 @@
 //   Plain-words "no free VF" error when the pool is exhausted; cleanup restores the PF (0 VFs, not persistent).
 // Needs: PF (default eth2) unused by other pools, VM_NAME = a running VM on that host (gets VF NICs, removed after).
 // NEVER point HOST_SH at your own desktop: it changes SR-IOV settings of that host's PF.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');

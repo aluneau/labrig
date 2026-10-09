@@ -23,8 +23,13 @@ Fixed command whitelist, every argument validated here (never trust the caller):
       disabled and removed once no PF is persistent).
   helper sriov-restore
       Re-create the stored VF counts and options of persistent PFs (run by vm-manager-sriov.service).
+  helper pam-auth <user>            (password on stdin)
+      Check a Linux account's password + account state through PAM, service "vm-manager" ONLY
+      (/etc/pam.d/vm-manager, installed by setup.sh; never su/sudo whose pam_rootok would accept
+      anyone when run as root). Needed because pam_unix can't check another local user's password
+      from the app's non-root process. root (uid 0) is refused. Exit 6 = denied.
 
-Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed.
+Exit codes: 0 ok, 2 bad arguments, 3 missing tool, 4 not found, 5 failed, 6 denied.
 """
 import errno
 import ipaddress
@@ -35,13 +40,15 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-VERSION = "3"
+VERSION = "4"
 PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 NETWORK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 CLIENTID_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){0,127}$")
 BRIDGE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,127}[$]?$")
+PAM_SERVICE = "vm-manager"
 PCI_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 SRIOV_CONF = "/etc/vm-manager/sriov.conf"
 SRIOV_UNIT = "vm-manager-sriov.service"
@@ -390,10 +397,95 @@ def sriov_restore(args):
         sys.exit(5)
 
 
+def pam_check(service, username, password):
+    """Same as backend/app/services/pam_auth.py (kept in sync by hand: the helper can't import the app)"""
+    import ctypes
+    import ctypes.util
+    from ctypes import CFUNCTYPE, POINTER, Structure, byref, c_char_p, c_int, c_size_t, c_void_p, cast, sizeof
+
+    class Msg(Structure):
+        _fields_ = [("msg_style", c_int), ("msg", c_char_p)]
+
+    class Resp(Structure):
+        _fields_ = [("resp", c_void_p), ("resp_retcode", c_int)]
+
+    conv_t = CFUNCTYPE(c_int, c_int, POINTER(POINTER(Msg)), POINTER(POINTER(Resp)), c_void_p)
+
+    class Conv(Structure):
+        _fields_ = [("conv", conv_t), ("appdata_ptr", c_void_p)]
+
+    libpam = ctypes.CDLL(ctypes.util.find_library("pam") or "libpam.so.0")
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+    libc.calloc.restype, libc.calloc.argtypes = c_void_p, [c_size_t, c_size_t]
+    libc.strdup.restype, libc.strdup.argtypes = c_void_p, [c_char_p]
+    libpam.pam_start.argtypes = [c_char_p, c_char_p, POINTER(Conv), POINTER(c_void_p)]
+    libpam.pam_authenticate.argtypes = libpam.pam_acct_mgmt.argtypes = libpam.pam_end.argtypes = [c_void_p, c_int]
+    libpam.pam_strerror.restype, libpam.pam_strerror.argtypes = c_char_p, [c_void_p, c_int]
+    user_b, password_b = username.encode(), password.encode()
+
+    @conv_t
+    def conv(n, messages, p_response, _data):
+        addr = libc.calloc(n, sizeof(Resp))
+        if not addr:
+            return 5  # PAM_BUF_ERR
+        responses = cast(addr, POINTER(Resp))
+        for i in range(n):
+            style = messages[i].contents.msg_style
+            if style == 1:  # PAM_PROMPT_ECHO_OFF
+                responses[i].resp = libc.strdup(password_b)
+            elif style == 2:  # PAM_PROMPT_ECHO_ON
+                responses[i].resp = libc.strdup(user_b)
+        p_response[0] = responses
+        return 0
+
+    handle = c_void_p()
+    conversation = Conv(conv, None)
+    rc = libpam.pam_start(service.encode(), user_b, byref(conversation), byref(handle))
+    if rc != 0:
+        return False, f"pam_start failed ({rc})"
+    try:
+        rc = libpam.pam_authenticate(handle, 1)  # PAM_DISALLOW_NULL_AUTHTOK
+        if rc == 0:
+            rc = libpam.pam_acct_mgmt(handle, 1)
+        return rc == 0, "" if rc == 0 else (libpam.pam_strerror(handle, rc) or b"").decode(errors="replace")
+    finally:
+        libpam.pam_end(handle, rc)
+
+
+def pam_auth(args):
+    import pwd
+    if len(args) != 1:
+        fail(2, "usage: pam-auth <user> (password on stdin)")
+    username = args[0]
+    if not USER_RE.match(username):
+        fail(2, "invalid user name")
+    if not os.path.isfile(f"/etc/pam.d/{PAM_SERVICE}"):
+        fail(3, f"/etc/pam.d/{PAM_SERVICE} is missing: re-run scripts/setup.sh")
+    password = sys.stdin.buffer.read(4097)
+    if len(password) > 4096:
+        fail(2, "password too long")
+    try:
+        password = password.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(2, "the password must be UTF-8")
+    if password.endswith("\n"):  # echo pw | helper pam-auth user
+        password = password[:-1]
+    try:
+        if pwd.getpwnam(username).pw_uid == 0:
+            fail(6, "root can't log in to VM Manager")
+    except KeyError:
+        fail(6, "authentication failed")
+    ok, reason = pam_check(PAM_SERVICE, username, password)
+    if not ok:
+        fail(6, reason or "authentication failed")
+    print("ok")
+
+
 COMMANDS = {
     "version": lambda args: print(VERSION),
     "dhcp-release": dhcp_release,
     "sriov-set-numvfs": sriov_set_numvfs,
+    "pam-auth": pam_auth,
     "sriov-vf-options": sriov_vf_options,
     "sriov-persist": sriov_persist,
     "sriov-restore": sriov_restore,

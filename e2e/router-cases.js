@@ -9,7 +9,7 @@
 //     network MTU 1400 -> member interface 1400 after a DHCP reconfigure; topology badges
 // Creates and deletes the group GROUP (default e2e-rc-ui, VMs e2e-rc-ui-*). Needs a ready Debian 13 and an EL
 // cloud image, and internet access from the host. Budget: router 512 MiB + 768 + 512 + 512 MiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';

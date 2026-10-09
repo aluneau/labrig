@@ -10,7 +10,7 @@
 //
 // Env: BASE_URL, CHROME_PATH, CLUSTER (default e2e-bx-k8s), IMAGE_ID (default: Debian 13), REUSE=1, KEEP=1.
 // Budget: router 512 MiB + control plane 2.5 GiB + 2 workers x 2 GiB.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const L = require('./lib-router');
 const { log, sleep, guestSh, must, waitFor, api, post, put, waitTask } = L;
 

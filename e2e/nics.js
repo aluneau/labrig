@@ -2,7 +2,7 @@
 // args), hot-add / link down-up / hot-remove a virtio NIC from the VM details, create VFs on the igb PF in the
 // guest and bind one to vfio-pci, toggle the vIOMMU. Checks inside the guest over SSH (key generated on the fly).
 // Creates (and deletes) the VM e2e-h-nics and the network e2e-h-nics (192.168.209.0/24).
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');

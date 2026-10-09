@@ -18,8 +18,14 @@ terraform {
 
 provider "vmmanager" {
   endpoint = "http://127.0.0.1:8000" # or $VMMANAGER_ENDPOINT
+  # token  = "vmm_…"                 # or $VMMANAGER_TOKEN (sensitive)
 }
 ```
+
+When the backend has authentication on (the default, `docs/auth.md`), the provider needs an API token:
+create one in the web UI (user menu > API tokens) or headless with
+`cd backend && venv/bin/python -m app.cli token create --user $USER --name opentofu`, then
+`export VMMANAGER_TOKEN=…`. The token acts as its user (admin or viewer role, from the Linux groups).
 
 ## Resources
 

@@ -19,6 +19,7 @@ type vmManagerProvider struct {
 
 type providerModel struct {
 	Endpoint types.String `tfsdk:"endpoint"`
+	Token    types.String `tfsdk:"token"`
 }
 
 func New(version string) func() provider.Provider {
@@ -38,6 +39,12 @@ func (p *vmManagerProvider) Schema(_ context.Context, _ provider.SchemaRequest, 
 				Description: "VM Manager base URL. Defaults to $VMMANAGER_ENDPOINT, then " + defaultEndpoint + ".",
 				Optional:    true,
 			},
+			"token": schema.StringAttribute{
+				Description: "API token (web UI: user menu > API tokens, or `python -m app.cli token create`). " +
+					"Defaults to $VMMANAGER_TOKEN. Not needed when the backend runs with AUTH_ENABLED=false.",
+				Optional:  true,
+				Sensitive: true,
+			},
 		},
 	}
 }
@@ -55,7 +62,11 @@ func (p *vmManagerProvider) Configure(ctx context.Context, req provider.Configur
 	if !config.Endpoint.IsNull() && !config.Endpoint.IsUnknown() {
 		endpoint = config.Endpoint.ValueString()
 	}
-	client := NewClient(endpoint)
+	token := os.Getenv("VMMANAGER_TOKEN")
+	if !config.Token.IsNull() && !config.Token.IsUnknown() {
+		token = config.Token.ValueString()
+	}
+	client := NewClient(endpoint, token)
 	resp.ResourceData = client
 	resp.DataSourceData = client
 }

@@ -1,7 +1,7 @@
 // k3s cluster through the UI: create (1 control plane + 2 workers), wait Ready, kubectl card,
 // kubeconfig download used by the host's kubectl (KUBECTL, optional), stop / start, delete.
 // Creates and deletes real VMs + a network named e2e-d-k3s-ui* (CLUSTER_NAME to override). ~6 GB RAM.
-const { chromium } = require('playwright-core');
+const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
