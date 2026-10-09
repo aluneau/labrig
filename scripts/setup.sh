@@ -234,6 +234,9 @@ if [ "$RELEASE" = 1 ]; then
       ok "imported $IMPORT_DATA/backend/data and .env into $DATA, $ENV_FILE"
     fi
   fi
+  # the Host page checks the channel / repo this install follows (vm-manager-update passes them on every run)
+  set_env UPDATE_CHANNEL "$CHANNEL"
+  set_env UPDATE_REPO "$REPO"
   $SUDO grep -q '^DATA_DIR=' "$ENV_FILE" 2>/dev/null || set_env DATA_DIR "$DATA"
   $SUDO grep -q '^DATABASE_URL=' "$ENV_FILE" 2>/dev/null || set_env DATABASE_URL "sqlite:///$DATA/vmanager.db"
   $SUDO chown root:"$TARGET_GROUP" "$ENV_FILE" && $SUDO chmod 0640 "$ENV_FILE"

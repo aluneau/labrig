@@ -226,6 +226,8 @@ def running_tasks():
 def run_setup(release, c, extra=()):
     args = [os.path.join(release, "scripts", "setup.sh"), "--release", "--user", c["USER"]]
     args += shlex.split(c["SETUP_ARGS"]) + list(extra)
+    if "--channel" not in extra:  # keep the install's channel / repo (setup.sh writes them to the config)
+        args += ["--channel", c["CHANNEL"], "--repo", c["REPO"]]
     log("running " + " ".join(shlex.quote(a) for a in args))
     with open(LOG, "a") as logf:
         p = subprocess.run(args, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
