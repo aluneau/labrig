@@ -44,6 +44,20 @@ KNOWN_REQUIRES = {"kubeadm", "k3s", "openshift", "wireguard", "bgp", "registry",
 _DROP = object()
 
 
+class _LiteralDumper(yaml.SafeDumper):
+    """Multi-line strings (guide, user_data) as | blocks: a saved template stays editable by hand"""
+
+
+def _str_presenter(dumper: yaml.SafeDumper, data: str) -> Any:
+    if "\n" in data:
+        data = "\n".join(line.rstrip() for line in data.splitlines()) + ("\n" if data.endswith("\n") else "")
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+
+_LiteralDumper.add_representer(str, _str_presenter)
+
+
 class TemplateError(ValueError):
     pass
 
@@ -698,7 +712,8 @@ class TemplateService:
         if group is None:
             raise LookupError("Group not found")
         doc = self.templatize(db, group, body)
-        text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False, allow_unicode=True, width=110)
+        text = yaml.dump(doc, Dumper=_LiteralDumper, sort_keys=False, default_flow_style=False, allow_unicode=True,
+                         width=110)
         self.parse(text)  # what we write must load
         directory = self.user_dir()
         directory.mkdir(parents=True, exist_ok=True)
