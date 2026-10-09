@@ -34,8 +34,9 @@ DRIVERS = {
     "ice": ("iavf", "Intel E810 (800 series), up to 256 VFs per port; needs the DDP package "
                     "(/lib/firmware/intel/ice/ddp), else the PF runs in safe mode without SR-IOV"),
     "igb": ("igbvf", "Intel 82576 / I350 (1 GbE), up to 7 VFs (also QEMU's emulated igb)"),
-    "mlx5_core": ("mlx5_core", "NVIDIA/Mellanox ConnectX-4/5/6/7: VFs also use mlx5_core; the firmware caps "
-                               "the VF count (mstconfig SRIOV_EN / NUM_OF_VFS); legacy eswitch mode only"),
+    "mlx5_core": ("mlx5_core", "NVIDIA/Mellanox ConnectX-4/5/6/7, the firmware caps the VF count (mstconfig "
+                               "SRIOV_EN / NUM_OF_VFS); VF pools need the eswitch in legacy mode (the default), "
+                               "not switchdev"),
     "bnxt_en": ("bnxt_en", "Broadcom NetXtreme-C/E"),
     "qede": ("qede", "Marvell/QLogic FastLinQ"),
     "sfc": ("sfc", "AMD/Solarflare"),
