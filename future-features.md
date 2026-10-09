@@ -21,12 +21,13 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
 | Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
+| IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); cluster dual stack next |
 | Authentication, CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
 `source`/`iso`/`cloud_init`/`user_data`, `dns_record`, `dhcp_host`, `router_memory`, `wireguard`, `bgp`),
-`_wireguard_peer`, `_cluster` (k3s, kubeadm, `group_id`). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
+`_wireguard_peer`, `_cluster` (k3s, kubeadm, `group_id`); `_group.ipv6` (dual stack). Not exposed (by design): libvirt start/stop, lease release (imperative actions).
 
 ---
 
@@ -342,7 +343,15 @@ idea as the live DHCP reservations, but with the router as the target.
 > `network.mtu` (libvirt `<mtu>`, router LAN, DHCP option 26) and `router.path` (narrow hop MTU on the router,
 > dropped ICMP frag-needed, MSS clamping). UI (Network & DNS, Registry & egress), topology badges, OpenTofu
 > (`dns_zone`, `egress.proxy`, `mtu`, `path`), templates `split-dns`, `proxy-only-egress`, `mtu-1400`,
-> e2e `router-cases.js`. Not done: TLS-intercepting proxy (ssl_bump + own CA), IPv6 MTU.
+> e2e `router-cases.js`. Not done: TLS-intercepting proxy (ssl_bump + own CA). (The RAs of IPv6 groups carry `network.mtu`.)
+
+> **IPv6 dual stack — ✅ done** (2026-10, docs/ipv6.md): `network.ipv6` (a ULA /64 of `IPV6_ULA_POOL`, router `::1`),
+> stateful DHCPv6 with reservations by MAC (`<prefix>::<IPv4 host number>`) + RAs (default route), AAAA for every
+> machine and `aaaa` on records, DHCPv6 leases (DUID), `ipv6.egress` reject|drop + egress blocked/proxy for IPv6,
+> WireGuard tunnel /64, MP-BGP (`address-family ipv6 unicast`, `lab6` announce range), UI (create / Network & DNS
+> switch, addresses everywhere, BGP tab, topology), `vmmanager_group.ipv6`, template `ipv6-dual-stack`, `e2e/ipv6.js`.
+> Next: Kubernetes / OpenShift dual stack (pod/service CIDRs, `machineNetwork` v6, MetalLB IPv6 pools), NAT66 /
+> NPTv6 when an uplink has IPv6, IPv6-only groups.
 
 > **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the
 > group CIDR, AS 64512 ← 64513, announce ranges from `BGP_ANNOUNCE_POOL` filtered `le 32`, ECMP over ports), live

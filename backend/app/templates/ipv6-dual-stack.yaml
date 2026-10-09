@@ -1,0 +1,99 @@
+id: ipv6-dual-stack
+title: IPv6 dual stack (AAAA preferred, IPv6 broken)
+summary: Names have A and AAAA records, IPv6 to the app is silently dropped - clients that prefer IPv6 hang instead of using IPv4.
+tags: [ipv6, dns, network]
+requires: [ipv6]
+resources: {vcpus: 3, memory_mb: 2048, disk_gb: 30}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9A-Za-z-]{1,12}$'}
+  - {name: image, label: Cloud image, type: cloud_image, default: debian-13}
+  - {name: password, label: Password of user admin, type: string, required: true, pattern: '^[A-Za-z0-9._~!*+=,;-]{4,64}$'}
+name: "c{{case}}-v6"
+group:
+  name: "c{{case}}-v6"
+  cidr: 10.42.241.0/24
+  network:
+    # the lab /64 is assigned by the app (IPV6_ULA_POOL); IPv6 to anything outside the lab is dropped silently
+    ipv6: {enabled: true, egress: drop}
+  router:
+    dns:
+      records:
+        # the customer's app: an A record that works and a AAAA record whose address is unreachable over IPv6
+        # (a ULA outside the lab: same address family "label" as the clients' ULA, so it is tried first)
+        - {name: app, a: 10.42.241.80, aaaa: "fd00:bad:c0de::80"}
+  cloud_init: {username: admin, password: "{{password}}"}
+  members:
+    - {name: client, image: "{{image}}", memory: 1024}
+    # The app server: HTTP on port 80, IPv4 only (like many legacy services)
+    - name: web
+      image: "{{image}}"
+      memory: 768
+      ip: 10.42.241.80
+      role: app
+      user_data: |
+        #cloud-config
+        hostname: web
+        users:
+          - default
+          - {name: admin, plain_text_passwd: "{{password}}", lock_passwd: false, sudo: "ALL=(ALL) NOPASSWD:ALL", shell: /bin/bash}
+        ssh_pwauth: true
+        packages: [qemu-guest-agent, python3]
+        write_files:
+          - path: /etc/systemd/system/legacy-app.service
+            content: |
+              [Unit]
+              Description=Legacy app (HTTP, IPv4 only)
+              After=network-online.target
+              [Service]
+              ExecStart=/usr/bin/python3 -m http.server 80 --bind 0.0.0.0 --directory /usr/share/doc
+              [Install]
+              WantedBy=multi-user.target
+        runcmd:
+          - systemctl enable --now qemu-guest-agent
+          - systemctl daemon-reload
+          - systemctl enable --now legacy-app
+guide: |
+  ## Customer symptom
+  "The application hangs for two minutes and then times out, but `curl` works", "it worked until we enabled IPv6",
+  "`ping app` is fine, `ping -6 app` gets nothing": the name has a AAAA record, the client has an IPv6 address and
+  a default route, so `getaddrinfo()` returns the IPv6 address **first** - and IPv6 packets to it are silently
+  dropped (a missing firewall rule, a broken route, a forgotten AAAA). Clients doing *happy eyeballs*
+  (curl, browsers, systemd-resolved users like `resolvectl`) fall back to IPv4 after ~200 ms; Python's
+  `urllib` / `requests`, Java, `wget`, most agents and many in-house apps try the addresses one after the other and
+  wait for the IPv6 connect to time out.
+
+  ## What the lab contains
+  - A dual stack lab network: 10.42.241.0/24 + an IPv6 /64 (Network & DNS tab, *IPv6 (dual stack)*). The router
+    sends router advertisements (default route) and hands out IPv6 addresses by DHCPv6; every machine also has an
+    AAAA record (`client.c{{case}}-v6.lab`).
+  - `app.c{{case}}-v6.lab`: A = 10.42.241.80 (`web`, HTTP on port 80, IPv4 only) and AAAA = `fd00:bad:c0de::80`,
+    an address outside the lab. The group's *IPv6 to outside the lab* is set to **hangs (dropped)**: the router drops
+    those packets without an answer.
+  - `client`: a plain dual stack machine.
+
+  ## Reproduce
+  On `client` (console, user admin):
+  ```
+  getent ahosts app.c{{case}}-v6.lab         # the IPv6 address comes FIRST (glibc prefers ULA over IPv4)
+  ip -6 addr; ip -6 route                    # an IPv6 address from DHCPv6 and a default route from the router's RAs
+  curl -sS -o /dev/null -w '%{http_code} %{remote_ip} %{time_total}s\n' http://app.c{{case}}-v6.lab/
+                                             # 200 from 10.42.241.80 after ~0.2 s: happy eyeballs fell back to IPv4
+  curl -6 -m 10 http://app.c{{case}}-v6.lab/ # hangs, times out: IPv6 is black-holed
+  curl -4 http://app.c{{case}}-v6.lab/       # works
+  time python3 -c "import urllib.request; urllib.request.urlopen('http://app.c{{case}}-v6.lab/', timeout=200)"
+                                             # ~2 min (the kernel's SYN retries) before IPv4 is tried
+  wget -O /dev/null http://app.c{{case}}-v6.lab/   # "Connecting to ... fd00:bad:c0de::80 ... failed: Connection timed out"
+  ```
+  Compare with a failure that is *fast*: switch *IPv6 to outside the lab* to **fails at once (reject)** (Network & DNS
+  tab, Apply): the client gets "Network is unreachable" right away and every program falls back to IPv4 at once. A
+  silent drop is what hurts.
+
+  ## What to check / try
+  - `getent ahosts <name>` (order the application sees), `dig AAAA <name>`, `/etc/gai.conf`
+    (`precedence ::ffff:0:0/96 100` makes glibc prefer IPv4: the classic workaround), `sysctl net.ipv6.conf.all.disable_ipv6`.
+  - `ip -6 route get <address>`, `tracepath -6`, `tcpdump -ni any ip6` on the client and the router (Router tab: console):
+    SYNs leave and nothing comes back.
+  - The fix: remove the stale AAAA record (Network & DNS tab), or let IPv6 through (here: the AAAA points at an address
+    that doesn't exist; in real life: the missing `ip6tables` / nftables rule, the route, the load balancer's IPv6 VIP).
+  - Application side: Java `-Djava.net.preferIPv4Stack=true` / `preferIPv6Addresses`, Python `socket.create_connection`
+    tries addresses in order, Go and curl do happy eyeballs.

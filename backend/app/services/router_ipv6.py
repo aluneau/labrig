@@ -80,7 +80,6 @@ def dnsmasq_lines(spec: GroupSpec) -> List[str]:
         f"ra-param=*,{f'mtu:{spec.network.mtu},' if spec.network.mtu else ''}{RA_INTERVAL},{RA_LIFETIME}",
         f"dhcp-option=option6:dns-server,[{rip6}]",
         f"dhcp-option=option6:domain-search,{spec.domain}",
-        f"dhcp-option=option6:ntp-server,[{rip6}]",
     ]
 
 
