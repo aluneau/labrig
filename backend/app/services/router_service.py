@@ -336,10 +336,13 @@ class ELRouterBackend(RouterBackend):
                 " && sysctl -qw net.ipv4.fib_multipath_hash_policy=1"
                 " && if grep -q '^bgpd=yes' /etc/frr/daemons; then fresh=0;"
                 " else sed -i 's/^bgpd=.*/bgpd=yes/' /etc/frr/daemons && fresh=1; fi"
-                # bfdd (BFD) is started once and then kept: turning BFD off only drops it from frr.conf
-                # (no restart, sessions stay up). A daemon newly on needs a restart, reload doesn't start it.
+                # bfdd (BFD) is started once and then kept (a daemon newly on needs a restart, reload doesn't
+                # start it). Turning BFD on or off restarts FRR too: FRR 8.5's frr-reload mangles the config when
+                # the `bfd` block comes or goes (it dropped the prefix-list / route-maps: no session at all)
                 + (" && if ! grep -q '^bfdd=yes' /etc/frr/daemons; then"
-                   " sed -i 's/^bfdd=.*/bfdd=yes/' /etc/frr/daemons && fresh=1; fi" if self._bgp(spec).bfd_on() else "") +
+                   " sed -i 's/^bfdd=.*/bfdd=yes/' /etc/frr/daemons && fresh=1; fi" if self._bgp(spec).bfd_on() else "")
+                + " && { had=$(vtysh -c 'show running-config' 2>/dev/null | grep -c '^bfd$');"
+                f" [ \"$had\" = {1 if self._bgp(spec).bfd_on() else 0} ] || fresh=1; }}" +
                 f" && chown frr:frr {FRR_CONF} && chmod 640 {FRR_CONF}"
                 " && { restorecon -R /etc/frr 2>/dev/null; true; }"
                 " && systemctl enable -q frr"

@@ -23,7 +23,8 @@ async function scenario(id, ok = true) {
   return waitFor(async () => {
     const s = await api(`/clusters/${id}/metallb`);
     const bad = s.checks.filter((c) => !c.ok);
-    return s.checks.length >= 4 && (!ok || !bad.length) ? s : `${bad.map((c) => `${c.name}: ${c.detail}`).join('; ') || 'no checks yet'}`;
+    if (s.checks.length >= 4 && (!ok || !bad.length)) return s;
+    throw new Error(bad.map((c) => `${c.name}: ${c.detail}`).join('; ') || 'no checks yet');
   }, 6 * 60000, 'MetalLB checks green');
 }
 

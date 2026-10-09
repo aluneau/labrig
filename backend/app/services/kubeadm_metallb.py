@@ -121,8 +121,13 @@ def apply(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
         if not mlb.get("pool"):
             mlb["pool"] = metallb.assign_pool(network, gspec, mode, int(mlb.get("addresses") or 16),
                                               [n.ip for n in cluster.nodes], cluster.name, bool(mlb.get("bfd")))
-        elif mode == "bgp" and mlb.get("bfd"):
-            network.enable_bfd()
+        else:  # (re)record the pool in the group spec: idempotent, repairs a spec edited meanwhile
+            name = f"{cluster.name}-metallb"
+            if mode == "bgp":
+                network.set_bgp_range(name, mlb["pool"], bfd=bool(mlb.get("bfd")))
+            else:
+                start, end = mlb["pool"].split("-")
+                network.set_address_pool(name, start, end)
         network.commit()
         _save(db, cluster, pool=mlb["pool"])
         gspec = network.spec()
@@ -208,12 +213,8 @@ def set_options(db: Session, cluster: Cluster, body: MetalLBOptions) -> Task:
     else:
         new = {**prev, **body.model_dump(exclude={"pool"}), "enabled": True}
         if (prev.get("mode") or "l2") != body.mode or not prev.get("enabled"):
-            new["pool"] = None  # a pool of the other kind (or none yet)
-            if prev.get("pool"):
-                network = _network(cluster)
-                network.remove_address_pool(f"{cluster.name}-metallb")
-                network.remove_bgp_range(f"{cluster.name}-metallb")
-                network.commit()
+            # a pool of the other kind (or none yet): apply() assigns it, dropping the old one from the group
+            new["pool"] = None
         _save(db, cluster, **{**new, "state": "pending", "message": None})
         func, label = apply, "Configure MetalLB on"
 
