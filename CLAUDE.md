@@ -32,11 +32,14 @@ Old podman containers `vm-manager-backend/frontend` (stale code, ports 8000/3000
 ```
 backend/app/
   main.py             FastAPI app: lifespan (DB init, idle-close/state watcher), libvirtError -> 400/404, LibvirtUnavailable -> 503, serves frontend/build
+  auth_middleware.py  pure-ASGI guard of /api (HTTP + WebSocket): session cookie / Bearer token, viewer = read-only, CSRF/Origin, audit log
+  cli.py              `python -m app.cli token create --user U | token list|revoke | user show|check | session revoke | status`
   config.py           Settings (env or backend/.env): LIBVIRT_URI, DEFAULT_POOL_*, DEFAULT_NETWORK, VNC_LISTEN, paths
   database.py         SQLite (WAL, one connection per session), @serialized lock for libvirt->DB mirroring
   libvirt_client.py   ALL libvirt calls; event loop thread + lifecycle callbacks -> event_bus; domain XML template
   events.py           thread-safe EventBus -> asyncio queues (SSE)
-  services/           daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
+  services/           auth_service (PAM check, roles from Linux groups, sessions, tokens, login backoff) + pam_auth (ctypes libpam),
+                      daemon (libvirt start/stop via systemd), helper (pkexec helper), vm, storage (pools/volumes/ISOs/downloads), cloud_image (+ cloud-init seed ISO), network, task, host,
                       group (lab groups), router (RouterBackend.render(spec) -> cloud-init + live files; flavour "el"),
                       wireguard_service (keys, client configs, relay reconcile) + wireguard_relay (UDP relay thread),
                       bgp_service (announce ranges, vtysh status), topology_service (GET /groups/{id}/topology),
@@ -47,9 +50,10 @@ backend/app/
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
-  hooks/              useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
+  hooks/              useAuth (AuthProvider: login page until logged in), useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
+  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Clusters, ClusterDetail, Host, Tasks
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
+docs/auth.md          authentication: PAM login, groups -> roles, tokens, CLI, CSRF, disabling it
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
 docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
@@ -61,6 +65,19 @@ e2e/                  Playwright browser tests against the real app (see below)
 ```
 
 ## Architecture rules
+
+- **Authentication** (docs/auth.md, `AUTH_ENABLED`, default on; `setup.sh --no-auth|--auth` writes it to backend/.env):
+  Linux accounts through PAM (service `vm-manager`, /etc/pam.d file from setup.sh), no password in the DB. pam_unix can
+  only check the *service user's own* password from a non-root process: other users go through the helper's
+  `pam-auth` (pkexec, stdin password, fixed service, uid 0 refused); SSSD/Kerberos work either way. Role from groups on
+  each request (1 min cache): service user + `AUTH_ADMIN_GROUPS` = admin, `AUTH_VIEWER_GROUPS` = viewer (GET only, no
+  credential reads, no VNC). `AuthMiddleware` (pure ASGI, sees WebSockets, doesn't buffer SSE) sets `scope["state"]["user"]`;
+  cookie writes need `X-VMM-Request` + same Origin, cookie WebSockets a same Origin; Bearer tokens (`vmm_…`, sha256 in
+  `api_tokens`) are exempt. Sessions = `auth_sessions` (sha256 of the cookie). Public: /health, static UI, auth
+  status/login/logout, registry `ca.crt`. New endpoints are protected automatically; a new *read* that returns
+  secrets must be added to `SECRET_READS_RE`. Frontend: every request goes through `api.ts` (adds `X-VMM-Request`;
+  401 -> login page); raw `fetch`/XHR elsewhere must add `CSRF_HEADERS`. e2e scripts load `./auth` (not
+  playwright-core): `VMM_TOKEN` (`app.cli token create`) or `E2E_USER`/`E2E_PASSWORD`.
 
 - **libvirt is the source of truth.** The DB mirrors VMs/pools/volumes/networks only to give them stable
   integer IDs + metadata. Mirroring (`sync_*`, `list_volumes`) runs under `@serialized`, since parallel
@@ -264,6 +281,8 @@ node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L 
 cd opentofu_provider && make install && cd ../examples/opentofu/lab && tofu init && tofu apply
 ```
 
-e2e tests need the server on `BASE_URL` (default http://localhost:8000), Chrome at `CHROME_PATH`, and a
-ready Debian 13 cloud image. They create and delete real VMs/networks named `e2e-*`. Screenshots go to
+e2e tests need the server on `BASE_URL` (default http://localhost:8000), Chrome at `CHROME_PATH`, a
+ready Debian 13 cloud image, and with authentication on `VMM_TOKEN` (`cd backend && venv/bin/python -m app.cli
+token create --user $USER --name e2e`) or `E2E_USER`/`E2E_PASSWORD`. `node auth-test.js` tests the login itself
+(E2E_USER/E2E_PASSWORD, optional E2E_VIEWER/E2E_VIEWER_PASSWORD). They create and delete real VMs/networks named `e2e-*`. Screenshots go to
 `e2e/screenshots/`. Never touch VMs that aren't named `e2e-*`/`tofu-*` in tests: the user runs their own VMs here.

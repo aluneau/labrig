@@ -191,6 +191,9 @@ async function disabledChecks(browser) {
       check(res[0] === 200, 'viewer can read (GET /vms = 200)');
       check(res[1] === 403, 'viewer cannot act (POST start = 403)');
       check(res[2] === 201, 'viewer can create own API token');
+      const vcookie = (await vctx.cookies()).find((c) => c.name === 'vmm_session');
+      check(await wsHandshake(`/vms/${vmId}/vnc`, { Cookie: `vmm_session=${vcookie.value}`, Origin: new URL(BASE).origin }) === 403,
+        'viewer cannot open a VNC console (keyboard input = write)');
       const vt = await vpage.evaluate(async () => (await (await fetch('/api/v1/auth/tokens')).json()));
       for (const t of vt) await vpage.evaluate(async (id) => fetch(`/api/v1/auth/tokens/${id}`, { method: 'DELETE', headers: { 'X-VMM-Request': '1' } }), t.id);
       await vctx.close();

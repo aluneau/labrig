@@ -91,15 +91,23 @@ it uses sudo for the system parts:
 6. firewall: with **ufw**, allows DHCP/DNS and forwarding on libvirt bridges (`virbr+`), otherwise VMs
    boot without an IP; with **firewalld**, libvirt's own `libvirt` zone already covers it. With either,
    opens udp 51820-51869 for lab remote access (WireGuard; `--wg-ports A-B|none`)
-7. creates `backend/venv`, builds the UI if needed
-8. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
+7. login: installs the PAM service `/etc/pam.d/vm-manager` and creates the group `vm-manager`
+8. creates `backend/venv`, builds the UI if needed
+9. installs the `vm-manager` systemd service (runs as you, listens on 127.0.0.1:8000)
+
+**Log in with your Linux account** (the one that ran `setup.sh`) and its password. Other people: add them
+to the `vm-manager` group (`sudo usermod -aG vm-manager alice`); members of `wheel` / `sudo` are admins too.
+Read-only accounts, API tokens for scripts and OpenTofu (user menu > API tokens, or headless:
+`cd backend && venv/bin/python -m app.cli token create --user $USER --name opentofu`): see
+[docs/auth.md](docs/auth.md).
 
 | Option | |
 |---|---|
 | `--no-boot` | start libvirt and the service now but **don't enable them at boot** (gaming PC): `sudo systemctl start vm-manager` when needed |
 | `--wg-ports A-B` | UDP ports opened in ufw/firewalld for lab WireGuard (default `51820-51869`, = `WG_HOST_PORTS`); `none` to skip |
 | `--no-service` | no systemd service, start with `./run.sh` |
-| `--listen 0.0.0.0 --port 8000` | reachable from the network (no login yet: trusted networks only; open the port yourself) |
+| `--listen 0.0.0.0 --port 8000` | reachable from the network (open the port yourself; plain http: use a TLS reverse proxy on untrusted networks) |
+| `--no-auth` / `--auth` | turn the login off (`AUTH_ENABLED=false` in `backend/.env`: single-user host on 127.0.0.1 only) / back on |
 
 Service: `journalctl -u vm-manager -f`, `sudo systemctl stop vm-manager`.
 
@@ -135,6 +143,7 @@ Environment variables or `backend/.env`:
 | `VNC_LISTEN` | `127.0.0.1` | `0.0.0.0` exposes VM consoles (no password) to the LAN |
 | `DATABASE_URL` | `sqlite:///backend/data/vmanager.db` | |
 | `CLUSTER_SUBNET_POOL` | `10.43.0.0/16` | New cluster networks get the first free /24 of it |
+| `AUTH_ENABLED` | `true` | Login with Linux accounts (PAM); `false` = no login. `AUTH_ADMIN_GROUPS`, `AUTH_VIEWER_GROUPS`… in [docs/auth.md](docs/auth.md) |
 
 VNC servers listen on localhost; the web console reaches them through the backend's WebSocket bridge,
 so nothing else needs to be exposed.
@@ -143,6 +152,7 @@ so nothing else needs to be exposed.
 
 ```bash
 make -C opentofu_provider install
+export VMMANAGER_TOKEN=vmm_…                               # API token (user menu > API tokens), unless AUTH_ENABLED=false
 cd examples/opentofu/basic && tofu init && tofu apply     # one Debian VM "my-vm"
 cd examples/opentofu/lab                                   # network + DHCP reservations + 2 VMs
 cd examples/opentofu/k3s                                   # k3s cluster, kubeconfig as an output
@@ -157,7 +167,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 ## Tests
 
 `e2e/` drives the real UI in headless Chrome against real libvirt (creates and deletes `e2e-*` VMs):
-`cd e2e && npm install && node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
+`cd e2e && npm install && VMM_TOKEN=… node smoke.js` (then `lifecycle.js`, `full.js`, `netedit.js`, `iso.js`, `kbd.js`,
 `clusters.js`, `kubeadm.js`; the last ones need ~6 GB of RAM and use the host's `kubectl` if `KUBECTL` points at one).
 `devices.js`, `nics.js`, `groups.js`, `group-members.js`, `group-dhcp.js`).
 `libvirtctl.js` **stops libvirt**: run it only against a nested test install (see its header).
@@ -166,6 +176,7 @@ See `opentofu_provider/README.md` for all resources and arguments.
 
 | | |
 |---|---|
+| `GET /api/v1/auth/status`, `POST …/auth/login` `{username, password}`, `POST …/auth/logout`, `/api/v1/auth/tokens` | Session login (cookie) and API tokens; scripts send `Authorization: Bearer <token>` |
 | `GET/POST /api/v1/vms`, `GET/PATCH/DELETE /api/v1/vms/{id}` | VMs (`?delete_disks=true` on delete) |
 | `POST /api/v1/vms/{id}/{start,stop,force_stop,reboot,suspend,resume}` | Power actions |
 | `PUT /api/v1/vms/{id}/cdrom` `{iso_path\|null}` | Insert / eject an ISO (live) |

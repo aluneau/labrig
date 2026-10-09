@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start VM Manager (API + web UI) on http://$HOST:$PORT
-#   HOST=0.0.0.0 ./run.sh   to listen on all interfaces (there is no login: keep it on a trusted network)
+#   HOST=0.0.0.0 ./run.sh   to listen on all interfaces (login with Linux accounts, docs/auth.md; plain http)
 #   ./run.sh --dev          backend with auto-reload; run `cd frontend && npm start` for the UI on :3000
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -20,7 +20,8 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | BGP on the group router (FRR) + MetalLB BGP mode + self-explaining Topology view (docs/bgp.md) | ✅ done |
 | §3.3 OpenShift (agent-based installer: SNO verified; compact/HA, ODF untested) + add-ons, MetalLB L2/BGP, topology view | ✅ done (2026-10-05) |
 | Disconnected labs: router egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images; docs/disconnected.md) | ✅ done (2026-10-06); OpenShift disconnected install next |
-| Authentication, CI, per-group resource budget | open (§4) |
+| Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
+| CI, per-group resource budget | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
@@ -510,8 +511,8 @@ Next, in order:
    templates, export with disks, PXE (`dhcp-boot`) for empty-disk members, NIC options in member specs.
 3. SR-IOV on OpenShift: run the SR-IOV Network Operator on these VMs (igb, `docs/sriov.md`) and turn the
    steps into a group/cluster option; real VF pools on RHEL lab hosts with SR-IOV NICs.
-4. Cross-cutting, before sharing widely: **authentication** (at least a local user + token; the API
-   can create VMs on the host), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
+4. Cross-cutting, before sharing widely: ~~**authentication**~~ (done: docs/auth.md; next maybe OIDC / per-group
+   ownership), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
    `go vet`, `e2e/smoke.js`), and a per-group **resource budget** check (CPU/RAM/disk) before creating,
    so a lab doesn't starve the host.
 
