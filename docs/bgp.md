@@ -83,7 +83,9 @@ Forwarding Detection) is a tiny UDP hello (port 3784) both sides send every few 
   OpenTofu `bgp_bfd = true`, or MetalLB **BFD** (OpenShift / kubeadm, BGP mode: turns it on on the router too).
 - Router side: FRR `bfdd`, one profile `vmm` and `neighbor LAB bfd profile vmm` (and every explicit neighbor).
   Turning BFD on or off **restarts FRR** (sessions re-establish in ~10 s): FRR 8.5's reload mangled the config when
-  the `bfd` block came or went.
+  the `bfd` block came or went. The router also has a static BFD session per known lab address (members, reservations,
+  cluster nodes): FRR 10 keeps a `neighbor … bfd` session Idle until BFD is up, and a dynamic peer only got one from
+  bgpd after BGP was up (a rebooted member never came back). So adding a lab address restarts FRR when BFD is on.
 - Peers must run BFD too: FRR `bfdd=yes` + `neighbor <router> bfd profile …` (the BGP tab's sample shows it), MetalLB a
   `BFDProfile` referenced by the `BGPPeer` (the app does it). The negotiated interval is the slower of both sides.
 - Status: the BGP tab's **BFD sessions** table (status, detection time, intervals both ways, last down reason),
@@ -96,9 +98,9 @@ the node's last answer to a 50 ms ping from the router and the router dropping i
 
 | Failure (force-stopped VM) | Without BFD | With BFD (3 × 200 ms) |
 |---|---|---|
-| FRR member announcing an anycast /32 | @NOBFD@ s (hold time 30 s) | @BFD@ s |
+| FRR member announcing an anycast /32 | 26.5–27 s (hold time 30 s) | 0.63–0.70 s |
 | kubeadm worker, MetalLB BGP speaker | (hold time, up to 30 s) | 0.62 s |
-| MetalLB L2 (no BGP): another node takes the IP over | @L2@ s of failed requests | (n/a) |
+| MetalLB L2 (no BGP): another node takes the IP over | 19 s of failed requests | (n/a) |
 
 ## Check it
 
