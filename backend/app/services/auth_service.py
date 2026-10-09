@@ -253,6 +253,16 @@ def create_token(db: Session, username: str, name: str, expires_days: Optional[f
     return row, value
 
 
+CLI_TOKEN_NAME = "cli"
+
+
+def rotate_cli_token(db: Session, username: str) -> Tuple[ApiToken, str]:
+    """The user's personal command-line token (used in the UI's copy-paste commands): replaces the
+    previous one, never expires."""
+    db.query(ApiToken).filter(ApiToken.username == username, ApiToken.name == CLI_TOKEN_NAME).delete()
+    return create_token(db, username, CLI_TOKEN_NAME)
+
+
 def token_row(db: Session, value: str, ip: str = "") -> Optional[ApiToken]:
     if not value.startswith(TOKEN_PREFIX) or len(value) > 128:
         return None

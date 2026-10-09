@@ -4,6 +4,8 @@
   venv/bin/python -m app.cli user show <user>                a Linux user's groups and VM Manager role
   venv/bin/python -m app.cli user check <user>               test a password through PAM (prompted, or on stdin)
   venv/bin/python -m app.cli token create --user <user> [--name NAME] [--expires-days N]
+  venv/bin/python -m app.cli token cli --user <user>         (re)create the user's personal CLI token, the one the
+                                                             web UI puts in its copy-paste commands
   venv/bin/python -m app.cli token list [--user <user>]
   venv/bin/python -m app.cli token revoke <id>
   venv/bin/python -m app.cli session revoke --user <user>    log a user out of every browser
@@ -59,7 +61,10 @@ def cmd_token_create(args) -> int:
               f"{settings.AUTH_ADMIN_GROUPS} / {settings.AUTH_VIEWER_GROUPS or '-'})", file=sys.stderr)
         return 1
     with SessionLocal() as db:
-        row, value = auth_service.create_token(db, args.user, args.name, args.expires_days)
+        if args.cli:
+            row, value = auth_service.rotate_cli_token(db, args.user)
+        else:
+            row, value = auth_service.create_token(db, args.user, args.name, args.expires_days)
     auth_service.audit_log.info(f"token created id={row.id} name={row.name!r} user={args.user} (cli)")
     print(value)
     print(f"token {row.id} '{row.name}' for {args.user} ({role})"
@@ -118,9 +123,12 @@ def main(argv=None) -> int:
     token = sub.add_parser("token", help="API tokens").add_subparsers(dest="action", required=True)
     p = token.add_parser("create", help="create a token (printed once)")
     p.add_argument("--user", required=True)
-    p.add_argument("--name", default="cli")
+    p.add_argument("--name", default="token")
     p.add_argument("--expires-days", type=float)
-    p.set_defaults(func=cmd_token_create)
+    p.set_defaults(func=cmd_token_create, cli=False)
+    p = token.add_parser("cli", help="(re)create the user's personal CLI token (replaces the previous one)")
+    p.add_argument("--user", required=True)
+    p.set_defaults(func=cmd_token_create, cli=True)
     p = token.add_parser("list", help="list tokens")
     p.add_argument("--user")
     p.set_defaults(func=cmd_token_list)

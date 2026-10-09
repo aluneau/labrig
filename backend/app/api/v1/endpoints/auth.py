@@ -143,6 +143,17 @@ def create_token(data: TokenCreate, request: Request, db: Session = Depends(get_
     return TokenCreated(**TokenOut.model_validate(row).model_dump(), token=value)
 
 
+@router.post("/tokens/cli", response_model=TokenCreated, status_code=201)
+def rotate_cli_token(request: Request, db: Session = Depends(get_db)):
+    """(Re)create my personal command-line token (name "cli", no expiry; the previous one is revoked).
+    The UI puts it in its copy-paste commands (kubeconfig downloads...)."""
+    _require_enabled()
+    user = require_user(request)
+    row, value = auth_service.rotate_cli_token(db, user.name)
+    audit_log.info(f"cli token rotated id={row.id} user={user.name}")
+    return TokenCreated(**TokenOut.model_validate(row).model_dump(), token=value)
+
+
 @router.delete("/tokens/{token_id}", status_code=204)
 def revoke_token(token_id: int, request: Request, db: Session = Depends(get_db)):
     """Revoke one of my tokens (admins: anyone's)"""
