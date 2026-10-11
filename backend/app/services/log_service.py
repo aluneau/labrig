@@ -63,7 +63,21 @@ def _compile(pattern: Optional[str], what: str) -> Optional["re.Pattern[str]"]:
         raise LogError(f"{what}: invalid regular expression ({e})")
 
 
+# an explicit level in the line wins over keywords: klog "E1011 12:00", logfmt level=warning, JSON "level":"info"
+KLOG_RE = re.compile(r"(^|\s)([EWIF])\d{4} \d\d:\d\d:\d\d")
+EXPLICIT_LEVEL_RE = re.compile(r"\blevel[=:]\s*\"?(\w+)|\"level\":\s*\"(\w+)", re.IGNORECASE)
+LEVEL_WORDS = {"error": "error", "err": "error", "fatal": "error", "panic": "error", "critical": "error",
+               "crit": "error", "warning": "warning", "warn": "warning", "info": "info", "debug": "info",
+               "trace": "info", "notice": "info"}
+
+
 def guess_level(line: str) -> str:
+    m = KLOG_RE.search(line[:120])
+    if m:
+        return {"E": "error", "F": "error", "W": "warning"}.get(m.group(2), "info")
+    m = EXPLICIT_LEVEL_RE.search(line[:300])
+    if m and (m.group(1) or m.group(2) or "").lower() in LEVEL_WORDS:
+        return LEVEL_WORDS[(m.group(1) or m.group(2)).lower()]
     if ERROR_RE.search(line):
         return "error"
     if WARN_RE.search(line):
@@ -221,6 +235,8 @@ def _journal_line(rec: Dict[str, Any]) -> Tuple[str, str]:
     except (TypeError, ValueError):
         prio = 6
     level = "error" if prio <= 3 else "warning" if prio == 4 else "info"
+    if level == "info":  # stdout-captured services (kubelet, crio: klog "E1011 …") all log at priority 6
+        level = guess_level(msg)
     return f"{stamp} {ident}{'[' + str(pid) + ']' if pid else ''}: {msg}", level
 
 
@@ -274,11 +290,106 @@ def _journal(name: str, lines: int, unit: Optional[List[str]] = None, priority: 
 DMESG_LEVEL = {"emerg": "error", "alert": "error", "crit": "error", "err": "error", "warn": "warning"}
 
 
+def _openshift_cluster(name: str) -> Optional[Cluster]:
+    """The OpenShift cluster whose node this VM is, if any"""
+    from app.database import SessionLocal
+    from app.models import ClusterNode
+    with SessionLocal() as db:
+        node = db.query(ClusterNode).filter(ClusterNode.name == name).first()
+        cluster = db.get(Cluster, node.cluster_id) if node else None
+        if cluster is None or cluster.type != "openshift":
+            return None
+        db.expunge(cluster)
+        return cluster
+
+
+def _node_logs(cluster: Cluster, name: str, source: str, lines: int, unit: Optional[List[str]],
+               since: Optional[str], until: Optional[str], boot: Optional[str], grep: Optional[str],
+               path: Optional[str]) -> Dict[str, Any]:
+    """OpenShift node (RHCOS: qemu-ga forbids guest-exec): `oc adm node-logs` through the API server. No SSH, no
+    route to the node, no debug image (works on disconnected clusters)."""
+    nodes = _kubectl(cluster, ["get", "nodes", "-o", "name"], timeout=60)
+    names = [n.split("/", 1)[-1] for n in nodes["stdout"].split()]
+    node = next((n for n in names if n == name or n.startswith(name + ".")), None)
+    if node is None:
+        raise LogError(f"{name}: not a node of {cluster.name} in the API (nodes: {', '.join(names) or 'none'})")
+    args = ["adm", "node-logs", node]
+    if source == "cloud-init":
+        raise LogError(f"{name}: OpenShift nodes (RHCOS) are provisioned by Ignition, not cloud-init: see the "
+                       f"Journal with units ignition-firstboot-complete, machine-config-daemon-firstboot")
+    if source == "file":
+        if not path or not path.startswith("/var/log/") or ".." in path:
+            raise LogError(f"{name}: on an OpenShift node only files under /var/log/ can be read "
+                           f"(oc adm node-logs --path), e.g. /var/log/openvswitch/ovs-vswitchd.log")
+        args += ["--path=" + _safe(path[len("/var/log/"):], "path")]
+        out = _kubectl(cluster, args, timeout=120)
+        if out["exitcode"] != 0:
+            raise LogError(f"{name}: oc adm node-logs failed: {(out['stderr'] or '').strip()[-300:]}")
+        texts = out["stdout"].splitlines()[-lines:]
+        return {"source": source, "command": "oc " + " ".join(args), "lines": texts, "levels": []}
+    kernel = source == "dmesg"
+    # node-logs can't filter on the kernel transport: read more of the journal and keep the kernel's lines
+    args += ["-o", "json", f"--tail={min(lines * 10, 50000) if kernel else lines}"]
+    for u in ([] if kernel else unit or []):
+        args.append("--unit=" + (_safe(u, "unit") or ""))
+    if since:
+        args.append("--since=" + (_safe(since, "since", dash=True) or ""))
+    if until:
+        args.append("--until=" + (_safe(until, "until", dash=True) or ""))
+    if boot not in (None, "", "all"):
+        if not re.match(r"^-?\d{1,3}$", str(boot)):
+            raise LogError("boot: 0 = current boot, -1 = previous one, … or 'all'")
+        args.append(f"--boot={boot}")
+    if grep:
+        if "\n" in grep or len(grep) > 200:
+            raise LogError("grep: one line, at most 200 characters")
+        args += ["--grep=" + grep, "--case-sensitive=false"]
+    out = _kubectl(cluster, args, timeout=180)
+    texts: List[str] = []
+    levels: List[Optional[str]] = []
+    for raw in out["stdout"].splitlines():
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if kernel and rec.get("_TRANSPORT") != "kernel" and rec.get("SYSLOG_IDENTIFIER") != "kernel":
+            continue
+        text, lv = _journal_line(rec)
+        texts.append(text)
+        levels.append(lv)
+    if out["exitcode"] != 0 and not texts:
+        err = (out["stderr"] or out["stdout"]).strip()
+        if err and "no entries" not in err.lower():
+            raise LogError(f"{name}: oc adm node-logs failed: {err[-500:]}")
+    return {"source": source, "command": "oc " + " ".join(shlex.quote(a) for a in args),
+            "lines": texts[-lines:], "levels": levels[-lines:],
+            "notes": [f"{name} is an OpenShift node: read with oc adm node-logs (its guest agent doesn't run "
+                      f"commands)"]}
+
+
 def vm_logs(name: str, source: str = "journal", lines: int = DEFAULT_LINES, unit: Optional[List[str]] = None,
             priority: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None,
             boot: Optional[str] = None, grep: Optional[str] = None, path: Optional[str] = None) -> Dict[str, Any]:
-    """Fetch raw lines from a VM: {source, command, lines[], levels[]}"""
+    """Fetch raw lines from a VM: {source, command, lines[], levels[]}. Through the guest agent, or for an
+    OpenShift node whose agent forbids commands (RHCOS), `oc adm node-logs`."""
     lines = max(1, min(int(lines or DEFAULT_LINES), MAX_LINES))
+    try:
+        return _agent_logs(name, source, lines, unit, priority, since, until, boot, grep, path)
+    except LogError as e:
+        if "forbids running commands" not in str(e):
+            raise
+        cluster = _openshift_cluster(name)
+        if cluster is None:
+            raise
+        return _node_logs(cluster, name, source, lines, unit, since, until, boot, grep, path)
+
+
+def _agent_logs(name: str, source: str, lines: int, unit: Optional[List[str]], priority: Optional[str],
+                since: Optional[str], until: Optional[str], boot: Optional[str], grep: Optional[str],
+                path: Optional[str]) -> Dict[str, Any]:
     if source == "journal":
         cmd, texts, levels = _journal(name, lines, unit, priority, since, until, boot, grep)
     elif source == "dmesg":
@@ -644,6 +755,39 @@ def _agent_info(name: str) -> Dict[str, Any]:
     return info
 
 
+def _openshift_node_info(cluster: Cluster, name: str) -> Optional[Dict[str, Any]]:
+    """nodeInfo / capacity / conditions of an OpenShift node from the API (RHCOS: no guest-exec)"""
+    try:
+        out = _kubectl(cluster, ["get", "nodes", "-o", "json"], timeout=60)
+        items = json.loads(out["stdout"]).get("items", [])
+    except (LogError, ValueError):
+        return None
+    item = next((i for i in items if i["metadata"]["name"] in (name,) or i["metadata"]["name"].startswith(name + ".")),
+                None)
+    if item is None:
+        return None
+    st = item.get("status", {})
+    info = st.get("nodeInfo", {})
+    findings = []
+    for c in st.get("conditions", []):
+        bad = c.get("status") != ("True" if c.get("type") == "Ready" else "False")
+        if bad:
+            findings.append({"level": "error" if c.get("type") == "Ready" else "warning",
+                             "text": f"node condition {c.get('type')}={c.get('status')}: {c.get('message', '')}"})
+    return {
+        "name": item["metadata"]["name"],
+        "roles": sorted(k.split("/", 1)[1] for k in item["metadata"].get("labels", {})
+                        if k.startswith("node-role.kubernetes.io/")),
+        "os_image": info.get("osImage"), "kernel": info.get("kernelVersion"),
+        "kubelet": info.get("kubeletVersion"), "container_runtime": info.get("containerRuntimeVersion"),
+        "architecture": info.get("architecture"),
+        "capacity": st.get("capacity", {}), "allocatable": st.get("allocatable", {}),
+        "conditions": [{"type": c.get("type"), "status": c.get("status"), "reason": c.get("reason")}
+                       for c in st.get("conditions", [])],
+        "findings": findings,
+    }
+
+
 def diagnostics(name: str) -> Dict[str, Any]:
     agent = _agent_info(name)
     result: Dict[str, Any] = {"vm": name, "agent": agent, "exec": True, "missing_tools": [], "findings": []}
@@ -662,8 +806,16 @@ def diagnostics(name: str) -> Dict[str, Any]:
         result["filesystems"] = [f"{f.get('mountpoint')} {f.get('type')} "
                                  f"{(f.get('used-bytes') or 0) // 2**20} MiB used of {(f.get('total-bytes') or 0) // 2**20} MiB"
                                  for f in agent.get("fsinfo") or []]
-        findings.append({"level": "warning", "text": "Only the guest agent's own information is available: "
-                                                     "guest-exec is forbidden or failed (see exec_error)."})
+        cluster = _openshift_cluster(name) if "forbids running commands" in str(e) else None
+        node = _openshift_node_info(cluster, name) if cluster else None
+        if node:
+            result["node"] = node
+            findings.extend(node.pop("findings"))
+            findings.append({"level": "info", "text": "OpenShift node (RHCOS): its guest agent doesn't run commands; "
+                                                      "node details come from the API, logs from oc adm node-logs."})
+        else:
+            findings.append({"level": "warning", "text": "Only the guest agent's own information is available: "
+                                                         "guest-exec is forbidden or failed (see exec_error)."})
         return result
     sec = _sections(out["stdout"])
     # the structured sections below cover interfaces / file systems / disks: keep the agent's identity only

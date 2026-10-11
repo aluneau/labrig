@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Button, Flex, FlexItem, FormSelect, FormSelectOption, Label, LabelGroup, Popover, Spinner, Switch,
+  Alert, Button, Flex, FlexItem, Label, LabelGroup, Popover, SearchInput, Spinner, Switch,
   TextInput, ToggleGroup, ToggleGroupItem, Tooltip,
 } from '@patternfly/react-core';
-import { AngleDownIcon, AngleRightIcon, DownloadIcon, SyncAltIcon } from '@patternfly/react-icons';
+import { AngleDownIcon, AngleRightIcon, DownloadIcon, FilterIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { logsApi } from '../../services/api';
 import { LogEntry, LogLevel, LogParams, LogResult, LogRules } from '../../types/logs';
 import { errorText } from '../../utils/format';
@@ -76,6 +76,22 @@ function highlight(text: string, regexes: RegExp[]): React.ReactNode {
   return out;
 }
 
+/** Search box text -> include regex: plain text is matched literally, /…/ is a regex */
+export function searchToRegex(search: string): string {
+  const t = search.trim();
+  if (t.length > 2 && t.startsWith('/') && t.endsWith('/')) return t.slice(1, -1);
+  return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Filters a parent sets in one go (quick scenarios, "Show lines" of a finding); `key` changes to re-apply */
+export interface LogPreset {
+  key: number;
+  level?: '' | 'warning' | 'error';
+  search?: string;
+  problemsOnly?: boolean;
+  categories?: string[];
+}
+
 export interface LogViewerProps {
   /** /vms/{id}/logs or /clusters/{id}/logs */
   path: string;
@@ -85,17 +101,26 @@ export interface LogViewerProps {
   filename: string;
   /** don't load yet (e.g. no pod chosen) and show this instead */
   idleMessage?: string | null;
+  preset?: LogPreset | null;
+  /** source-specific options shown under "More filters" (units, boot, since, lines…) */
+  moreFilters?: React.ReactNode;
+  /** how many of those are set (badge on the button) */
+  moreFiltersActive?: number;
 }
 
-export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filename, idleMessage }) => {
+const CONTEXT = 3; // lines kept around each match, shown with the line's expander
+
+export const LogViewer: React.FC<LogViewerProps> = ({
+  path, sourceParams, filename, idleMessage, preset, moreFilters, moreFiltersActive = 0,
+}) => {
   const { readOnly } = useAuth();
   const [level, setLevel] = useState<'' | 'warning' | 'error'>('');
-  const [include, setInclude] = useState('');
+  const [search, setSearch] = useState('');
+  const [searchDraft, setSearchDraft] = useState('');
   const [exclude, setExclude] = useState('');
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [categories, setCategories] = useState<string[]>([]);
-  const [context, setContext] = useState(3);
-  const [showContext, setShowContext] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const [follow, setFollow] = useState(false);
   const [result, setResult] = useState<LogResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -107,10 +132,22 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
 
   useEffect(() => { loadRules().then(setRules).catch(() => undefined); }, []);
 
+  useEffect(() => {
+    if (!preset) return;
+    setLevel(preset.level ?? '');
+    setSearch(preset.search ?? '');
+    setSearchDraft(preset.search ?? '');
+    setProblemsOnly(preset.problemsOnly ?? false);
+    setCategories(preset.categories ?? []);
+    setExclude('');
+    setExpanded(new Set());
+  }, [preset]);
+
+  const include = useMemo(() => searchToRegex(search), [search]);
   const params: LogParams = useMemo(() => ({
     ...sourceParams, level: level || null, include: include || null, exclude: exclude || null,
-    problems_only: problemsOnly, category: categories.join(',') || null, context,
-  }), [sourceParams, level, include, exclude, problemsOnly, categories, context]);
+    problems_only: problemsOnly, category: categories.join(',') || null, context: CONTEXT,
+  }), [sourceParams, level, include, exclude, problemsOnly, categories]);
   const key = JSON.stringify(params);
 
   const load = useCallback(async (quiet = false) => {
@@ -136,9 +173,10 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
     const t = window.setInterval(() => load(true), 5000);
     return () => window.clearInterval(t);
   }, [follow, load]);
+  // newest lines at the end, like `tail`: land there on every new result (and while following)
   useEffect(() => {
-    if (follow && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
-  }, [result, follow]);
+    if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
+  }, [result]);
 
   const ruleById = useMemo(() => {
     const m: Record<string, { category: string; hint: string; level: LogLevel; rx: RegExp | null }> = {};
@@ -171,13 +209,13 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
     }
   };
 
-  const filtering = !!(level || include || exclude || problemsOnly || categories.length);
+  const filtering = !!(level || search || exclude || problemsOnly || categories.length);
   const renderLine = (e: LogEntry) => {
     const rxs: RegExp[] = [];
     e.rules.forEach((id) => { const r = ruleById[id]?.rx; if (r) rxs.push(r); });
     if (includeRx) rxs.push(includeRx);
     const hasCtx = !!(e.before?.length || e.after?.length);
-    const open = showContext || expanded.has(e.n);
+    const open = expanded.has(e.n);
     const ctxLine = (t: string, n: number) => (
       <div key={`c${n}`} className="vmm-log-line vmm-log-ctx"><span className="vmm-log-n">{n}</span><span className="vmm-log-text">{t}</span></div>
     );
@@ -186,7 +224,7 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
         {open && e.before?.map((t, i) => ctxLine(t, e.n - (e.before?.length || 0) + i))}
         <div className="vmm-log-line" style={{ borderLeftColor: LEVEL_COLOR[e.level] }}>
           <span className="vmm-log-n">
-            {hasCtx && filtering ? (
+            {hasCtx ? (
               <button type="button" className="vmm-log-ctx-btn" aria-label={open ? 'Hide context' : 'Show context'}
                 title={open ? 'Hide context' : 'Show context lines'} onClick={() => toggleEntry(e.n)}>
                 {open ? <AngleDownIcon /> : <AngleRightIcon />}
@@ -221,37 +259,58 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
   return (
     <div className="vmm-logs">
       <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: 8 }}>
+        <FlexItem style={{ minWidth: 260, flex: '1 1 260px', maxWidth: 420 }}>
+          <SearchInput id="log-search" placeholder="Search lines (text, or /regex/)" value={searchDraft}
+            onChange={(_e, v) => setSearchDraft(v)}
+            onSearch={(_e, v) => setSearch(v)}
+            onClear={() => { setSearchDraft(''); setSearch(''); }} />
+        </FlexItem>
         <FlexItem>
           <ToggleGroup aria-label="Level">
-            <ToggleGroupItem text="All" isSelected={level === ''} onChange={() => setLevel('')} />
-            <ToggleGroupItem text="Warnings+" isSelected={level === 'warning'} onChange={() => setLevel('warning')} />
-            <ToggleGroupItem text="Errors" isSelected={level === 'error'} onChange={() => setLevel('error')} />
+            <ToggleGroupItem text="All" buttonId="log-level-all" isSelected={level === ''} onChange={() => setLevel('')} />
+            <ToggleGroupItem text="Warnings+" buttonId="log-level-warning" isSelected={level === 'warning'} onChange={() => setLevel('warning')} />
+            <ToggleGroupItem text="Errors" buttonId="log-level-error" isSelected={level === 'error'} onChange={() => setLevel('error')} />
           </ToggleGroup>
         </FlexItem>
-        <FlexItem><CommitInput id="log-include" value={include} onCommit={setInclude} placeholder="Include regex" width={180} /></FlexItem>
-        <FlexItem><CommitInput id="log-exclude" value={exclude} onCommit={setExclude} placeholder="Exclude regex" width={160} /></FlexItem>
         <FlexItem>
-          <Switch id="log-problems" label="Known problems only" isChecked={problemsOnly} onChange={(_e, v) => setProblemsOnly(v)} />
-        </FlexItem>
-        <FlexItem>
-          <Tooltip content="Lines of context kept around each match">
-            <FormSelect id="log-context" aria-label="Context lines" value={String(context)} style={{ width: 110 }}
-              onChange={(_e, v) => setContext(Number(v))}>
-              {[0, 1, 3, 5, 10, 20].map((n) => <FormSelectOption key={n} value={String(n)} label={`${n} context`} />)}
-            </FormSelect>
+          <Tooltip content="Only lines matching a known problem (OOM, x509, DNS, image pulls, SR-IOV…)">
+            <Switch id="log-problems" label="Problems only" isChecked={problemsOnly} onChange={(_e, v) => setProblemsOnly(v)} />
           </Tooltip>
         </FlexItem>
         <FlexItem>
-          <Switch id="log-show-context" label="Show context" isChecked={showContext} onChange={(_e, v) => setShowContext(v)} />
+          <Button variant="link" id="log-more" icon={<FilterIcon />} onClick={() => setShowMore(!showMore)} aria-expanded={showMore}>
+            More filters{moreFiltersActive + (exclude ? 1 : 0) ? ` (${moreFiltersActive + (exclude ? 1 : 0)})` : ''}
+          </Button>
         </FlexItem>
+        {filtering && (
+          <FlexItem>
+            <Button variant="link" isInline id="log-clear" onClick={() => {
+              setLevel(''); setSearch(''); setSearchDraft(''); setExclude(''); setProblemsOnly(false); setCategories([]);
+            }}>Clear filters</Button>
+          </FlexItem>
+        )}
         <FlexItem align={{ default: 'alignRight' }}>
           <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
-            <Switch id="log-follow" label="Follow (5 s)" isChecked={follow} onChange={(_e, v) => setFollow(v)} />
-            <Button variant="secondary" icon={<SyncAltIcon />} onClick={() => load()} isDisabled={!!idleMessage}>Refresh</Button>
-            <Button variant="secondary" icon={<DownloadIcon />} onClick={download} isDisabled={!result || !!idleMessage}>Download</Button>
+            <Tooltip content="Reload every 5 s and stay at the bottom">
+              <Switch id="log-follow" label="Follow" isChecked={follow} onChange={(_e, v) => setFollow(v)} />
+            </Tooltip>
+            <Tooltip content="Reload">
+              <Button variant="plain" aria-label="Reload" icon={<SyncAltIcon />} onClick={() => load()} isDisabled={!!idleMessage} />
+            </Tooltip>
+            <Tooltip content="Download the lines shown (as text)">
+              <Button variant="plain" aria-label="Download" icon={<DownloadIcon />} onClick={download} isDisabled={!result || !!idleMessage} />
+            </Tooltip>
           </Flex>
         </FlexItem>
       </Flex>
+      {showMore && (
+        <div className="vmm-log-more" id="log-more-panel">
+          <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
+            {moreFilters}
+            <FlexItem><CommitInput id="log-exclude" value={exclude} onCommit={setExclude} placeholder="Hide lines matching (regex)" width={220} /></FlexItem>
+          </Flex>
+        </div>
+      )}
 
       {idleMessage ? <Alert variant="info" isInline isPlain title={idleMessage} /> : null}
       {error && <Alert variant="danger" isInline title={error} style={{ marginBottom: 8 }} />}
@@ -293,9 +352,13 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
           ))}
           {(result.notes || []).map((n) => <Alert key={n} variant="warning" isInline isPlain title={n} style={{ marginBottom: 4 }} />)}
           <div className="vmm-log-meta" style={{ marginBottom: 4 }}>
-            {loading ? <Spinner size="sm" /> : null} {result.total_lines} lines read, {result.matched} shown
-            {result.truncated ? ` (the ${result.returned} most recent)` : ''}
-            {' · '}<code>{result.command}</code>
+            {loading ? <Spinner size="sm" /> : null} {result.matched} of {result.total_lines} lines
+            {result.truncated ? ` (the ${result.returned} most recent shown)` : ''}
+            {filtering && result.entries.some((x) => x.before?.length || x.after?.length) ? ' · ▸ on a line shows the lines around it' : ''}
+            {' · '}
+            <Popover bodyContent={<code>{result.command}</code>} headerContent="Command run">
+              <Button variant="link" isInline style={{ fontSize: 'inherit' }}>command</Button>
+            </Popover>
           </div>
         </>
       )}
@@ -303,7 +366,15 @@ export const LogViewer: React.FC<LogViewerProps> = ({ path, sourceParams, filena
       {result && !idleMessage && (
         <div className="vmm-log-box" ref={boxRef} id="log-box">
           {result.entries.length ? result.entries.map(renderLine)
-            : <div className="vmm-log-meta" style={{ padding: 8 }}>No line matches these filters.</div>}
+            : (
+              <div className="vmm-log-meta" style={{ padding: 8 }}>
+                {problemsOnly && !search && !level && !categories.length
+                  ? '✓ No known problem in these lines.' : 'No line matches these filters.'}
+                {filtering && <> <Button variant="link" isInline onClick={() => {
+                  setLevel(''); setSearch(''); setSearchDraft(''); setExclude(''); setProblemsOnly(false); setCategories([]);
+                }}>Show all lines</Button></>}
+              </div>
+            )}
         </div>
       )}
     </div>

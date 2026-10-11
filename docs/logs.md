@@ -32,6 +32,15 @@ lab router (vm-manager unlocks it there). Logs then answer with a plain-words er
 (`/etc/sysconfig/qemu-ga` with empty `BLACKLIST_RPC` / `FILTER_RPC_ARGS` + `(typepermissive virt_qemu_ga_t)`), and
 diagnostics fall back on what the agent answers by itself (OS, kernel, interfaces, file systems).
 
+**OpenShift nodes** (RHCOS: its qemu-ga forbids `guest-exec` too): logs fall back on `oc adm node-logs <node>`
+through the API server (no SSH key, no route to the node, no debug image: works on disconnected clusters). Journal
+with units / boot / since / grep, Kernel = the journal's kernel transport, File = paths under `/var/log/` (`--path`);
+no cloud-init (RHCOS uses Ignition). Diagnostics add the node's API view: OS image, kernel, kubelet / CRI-O versions,
+capacity, conditions (not-Ready ones are findings).
+
+Levels: an explicit level in the line wins (klog `E1011 12:00:00`, `level=warning`, JSON `"level":"info"`), then the
+journal priority, then keywords: kubelet / CRI-O log everything at priority 6 through stdout.
+
 ## Pod logs
 
 `GET /clusters/{id}/pods?match=sriov` finds pods whose `namespace/name` contains the text (or `namespace`, `selector`,

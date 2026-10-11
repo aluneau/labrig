@@ -55,7 +55,22 @@ export const VmDiagnostics: React.FC<{ vmId: number }> = ({ vmId }) => {
       {!d && loading && <StackItem><Spinner size="lg" /></StackItem>}
       {d && (
         <>
-          {d.exec_error && <StackItem><Alert variant="warning" isInline title="Partial inventory">{d.exec_error}</Alert></StackItem>}
+          {d.exec_error && !d.node && <StackItem><Alert variant="warning" isInline title="Partial inventory">{d.exec_error}</Alert></StackItem>}
+          {d.node && (
+            <StackItem>
+              <Card isCompact id="diag-node">
+                <CardTitle>OpenShift node {d.node.name} ({d.node.roles.join(', ')})</CardTitle>
+                <CardBody>
+                  <KV items={[
+                    ['OS image', d.node.os_image], ['Kernel', d.node.kernel], ['Kubelet', d.node.kubelet],
+                    ['Container runtime', d.node.container_runtime], ['Architecture', d.node.architecture],
+                    ['Capacity', Object.entries(d.node.capacity).filter(([k]) => !k.startsWith('hugepages')).map(([k, v]) => `${k} ${v}`).join(' · ')],
+                    ['Conditions', d.node.conditions.map((c) => `${c.type}=${c.status}`).join(' · ')],
+                  ]} />
+                </CardBody>
+              </Card>
+            </StackItem>
+          )}
           {d.findings.length > 0 && (
             <StackItem id="diag-findings">
               {d.findings.map((f, i) => (

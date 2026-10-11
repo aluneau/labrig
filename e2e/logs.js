@@ -203,22 +203,52 @@ async function clusterChecks(page) {
 
 async function ui(page, vm) {
   await page.goto(`${BASE}/vms/${vm.id}/logs`);
-  await page.locator('#log-box').waitFor({ timeout: 60000 });
-  await page.locator('#log-problems').check({ force: true });
-  await page.locator('#log-summary [data-category="memory"]').waitFor({ timeout: 60000 });
+  // known problems first: one card per category, found without touching any filter
+  await page.locator('#log-findings .vmm-finding[data-category="memory"]').waitFor({ timeout: 90000 });
+  check(await page.locator('#log-findings .vmm-finding').count() > 1, 'UI: findings cards');
+  await page.screenshot({ path: 'logs-vm-findings.png', fullPage: true });
+  await page.locator('#log-findings .vmm-finding[data-category="memory"]').getByRole('button', { name: 'Show lines' }).click();
   await page.waitForFunction(() => {
     const entries = [...document.querySelectorAll('#log-box .vmm-log-entry')];
-    return entries.length > 0 && entries.every((e) => e.querySelector('.vmm-log-rule'));
-  }, null, { timeout: 30000 });
+    return entries.length > 0 && entries.every((e) => e.querySelector('[data-rule="oom-killer"]'));
+  }, null, { timeout: 60000 });
+  check(true, 'UI: "Show lines" of a finding filters the lines');
+  check(await page.locator('#log-box mark').count() > 0, 'UI: matches highlighted');
   await page.screenshot({ path: 'logs-vm-problems.png', fullPage: true });
+  // summary chips still filter
+  await page.locator('#log-clear').click();
+  await page.locator('#log-problems').check({ force: true });
   await page.locator('#log-summary [data-category="memory"]').click();
   await page.waitForFunction(() => {
     const entries = [...document.querySelectorAll('#log-box .vmm-log-entry')];
     return entries.length > 0 && entries.every((e) => e.querySelector('[data-rule="oom-killer"]'));
   }, null, { timeout: 30000 });
   check(true, 'UI: clicking a category filters the lines');
-  check(await page.locator('#log-box mark').count() > 0, 'UI: matches highlighted');
-  await page.locator('#log-show-context').check({ force: true });
+  const ctx = page.locator('#log-box .vmm-log-ctx-btn').first();
+  if (await ctx.count()) {
+    await ctx.click();
+    check(await page.locator('#log-box .vmm-log-ctx').count() > 0, 'UI: context lines of one line');
+  }
+  // plain-text search + quick scenario
+  await page.locator('#log-clear').click();
+  await page.getByRole('tab', { name: 'Journal' }).click(); // "Show lines" of the OOM finding switched to Kernel
+  await page.locator('#log-search input').fill('e2e-logs-fail.service');
+  await page.locator('#log-search input').press('Enter');
+  await page.waitForFunction(() => {
+    const entries = [...document.querySelectorAll('#log-box .vmm-log-entry')];
+    return entries.length > 0 && entries.every((e) => e.textContent.includes('e2e-logs-fail.service'));
+  }, null, { timeout: 30000 }).catch(async (e) => {
+    log('search state', await page.locator('#log-search input').inputValue(),
+      (await page.locator('#log-box').innerText()).slice(0, 600));
+    throw e;
+  });
+  check(true, 'UI: plain-text search (dots literal)');
+  await page.locator('#log-scenario-errors').click();
+  await page.waitForFunction(() => document.querySelector('#log-level-error')?.getAttribute('aria-pressed') === 'true'
+    || document.querySelector('#log-level-error')?.classList.contains('pf-m-selected'), null, { timeout: 10000 });
+  check(true, 'UI: quick scenario sets the filters');
+  await page.locator('#log-more').click();
+  check(await page.locator('#log-more-panel #log-unit').count() === 1, 'UI: More filters panel');
   await page.screenshot({ path: 'logs-vm-memory.png', fullPage: true });
   await page.goto(`${BASE}/vms/${vm.id}/logs?tab=diagnostics`);
   await page.locator('#diag-nics').waitFor({ timeout: 120000 });

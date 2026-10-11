@@ -149,4 +149,8 @@ export interface Diagnostics {
     iommu_groups: number; vfio_devices: string[] };
   failed_units?: string[];
   recent_errors?: string[];
+  /** OpenShift node (RHCOS, no guest-exec): from the API */
+  node?: { name: string; roles: string[]; os_image?: string; kernel?: string; kubelet?: string;
+    container_runtime?: string; architecture?: string; capacity: Record<string, string>;
+    allocatable: Record<string, string>; conditions: { type: string; status: string; reason?: string }[] };
 }
