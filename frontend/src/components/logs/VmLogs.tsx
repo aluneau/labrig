@@ -47,6 +47,9 @@ interface Finding {
   exampleSource?: Source;
 }
 
+/** Lines the known-problems scan reads per source: "Show lines" reads at least as many, or it may find nothing */
+const SCAN_LINES = 5000;
+
 /** Scan journal + kernel + cloud-init of this boot for known problems: one card per category */
 const Findings: React.FC<{
   vmId: number; onShow: (source: Source, category: string) => void; reloadKey: number;
@@ -59,7 +62,7 @@ const Findings: React.FC<{
     setResults(null);
     logsApi.rules().then((r) => live && setRules(r)).catch(() => undefined);
     Promise.all(SCANNED.map((source) => logsApi.get(`/vms/${vmId}/logs`, {
-      source, lines: 5000, boot: source === 'journal' ? '0' : null, problems_only: true, context: 0, max_entries: 500,
+      source, lines: SCAN_LINES, boot: source === 'journal' ? '0' : null, problems_only: true, context: 0, max_entries: 500,
     }).then((r) => [source, r] as const).catch((e) => [source, errorText(e)] as const)))
       .then((all) => { if (live) setResults(Object.fromEntries(all)); });
     return () => { live = false; };
@@ -132,7 +135,7 @@ export const VmLogs: React.FC<{ vmId: number; vmName: string }> = ({ vmId, vmNam
   const [since, setSince] = useState('');
   const [grep, setGrep] = useState('');
   const [path, setPath] = useState('/var/log/messages');
-  const [lines, setLines] = useState('1000');
+  const [lines, setLines] = useState(String(SCAN_LINES));
   const [preset, setPreset] = useState<LogPreset | null>(null);
   const [scenario, setScenario] = useState<string | null>(null);
   const [findingsOpen, setFindingsOpen] = useState(true);
@@ -159,6 +162,7 @@ export const VmLogs: React.FC<{ vmId: number; vmName: string }> = ({ vmId, vmNam
   }, []);
   const showFinding = useCallback((s: Source, category: string) => {
     reset(s);
+    setLines((l) => (Number(l) < SCAN_LINES ? String(SCAN_LINES) : l));
     setScenario(null);
     setPreset({ key: Date.now(), problemsOnly: true, categories: [category] });
     document.getElementById('log-lines-anchor')?.scrollIntoView({ behavior: 'smooth' });
@@ -175,7 +179,7 @@ export const VmLogs: React.FC<{ vmId: number; vmName: string }> = ({ vmId, vmNam
     return <Alert variant="info" isInline title="Logs are for admins only: they can hold secrets (passwords, tokens in command lines)." />;
   }
 
-  const active = [unit, since, grep].filter(Boolean).length + (boot !== '0' ? 1 : 0) + (lines !== '1000' ? 1 : 0);
+  const active = [unit, since, grep].filter(Boolean).length + (boot !== '0' ? 1 : 0) + (lines !== String(SCAN_LINES) ? 1 : 0);
   const moreFilters = (
     <>
       {source === 'journal' && (

@@ -1024,7 +1024,7 @@ async def find_pods(ctx: Ctx, cluster: Ref, match: Optional[str] = None, namespa
 @tool(admin=True)
 async def pod_logs(ctx: Ctx, cluster: Ref, match: Optional[str] = None, namespace: Optional[str] = None,
                    pod: Optional[str] = None, selector: Optional[str] = None, container: Optional[str] = None,
-                   previous: bool = False, tail: int = 500, since: Optional[str] = None,
+                   previous: bool = False, tail: int = 5000, since: Optional[str] = None,
                    level: Optional[Literal["error", "warning"]] = None, include: Optional[str] = None,
                    exclude: Optional[str] = None, problems_only: bool = False, category: Optional[str] = None,
                    context: int = 1, max_entries: int = 200) -> Any:

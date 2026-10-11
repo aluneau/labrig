@@ -23,7 +23,7 @@ from app.services.log_rules import CATEGORIES, RULES
 
 MAX_LINES = 20000           # lines fetched from a source
 DEFAULT_LINES = 1000
-MAX_ENTRIES = 5000          # lines returned after filtering
+MAX_ENTRIES = 20000         # lines returned after filtering
 MAX_LINE_CHARS = 4000
 MAX_CONTEXT = 20
 MAX_PODS = 30
@@ -542,12 +542,12 @@ def list_pods(cluster: Cluster, match: Optional[str] = None, namespace: Optional
 
 def pod_logs(cluster: Cluster, namespace: Optional[str] = None, pod: Optional[str] = None,
              selector: Optional[str] = None, match: Optional[str] = None, container: Optional[str] = None,
-             previous: bool = False, tail: int = 500, since: Optional[str] = None,
+             previous: bool = False, tail: int = 5000, since: Optional[str] = None,
              events: bool = True) -> Dict[str, Any]:
     """Logs of one pod, or of every pod matching a selector / name substring (up to MAX_PODS), one block per
     container prefixed with [namespace/pod/container]; plus status lines (waiting reasons, OOMKilled) and the pods'
     events, since ImagePullBackOff / FailedScheduling never appear in a container log."""
-    tail = max(1, min(int(tail or 500), MAX_LINES))
+    tail = max(1, min(int(tail or 5000), MAX_LINES))
     if since and not (DURATION_RE.match(since) and since):
         raise LogError("since: a duration like 30s, 15m, 2h or 1h30m")
     if container and not K8S_NAME_RE.match(container):
@@ -755,17 +755,21 @@ def _agent_info(name: str) -> Dict[str, Any]:
     return info
 
 
-def _openshift_node_info(cluster: Cluster, name: str) -> Optional[Dict[str, Any]]:
-    """nodeInfo / capacity / conditions of an OpenShift node from the API (RHCOS: no guest-exec)"""
+def _openshift_node_info(cluster: Cluster, name: str) -> Dict[str, Any]:
+    """nodeInfo / capacity / conditions of an OpenShift node from the API (RHCOS: no guest-exec).
+    Raises LogError (plain words) when the API can't be read or doesn't know the node."""
+    out = _kubectl(cluster, ["get", "nodes", "-o", "json"], timeout=60)
+    if out["exitcode"] != 0:
+        err = (out["stderr"] or out["stdout"]).strip().splitlines()
+        raise LogError(err[-1] if err else "oc get nodes failed")
     try:
-        out = _kubectl(cluster, ["get", "nodes", "-o", "json"], timeout=60)
         items = json.loads(out["stdout"]).get("items", [])
-    except (LogError, ValueError):
-        return None
+    except ValueError:
+        raise LogError("oc get nodes: unreadable answer")
     item = next((i for i in items if i["metadata"]["name"] in (name,) or i["metadata"]["name"].startswith(name + ".")),
                 None)
     if item is None:
-        return None
+        raise LogError(f"no node named {name} in the cluster")
     st = item.get("status", {})
     info = st.get("nodeInfo", {})
     findings = []
@@ -807,12 +811,21 @@ def diagnostics(name: str) -> Dict[str, Any]:
                                  f"{(f.get('used-bytes') or 0) // 2**20} MiB used of {(f.get('total-bytes') or 0) // 2**20} MiB"
                                  for f in agent.get("fsinfo") or []]
         cluster = _openshift_cluster(name) if "forbids running commands" in str(e) else None
-        node = _openshift_node_info(cluster, name) if cluster else None
-        if node:
-            result["node"] = node
-            findings.extend(node.pop("findings"))
-            findings.append({"level": "info", "text": "OpenShift node (RHCOS): its guest agent doesn't run commands; "
-                                                      "node details come from the API, logs from oc adm node-logs."})
+        if cluster:
+            # RHCOS: the qemu-ga hints of the generic message don't apply (nodes are managed by the cluster)
+            try:
+                node = _openshift_node_info(cluster, name)
+            except LogError as ne:
+                result["exec_error"] = (f"{name} is an OpenShift node of {cluster.name}: its guest agent doesn't run "
+                                        f"commands, and the node couldn't be read from the API ({ne}). Is the "
+                                        f"cluster up? Try Run again.")
+            else:
+                result.pop("exec_error")
+                result["node"] = node
+                findings.extend(node.pop("findings"))
+                findings.append({"level": "info", "text": "OpenShift node (RHCOS): its guest agent doesn't run "
+                                                          "commands; node details come from the API, logs from "
+                                                          "oc adm node-logs."})
         else:
             findings.append({"level": "warning", "text": "Only the guest agent's own information is available: "
                                                          "guest-exec is forbidden or failed (see exec_error)."})

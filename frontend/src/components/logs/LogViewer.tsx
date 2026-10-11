@@ -146,7 +146,7 @@ export const LogViewer: React.FC<LogViewerProps> = ({
   const include = useMemo(() => searchToRegex(search), [search]);
   const params: LogParams = useMemo(() => ({
     ...sourceParams, level: level || null, include: include || null, exclude: exclude || null,
-    problems_only: problemsOnly, category: categories.join(',') || null, context: CONTEXT,
+    problems_only: problemsOnly, category: categories.join(',') || null, context: CONTEXT, max_entries: 20000,
   }), [sourceParams, level, include, exclude, problemsOnly, categories]);
   const key = JSON.stringify(params);
 
@@ -197,7 +197,7 @@ export const LogViewer: React.FC<LogViewerProps> = ({
 
   const download = async () => {
     try {
-      const text = await logsApi.text(path, { ...params, context: 0, max_entries: 5000 });
+      const text = await logsApi.text(path, { ...params, context: 0, max_entries: 20000 });
       const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
       const a = document.createElement('a');
       a.href = url;

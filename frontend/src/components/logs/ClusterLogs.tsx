@@ -24,7 +24,7 @@ export const ClusterLogs: React.FC<{ clusterId: number; clusterName: string }> =
   const [target, setTarget] = useState<Target>(null);
   const [container, setContainer] = useState('');
   const [previous, setPrevious] = useState(false);
-  const [tail, setTail] = useState('500');
+  const [tail, setTail] = useState('5000');
   const [since, setSince] = useState('');
 
   const find = useCallback(async () => {
@@ -49,7 +49,8 @@ export const ClusterLogs: React.FC<{ clusterId: number; clusterName: string }> =
     return p;
   }, [target, tail, since, previous, container]);
 
-  const choose = (t: Target) => { setTarget(t); setContainer(''); };
+  // one pod: 5000 lines; every matching pod (up to 30): 1000 lines per container
+  const choose = (t: Target) => { setTarget(t); setContainer(''); setTail(t?.kind === 'match' ? '1000' : '5000'); };
 
   return (
     <>
@@ -115,20 +116,16 @@ export const ClusterLogs: React.FC<{ clusterId: number; clusterName: string }> =
             </FormSelect>
           </FlexItem>
         )}
+        <FlexItem>
+          <FormSelect id="log-tail" aria-label="Lines per container" value={tail} onChange={(_e, v) => setTail(v)} style={{ width: 190 }}>
+            {['500', '1000', '5000', '20000'].map((n) => <FormSelectOption key={n} value={n} label={`Last ${Number(n).toLocaleString()} lines${target?.kind === 'match' ? ' / container' : ''}`} />)}
+          </FormSelect>
+        </FlexItem>
         <FlexItem><Checkbox id="log-previous" label="Previous (crashed) instance" isChecked={previous} onChange={(_e, v) => setPrevious(v)} /></FlexItem>
       </Flex>
       <LogViewer path={`/clusters/${clusterId}/logs`} sourceParams={params}
-        moreFiltersActive={(tail !== '500' ? 1 : 0) + (since ? 1 : 0)}
-        moreFilters={(
-          <>
-            <FlexItem>
-              <FormSelect id="log-tail" aria-label="Lines per container" value={tail} onChange={(_e, v) => setTail(v)} style={{ width: 170 }}>
-                {['100', '500', '2000', '10000'].map((n) => <FormSelectOption key={n} value={n} label={`${n} lines / container`} />)}
-              </FormSelect>
-            </FlexItem>
-            <FlexItem><CommitInput id="log-pod-since" value={since} onCommit={setSince} placeholder="Since (15m, 2h)" width={130} /></FlexItem>
-          </>
-        )}
+        moreFiltersActive={since ? 1 : 0}
+        moreFilters={<FlexItem><CommitInput id="log-pod-since" value={since} onCommit={setSince} placeholder="Since (15m, 2h)" width={130} /></FlexItem>}
         filename={`${clusterName}-${target?.kind === 'pod' ? target.pod : target?.kind === 'match' ? (target.match || target.namespace) : 'pods'}`}
         idleMessage={target ? null : 'Pick a pod (Logs) or find pods by name and take the logs of all of them. Status lines and events are included: ImagePullBackOff or FailedScheduling never show in a container log.'} />
     </>
