@@ -46,7 +46,7 @@ configuration below with the right URL and a token filled in.
 | Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host) |
 | Lab groups | `list_groups`, `get_group` (+ leases), `create_group`, `add_group_member`, `wireguard_device` |
 | Logs / diagnostics | `vm_logs` (admin), `vm_diagnostics`, `find_pods`, `pod_logs` (admin): server-side filters + known-problem rules, see [logs.md](logs.md) |
-| Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `get_kubeconfig`, `kubectl` (admin), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
+| Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `get_kubeconfig`, `kubectl` (admin), `oc` (admin, OpenShift), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
 | Other | `list_cloud_images`, `list_networks`, `list_templates`, `create_from_template` (or `dry_run`), `list_tasks`, `wait_for_task` |
 
 - Resources are named by **name or id**. Long operations return a task: `wait_for_task` / `wait_for_cluster` wait up to
@@ -64,7 +64,46 @@ configuration below with the right URL and a token filled in.
   same for a VM's journal (`source`: dmesg, cloud-init, file). `vm_diagnostics` = OS, firmware versions, NIC drivers,
   SR-IOV, failed units, `findings`.
 - `kubectl` runs on the first running control plane (guest agent) for kubeadm / k3s, with the app's `oc` on the host
-  for OpenShift; `stdin` + `apply -f -` applies manifests (e.g. operators on kubeadm).
+  for OpenShift; `stdin` + `apply -f -` applies manifests (e.g. operators on kubeadm). For OpenShift, prefer `oc`
+  (below).
+
+## OpenShift with `oc`
+
+The `oc` tool (admin) runs the app's cached `oc` for the cluster's version from the vm-manager host, as cluster admin
+(the installer's kubeconfig, pointed at the router's uplink address): what you would type at a customer, without
+login, kubeconfig or VPN. `args` is the command line after `oc` (shell quoting), `stdin` feeds `apply -f -` or
+`exec -i`. kubeadm / k3s clusters answer "use the kubectl tool".
+
+| Workflow | `args` |
+|---|---|
+| Health | `get clusterversion`, `get co`, `get nodes -o wide`, `get csv -A`, `get mcp`, `adm upgrade`, `adm top nodes`, `adm top pods -A --sort-by=memory`, `get events -A --sort-by=.lastTimestamp` |
+| One problem | `describe co/ingress`, `describe pod <pod> -n <ns>`, `logs <pod> -n <ns> --tail=200`, `logs … -c <container> --previous`, `adm node-logs <node> -u kubelet --tail=200` |
+| Inside a pod / node | `exec <pod> -n <ns> -- cat /etc/resolv.conf`, `rsh -n <ns> <pod> curl -s localhost:8080/healthz`, `debug node/<node> -- chroot /host journalctl -u crio --since -15min --no-pager` |
+| Change | `apply -f -` + YAML in `stdin`, `patch <kind> <name> --type merge -p '{"spec":{…}}'`, `label`, `annotate`, `scale` |
+| Console | `whoami --show-console` (reachable through the group's WireGuard) |
+| Support data | `adm inspect co/kube-apiserver`, `adm inspect ns/<ns>`, `adm must-gather` (`-- /usr/bin/gather_audit_logs`, `--image=<operator must-gather image>`) |
+
+- **Non-interactive**: `login` / `logout` (not needed), `edit` (use `get -o yaml` + `apply -f -`, or `patch`), `-t` /
+  `-it`, `rsh <pod>` or `debug` without a command, `attach`, `port-forward`, `proxy`, `logs -f`, `--watch` are
+  refused with the non-interactive form to use instead (`wait --for=…` replaces watching).
+- **Output**: stdout over 100 000 characters (stderr 20 000) is cut in the middle with a note saying how to narrow
+  it (`-n`, `-l`, `-o jsonpath=…`, `--tail`). `timeout` (default 120 s) stops oc.
+- **`adm must-gather` / `adm inspect`** write a directory: the tool runs them in the install dir
+  (`DATA_DIR/openshift/clusters/<name>/oc-output/<kind>-<time>/`, `--dest-dir` is set by the tool) as a **task** (oc
+  times out after 60 min; must-gather's own gather timeout is 10 min) and waits `timeout` seconds for it. Done in
+  time: the answer is the oc output, a directory outline (`<image 1>/namespaces/<ns>/ …` with sizes) and the
+  `archive` (`.tar.gz` path on the host, `download` link `GET /api/v1/clusters/{id}/oc-output/<name>`, `DELETE` the
+  same path to remove it; the directory itself is removed). Otherwise: a `task_id` for `wait_for_task`, whose result
+  is the same. Cancelling the task stops oc and deletes what must-gather created (pod, temporary namespace, cluster
+  role binding). `GET /api/v1/clusters/{id}/oc-output` lists the files (also what `oc cp` / `oc rsync` wrote: oc runs
+  in that directory). Admin only, like the kubeconfig.
+- **Disconnected clusters**: must-gather and `debug node` start a pod whose image must come from the mirror registry.
+  The release's `must-gather` and `tools` images are mirrored with the release, so the defaults work. Before running,
+  the tool resolves the image (`--image`, else the `openshift/must-gather` / `openshift/tools` image stream) and checks
+  the group's registry: a tag reference (mirrors only apply to digests), a repository with no mirror (e.g. an
+  operator's must-gather image that wasn't mirrored) or a digest missing from the registry is refused in plain words,
+  with how to copy the image in (group Registry tab / `POST /groups/{id}/registry/images`) instead of a pod stuck in
+  `ImagePullBackOff`.
 
 ## Troubleshooting
 

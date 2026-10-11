@@ -2,6 +2,10 @@
 // (create from a cloud image, guest-agent exec / write / read, disk hot-add + remove, delete).
 // Creates and deletes one VM named e2e-mcp (VM_NAME to override; IMAGE, default debian-13). ~1 GiB RAM, 2-3 min.
 // Optional: E2E_VIEWER_TOKEN = a viewer's API token, checks that admin tools are hidden from viewers.
+// CLUSTER=<OpenShift cluster> (e.g. e2e-dc-sno) adds the `oc` tool checks: get / describe / logs / exec / rsh, debug
+// node, refusals, output cap, adm inspect + must-gather (tarball, download, delete), the task path + cancel, and on a
+// disconnected cluster the unmirrored-image refusal. Read-only on the cluster except a namespace e2e-oc (created and
+// deleted; must-gather and debug run there). SKIP_VM=1 skips the VM round trip.
 require('./auth'); // patches fetch(): Bearer VMM_TOKEN / E2E_USER session + X-VMM-Request when auth is on
 
 const BASE = process.env.BASE_URL || 'http://localhost:8000';
@@ -86,7 +90,7 @@ async function protocol() {
   const names = tools.map((t) => t.name);
   const expected = ['overview', 'api_describe', 'api_request', 'list_vms', 'get_vm', 'create_vm', 'vm_power', 'delete_vm',
     'add_disk', 'remove_disk', 'add_nic', 'remove_nic', 'vm_exec', 'vm_read_file', 'vm_write_file', 'list_groups',
-    'create_group', 'list_clusters', 'kubectl', 'list_cloud_images', 'list_tasks', 'wait_for_task'];
+    'create_group', 'list_clusters', 'kubectl', 'oc', 'list_cloud_images', 'list_tasks', 'wait_for_task'];
   check(expected.every((n) => names.includes(n)), `tools/list (${names.length} tools) has ${expected.length} expected ones`);
   check(tools.every((t) => t.description && t.inputSchema && t.inputSchema.type === 'object'), 'every tool: description + object inputSchema');
 
@@ -157,10 +161,113 @@ async function roundTrip() {
   }
 }
 
+const E2E_NS = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e-oc
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+    security.openshift.io/scc.podSecurityLabelSync: "false"
+`;
+
+async function ocChecks(cluster) {
+  const oc = (args, extra = {}) => ok('oc', { cluster, args, ...extra });
+  const info = await ok('get_cluster', { cluster });
+  check(info.type === 'openshift', `${cluster} is an OpenShift cluster`);
+  const disconnected = !!((info.spec || {}).openshift || {}).disconnected;
+
+  let r = await oc('get clusterversion');
+  check(r.exitcode === 0 && /Cluster version is/.test(r.stdout), `oc get clusterversion: ${r.stdout.split('\n')[1]}`);
+  r = await oc('oc get co'); // a leading "oc" is accepted
+  check(r.exitcode === 0 && /^NAME\s+VERSION\s+AVAILABLE/.test(r.stdout), 'oc get co');
+  r = await oc('get csv -A');
+  check(r.exitcode === 0, 'oc get csv -A');
+  r = await oc('adm top nodes');
+  check(r.exitcode === 0 && /CPU\(cores\)/.test(r.stdout), 'oc adm top nodes');
+  r = await oc('whoami --show-console');
+  check(/^https:\/\/console-openshift-console\.apps\./.test(r.stdout), `oc whoami --show-console: ${r.stdout.trim()}`);
+  r = await oc('describe co/dns');
+  check(r.exitcode === 0 && /Name:\s+dns/.test(r.stdout), 'oc describe co/dns');
+  r = await oc('logs -n openshift-dns ds/dns-default -c dns --tail=5');
+  check(r.exitcode === 0, 'oc logs --tail');
+  r = await oc('exec -n openshift-dns ds/dns-default -c dns -- sh -c "echo in:$(cat)"', { stdin: 'piped' });
+  check(r.exitcode === 0 && /in:$/m.test(r.stdout), 'oc exec -- sh -c (stdin not attached without -i)');
+  r = await oc('exec -i -n openshift-dns ds/dns-default -c dns -- cat', { stdin: 'piped-in' });
+  check(r.exitcode === 0 && r.stdout === 'piped-in', 'oc exec -i with stdin');
+  r = await oc('rsh -n openshift-dns -c dns ds/dns-default cat /etc/resolv.conf');
+  check(r.exitcode === 0 && /nameserver/.test(r.stdout), 'oc rsh <pod> <command>');
+  r = await oc('get pods -A -o yaml');
+  check(/characters cut out of/.test(r.stdout) && r.stdout.length < 110000, `big output capped (${r.stdout.length} chars)`);
+
+  for (const [args, re] of [['login -u kubeadmin', /No login needed/], ['edit co/dns', /opens an editor/],
+    ['rsh -n openshift-dns ds/dns-default', /opens a shell/], ['exec -it -n x p -- sh', /terminal/],
+    ['logs -f -n x p', /never ends/], ['get pods -w', /never ends/], ['debug node/x', /without a command/],
+    ['adm must-gather --dest-dir=/tmp/x', /Leave out --dest-dir/], ['port-forward svc/x 8080', /session open/]]) {
+    const c = await call('oc', { cluster, args });
+    check(c.isError && re.test(c.text), `refused: oc ${args}`);
+  }
+  const others = (await ok('list_clusters')).filter((c) => c.type !== 'openshift');
+  if (others.length) {
+    const c = await call('oc', { cluster: others[0].name, args: 'get nodes' });
+    check(c.isError && /use the kubectl tool/.test(c.text), `oc on ${others[0].type} cluster -> use kubectl`);
+  }
+
+  const nodes = (await oc('get nodes -o name')).stdout.trim().split('\n');
+  r = await oc('apply -f -', { stdin: E2E_NS });
+  check(r.exitcode === 0, 'namespace e2e-oc created (apply -f - with stdin)');
+  const outputs = [];
+  try {
+    r = await oc(`debug ${nodes[0]} --to-namespace=e2e-oc -- chroot /host systemctl is-active kubelet`, { timeout: 300 });
+    check(r.exitcode === 0 && r.stdout.trim() === 'active', `oc debug ${nodes[0]} -- chroot /host ...: kubelet ${r.stdout.trim()}`);
+
+    r = await oc('adm inspect ns/e2e-oc', { timeout: 300 });
+    check(r.exitcode === 0 && r.archive && r.listing.some((l) => /namespaces\/e2e-oc/.test(l)), 'oc adm inspect: listing + tarball');
+    if (r.archive) {
+      outputs.push(r.archive.name);
+      const dl = await fetch(`${BASE}${r.archive.download}`);
+      const body = Buffer.from(await dl.arrayBuffer());
+      check(dl.status === 200 && body[0] === 0x1f && body[1] === 0x8b, `tarball download (${body.length} bytes, gzip)`);
+    }
+    r = await oc('adm must-gather --run-namespace=e2e-oc -- /bin/sh -c "echo hello > /must-gather/hello.txt"', { timeout: 600 });
+    if (r.task_id) r = (await ok('wait_for_task', { task_id: r.task_id, timeout: 900 })).result || {};
+    check(r.exitcode === 0 && r.archive && r.archive.size_kib >= 0 && /files at the top: .*timestamp/.test(r.listing.join('\n')),
+      'oc adm must-gather (custom gather command): tarball');
+    if (r.archive) outputs.push(r.archive.name);
+
+    r = await oc('adm must-gather --run-namespace=e2e-oc -- sleep 600', { timeout: 10 });
+    check(r.still_running && r.task_id, `long must-gather -> task ${r.task_id} for wait_for_task`);
+    if (r.task_id) {
+      await ok('api_request', { method: 'POST', path: `/tasks/${r.task_id}/cancel` });
+      const t = await ok('wait_for_task', { task_id: r.task_id, timeout: 120 });
+      check(t.status === 'cancelled', 'cancelled must-gather task');
+      const pods = await oc('get pods -n e2e-oc -o name');
+      check(!/must-gather/.test(pods.stdout) || /Terminating/.test((await oc('get pods -n e2e-oc')).stdout),
+        'cancel deleted the must-gather pod');
+    }
+    if (disconnected) {
+      const c = await call('oc', { cluster, args: 'adm must-gather --run-namespace=e2e-oc --image=registry.redhat.io/e2e/none:1' });
+      check(c.isError && /disconnected/.test(c.text), 'disconnected: must-gather with an unmirrored image refused in plain words');
+      const d = await call('oc', { cluster, args: `debug ${nodes[0]} --image=quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:${'0'.repeat(64)} -- true` });
+      check(d.isError && /not in its mirror registry/.test(d.text), 'disconnected: debug node with a digest not in the mirror refused');
+    }
+  } finally {
+    const since = new Date(t0 - 5000).toISOString();
+    const mine = async () => (await ok('api_request', { method: 'GET', path: `/clusters/${info.id}/oc-output` }))
+      .filter((x) => x.modified >= since);
+    for (const o of await mine()) await ok('api_request', { method: 'DELETE', path: `/clusters/${info.id}/oc-output/${o.name}` });
+    check((await mine()).length === 0, `oc output deleted (${outputs.join(', ')} + partial ones)`);
+    r = await oc('delete namespace e2e-oc --wait=false');
+    check(r.exitcode === 0, 'namespace e2e-oc deleted');
+  }
+}
+
 (async () => {
   try {
     await protocol();
-    await roundTrip();
+    if (process.env.CLUSTER) await ocChecks(process.env.CLUSTER);
+    if (!process.env.SKIP_VM) await roundTrip();
   } catch (e) {
     problems.push(String(e && e.stack ? e.stack : e));
     log('ERROR', e);

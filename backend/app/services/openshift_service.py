@@ -552,8 +552,11 @@ class OpenShiftService:
         return yaml.safe_dump(config, sort_keys=False)
 
     def oc(self, cluster_name: str, version: str, args: List[str], timeout: float = 60,
-           stdin: Optional[str] = None) -> Dict[str, Any]:
-        """Run oc against a cluster (kubeconfig = install dir host-kubeconfig)"""
+           stdin: Optional[str] = None, cwd: Optional[Path] = None,
+           cancelled: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+        """Run oc against a cluster (kubeconfig = install dir host-kubeconfig). cwd: where commands that write
+        files (adm must-gather / inspect, cp, rsync) put them; cancelled: polled, stops oc (SIGINT, so
+        must-gather / debug delete their temporary namespace / pod)"""
         oc_bin = self.bin_dir(version) / "oc"
         if not oc_bin.is_file():
             oc_bin = self._any_oc()
@@ -562,12 +565,35 @@ class OpenShiftService:
             raise ValueError("The cluster has no kubeconfig yet")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root),
                "KUBECONFIG": str(kubeconfig)}
-        try:
-            proc = subprocess.run([str(oc_bin)] + args, input=stdin, capture_output=True, text=True,
-                                  timeout=timeout, env=env)
-        except subprocess.TimeoutExpired:
-            return {"exitcode": 124, "stdout": "", "stderr": f"oc {' '.join(args[:3])}: timed out after {timeout:.0f} s"}
-        return {"exitcode": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
+        proc = subprocess.Popen([str(oc_bin)] + args,
+                                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                                cwd=str(cwd) if cwd else None)
+        deadline = time.monotonic() + timeout
+        stop = ""
+        pending_input = stdin
+        while True:
+            try:
+                # communicate() may be called again after a timeout without losing output
+                out, err = proc.communicate(pending_input, timeout=max(0.1, min(2.0, deadline - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                pending_input = None
+                if time.monotonic() >= deadline:
+                    stop = f"oc {' '.join(args[:3])}: timed out after {timeout:.0f} s"
+                elif cancelled is not None and cancelled():
+                    stop = "cancelled"
+                else:
+                    continue
+                proc.send_signal(2)  # SIGINT: oc cleans up like after Ctrl-C
+                try:
+                    out, err = proc.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    out, err = proc.communicate()
+                break
+        if stop:
+            return {"exitcode": 124, "stdout": out, "stderr": (err + "\n" if err else "") + stop}
+        return {"exitcode": proc.returncode, "stdout": out, "stderr": err}
 
     def _any_oc(self) -> Path:
         bins = sorted((self.root / "bin").glob("*/oc"), key=lambda p: _version_key(p.parent.name), reverse=True) \

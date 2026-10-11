@@ -624,9 +624,10 @@ def _kubectl(cluster_id: int, args: List[str], stdin: Optional[str], timeout: fl
 
 @tool(admin=True)
 async def kubectl(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None, timeout: int = 120) -> Any:
-    """Run kubectl (oc for OpenShift) against a cluster, as cluster admin. kubeadm / k3s: on the first running
-    control plane through the guest agent; OpenShift: the app's oc on the host. No local kubectl, kubeconfig
-    or VPN needed. Apply manifests with args 'apply -f -' and the YAML in stdin.
+    """Run kubectl against a cluster, as cluster admin. kubeadm / k3s: on the first running control plane
+    through the guest agent; OpenShift: the app's oc on the host (prefer the `oc` tool there: must-gather,
+    inspect, debug node, oc-specific checks). No local kubectl, kubeconfig or VPN needed. Apply manifests with
+    args 'apply -f -' and the YAML in stdin.
 
     Args:
         cluster: cluster name or id
@@ -637,6 +638,103 @@ async def kubectl(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None
     ctx.require_admin()
     c = await _find(ctx, "clusters", cluster)
     return await run_in_threadpool(_kubectl, c["id"], shlex.split(args), stdin, timeout)
+
+
+def _oc_now(cluster_id: int, argv: List[str], stdin: Optional[str], timeout: float) -> Dict[str, Any]:
+    from app.services.kube_exec import KubeExecError, run_oc
+    db, cluster = _cluster_orm(cluster_id)
+    try:
+        return run_oc(db, cluster, argv, stdin, timeout)
+    except KubeExecError as e:
+        raise ApiError(str(e))
+    finally:
+        db.close()
+
+
+def _oc_task(cluster_id: int, argv: List[str], kind: str) -> int:
+    """adm must-gather / inspect as a task (they can take 10+ min); checks first, so a refusal is immediate"""
+    from app.schemas import TaskCreate
+    from app.services.kube_exec import GATHER_TIMEOUT, KubeExecError, prepare_oc, run_oc
+    from app.services.task_service import task_service
+    db, cluster = _cluster_orm(cluster_id)
+    try:
+        prepared = prepare_oc(db, cluster, argv)
+
+        def body(session, task):
+            from app.models import Cluster
+            out = run_oc(session, session.get(Cluster, cluster_id), argv, None, GATHER_TIMEOUT,
+                         lambda: task_service.is_cancelled(task.id), prepared)
+            if task_service.is_cancelled(task.id):
+                raise RuntimeError("cancelled: " + "; ".join(out.get("cleanup") or []))
+            if out["exitcode"] != 0 and "archive" not in out:
+                raise RuntimeError(f"oc adm {kind} failed (exit {out['exitcode']}): "
+                                   f"{(out['stderr'] or out['stdout']).strip()[-1500:]}")
+            return out
+
+        task = task_service.start(db, TaskCreate(name=f"oc adm {kind} on {cluster.name}", type="oc",
+                                                 description="oc " + shlex.join(prepared["argv"]),
+                                                 target_type="cluster", target_id=cluster.id,
+                                                 target_name=cluster.name), body)
+        return task.id
+    except KubeExecError as e:
+        raise ApiError(str(e))
+    finally:
+        db.close()
+
+
+@tool(admin=True)
+async def oc(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None, timeout: int = 120) -> Any:
+    """Run `oc` against an OpenShift cluster as cluster admin, like at a customer: the app's oc for the
+    cluster's version, from the vm-manager host (no login, kubeconfig or VPN needed). Non-interactive: no
+    `login`, `edit`, `-it`, shell without a command, `-f` / `--watch` (the tool says what to run instead).
+    For kubeadm / k3s clusters use `kubectl`.
+
+    Examples (args):
+      health: 'get clusterversion', 'get co', 'get nodes -o wide', 'get csv -A', 'get mcp',
+        'adm top nodes', 'adm top pods -A --sort-by=memory', 'get events -A --sort-by=.lastTimestamp',
+        'whoami --show-console' (console URL), 'adm upgrade'
+      a problem: 'describe co/ingress', 'describe pod <pod> -n <ns>', 'logs <pod> -n <ns> --tail=200',
+        'logs <pod> -n <ns> -c <container> --previous', 'logs deploy/<name> -n <ns> --all-containers --since=10m',
+        'adm node-logs <node> -u kubelet --tail=200'
+      inside: 'exec <pod> -n <ns> -- cat /etc/resolv.conf', 'rsh -n <ns> <pod> curl -s localhost:8080/healthz',
+        'debug node/<node> -- chroot /host journalctl -u crio --since -15min --no-pager'
+        ('chroot /host crictl ps', 'chroot /host ip -br a'; the tools image: mirrored on disconnected clusters)
+      apply: 'apply -f -' with the YAML in stdin; 'patch <kind> <name> -n <ns> --type merge -p '{"spec":{...}}''
+      support data: 'adm inspect co/kube-apiserver' or 'adm inspect ns/<ns>' (a few seconds to minutes),
+        'adm must-gather' (5-15 min; '-- /usr/bin/gather_audit_logs' for audit logs, '--image=<operator
+        must-gather image>' for an operator's). These run as a task: the result (directory listing + tarball
+        path on the host + download link) comes back when done within `timeout`, else a task id for
+        wait_for_task. On a disconnected cluster the image must be in the mirror registry: checked first.
+    Big outputs are cut in the middle (narrow with -n, -l, -o jsonpath=..., --tail). Files written by
+    oc cp / rsync land in the install dir's oc-output (GET /clusters/{id}/oc-output lists them).
+
+    Args:
+        cluster: OpenShift cluster name or id
+        args: oc arguments (shell quoting), e.g. 'get co' or 'logs -n openshift-dns ds/dns-default --tail=50'
+        stdin: standard input (manifests for apply -f -, input for exec -i)
+        timeout: seconds; for adm must-gather / inspect: how long to wait for the task before returning its id
+    """
+    ctx.require_admin()
+    c = await _find(ctx, "clusters", cluster)
+    try:
+        argv = shlex.split(args)
+    except ValueError as e:
+        raise ApiError(f"args: {e} (shell quoting: wrap JSON in single quotes)")
+    from app.services.kube_exec import oc_gather_kind
+    kind = oc_gather_kind(argv[1:] if argv[:1] == ["oc"] else argv)
+    if not kind:
+        return await run_in_threadpool(_oc_now, c["id"], argv, stdin, timeout)
+    task_id = await run_in_threadpool(_oc_task, c["id"], argv, kind)
+    from app.services.task_service import task_service
+    await run_in_threadpool(task_service.wait, task_id, min(timeout, 1800))
+    task = await ctx.api("GET", f"/tasks/{task_id}")
+    if task.get("status") == "completed":
+        return task.get("result")
+    if task.get("status") in ("failed", "cancelled"):
+        raise ApiError(task.get("error_message") or f"oc adm {kind} {task.get('status')}")
+    return {"task_id": task_id, "still_running": True,
+            "hint": f"oc adm {kind} is still running: wait_for_task({task_id}) returns the listing and tarball "
+                    f"(must-gather takes 5-15 min)"}
 
 
 KUBEADM_FILES = {

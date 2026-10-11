@@ -49,7 +49,7 @@ backend/app/
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
                       k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml),
                       log_service (VM logs + diagnostics via guest agent, pod logs, shared filter; rules in log_rules) +
-                      kube_exec (kubectl / oc on a cluster: one path for MCP kubectl and pod logs)
+                      kube_exec (kubectl / oc on a cluster: one path for MCP kubectl, pod logs and the MCP oc tool)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
@@ -306,7 +306,10 @@ e2e/                  Playwright browser tests against the real app (see below)
 - **MCP** (docs/mcp.md): `/api/mcp` on the app's port, own JSON-RPC (no `mcp` SDK: Python >= 3.10). Tools call the
   REST API **in-process** (httpx ASGITransport) with the caller's Authorization header: never re-implement endpoint
   logic in a tool; `api_describe` / `api_request` expose every endpoint. `admin=True` tools (guest-agent exec/files,
-  ssh, kubectl, kubeadm files) call existing services directly and are hidden from viewers (unknown tool). Viewers may
+  ssh, kubectl, oc, kubeadm files) call existing services directly and are hidden from viewers (unknown tool). `oc`
+  (OpenShift only, `kube_exec.run_oc`): non-interactive (login / edit / -t / watch refused with the alternative),
+  capped output, `adm must-gather` / `inspect` as a task in `<install dir>/oc-output/` -> tarball +
+  `GET /clusters/{id}/oc-output/<name>` (secret read); disconnected: the pod's image is checked in the mirror first. Viewers may
   POST /api/mcp (`MCP_PATH`). Errors: protocol = JSON-RPC error (unknown method -32601, unknown tool / params -32602),
   tool failure or bad arguments = result with `isError` (the model reads it). Unsupported `MCP-Protocol-Version` header
   -> 400: Claude Code probes a newer revision (`server/discover`) first and falls back to `initialize` on it.
