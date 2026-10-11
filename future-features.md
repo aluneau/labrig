@@ -555,6 +555,20 @@ Goal: develop on the rig (git checkout), host the app elsewhere and pull new ver
 - Labs are not affected by an update (libvirt holds them); the WireGuard relay pauses during the restart.
 - Later: signed tarballs (minisign), an RPM in COPR for EL hosts (`dnf upgrade`).
 
+## 3.6 Physical machines through their BMC (iDRAC / iLO / Redfish) — later (noted 2026-10-11)
+
+Add machines that are **not VMs on the main node** to a lab: real servers (e.g. with SR-IOV NICs, GPUs, the
+customer's exact hardware) driven through their BMC.
+- **Redfish first** (iDRAC 9, iLO 5+, most recent BMCs; IPMI as a fallback): power on/off/reset, boot override,
+  **virtual media** (mount an ISO served by the app: agent ISO for OpenShift, cloud/installer ISOs), system /
+  firmware inventory (BIOS, NIC, BMC versions), SEL logs. Credentials stored like the pull secret (0600, never in
+  the API).
+- **Networking**: the machine must reach the lab group: a host bridge on a physical NIC/VLAN attached to the group
+  network (the router then serves it DHCP/DNS by MAC like a member), or a WireGuard / VLAN trunk to a remote host.
+- **Clusters**: physical nodes as OpenShift ABI / kubeadm nodes next to VM nodes (`source: bmc` member).
+- The reverse also helps: a **virtual BMC** for VMs (sushy-tools / Redfish emulator on libvirt) to reproduce
+  customer cases that use OpenShift bare-metal IPI / Metal3 / BareMetalHost.
+
 ## 4. Suggested order
 
 Done so far (2026-10): all of §1, groups v1 (+ reservations, custom members), k3s and kubeadm clusters.
