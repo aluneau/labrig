@@ -151,7 +151,8 @@ if (_frontend / "index.html").is_file():
         file = (_frontend / path).resolve()
         if path and file.is_file() and file.is_relative_to(_frontend):
             return FileResponse(file)
-        return FileResponse(_frontend / "index.html")  # client-side routes
+        # client-side routes; never cached: it names the hashed bundles, a stale copy keeps the old UI after an update
+        return FileResponse(_frontend / "index.html", headers={"Cache-Control": "no-cache"})
 else:
     @app.get("/")
     def root():

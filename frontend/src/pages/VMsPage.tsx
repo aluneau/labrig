@@ -177,6 +177,8 @@ export const VMsPage: React.FC = () => {
     const off = !running && !paused;
     return [
       { title: 'Open console', onClick: () => navigate(`/vms/${vm.id}/console`), isDisabled: off },
+      { title: 'Logs', onClick: () => navigate(`/vms/${vm.id}/logs`), isDisabled: off },
+      { title: 'Diagnostics', onClick: () => navigate(`/vms/${vm.id}/logs?tab=diagnostics`), isDisabled: off },
       { isSeparator: true },
       { title: 'Start', onClick: () => power(vm, 'start'), isDisabled: !off },
       { title: 'Shut down', onClick: () => power(vm, 'stop'), isDisabled: !running },
