@@ -331,6 +331,13 @@ idea as the live DHCP reservations, but with the router as the target.
 - **Start/stop the whole group** with ordering (router → infra → others) and a per-group "autostart".
 - **Snapshots**: external qcow2 snapshots of all members (`snapshotCreateXML` with disk-only + memory
   optional) → "save the lab before trying the customer's fix" and revert. Effort M.
+  Paused 2026-10-11 after research (logs viewer came first). Plan: **internal** qcow2 snapshots (native revert, no
+  overlay chains; libvirt 12.8 / QEMU 11.1 here, app VMs are BIOS + qcow2), memory included when running; plain-words
+  refusal for VF/hostdev NICs, raw disks, UEFI. Group = suspend all → snapshot each → resume; revert = each to paused
+  → resume all → `virDomainSetTime` to host time (OpenShift / kubeadm clock sensitivity). Group spec re-read from
+  the reverted router's metadata; refuse revert if members were added/removed since. `delete_vm` already undefines
+  with SNAPSHOTS_METADATA; keep-disks deletes must drop internal snapshots. API `/vms|groups/{id}/snapshots`,
+  Snapshots tabs, docs/snapshots.md, e2e/snapshots.js.
 - **Clone / export**: export spec + disk overlays to a tarball, so a reproducer can be shared with a
   colleague on another host (same software on RHEL lab machines).
 - **Inter-group connectivity**: (a) groups share an "interconnect" libvirt network and routers peer
