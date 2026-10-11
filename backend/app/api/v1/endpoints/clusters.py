@@ -2,7 +2,7 @@
 from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -10,6 +10,7 @@ from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
 from app.schemas.openshift import AddonRequest, MetalLBOptions, MetalLBScenario
 from app.schemas.cluster import ClusterMirrorRequest
+from app.services import kube_exec
 from app.services.cluster_service import cluster_service
 
 router = APIRouter()
@@ -82,6 +83,34 @@ def get_kubeconfig(cluster_id: int, db: Session = Depends(get_db)):
     text = _bad_request(cluster_service.get_kubeconfig, db, cluster)
     return PlainTextResponse(text, media_type="application/yaml", headers={
         "Content-Disposition": f'attachment; filename="{cluster.name}-kubeconfig.yaml"'})
+
+
+def _openshift(db: Session, cluster_id: int) -> ClusterModel:
+    cluster = _get(db, cluster_id)
+    if cluster.type != "openshift":
+        raise HTTPException(status_code=400, detail="Only OpenShift clusters have oc output")
+    return cluster
+
+
+@router.get("/{cluster_id}/oc-output")
+def list_oc_output(cluster_id: int, db: Session = Depends(get_db)):
+    """Files written by the MCP oc tool (adm must-gather / inspect tarballs, oc cp / rsync) in the install dir"""
+    return kube_exec.list_outputs(_openshift(db, cluster_id))
+
+
+@router.get("/{cluster_id}/oc-output/{name}")
+def get_oc_output(cluster_id: int, name: str, db: Session = Depends(get_db)):
+    path = _bad_request(kube_exec.output_path, _openshift(db, cluster_id), name)
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail=f"{name} is a directory")
+    return FileResponse(path, filename=name, media_type="application/gzip" if name.endswith(".gz")
+                        else "application/octet-stream")
+
+
+@router.delete("/{cluster_id}/oc-output/{name}")
+def delete_oc_output(cluster_id: int, name: str, db: Session = Depends(get_db)):
+    _bad_request(kube_exec.delete_output, _openshift(db, cluster_id), name)
+    return {"deleted": name}
 
 
 @router.get("/{cluster_id}/kubectl/{view}", response_model=ClusterCommandOutput)
