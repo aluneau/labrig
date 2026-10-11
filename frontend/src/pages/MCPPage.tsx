@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Alert, Button, Card, CardBody, CardTitle, ClipboardCopy, ExpandableSection, Label, List, ListItem, PageSection,
+  Alert, Button, Card, CardBody, CardTitle, ClipboardCopyButton, CodeBlock, CodeBlockAction, CodeBlockCode, ExpandableSection, Label, List, ListItem, PageSection,
   Spinner, Stack, StackItem, Tab, Tabs, TabTitleText, Text, TextContent, TextInput,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
@@ -21,11 +21,37 @@ const EXAMPLES = [
   'Which customer-case templates exist? Render the proxy one with 2 members, without creating it',
 ];
 
-const Snippet: React.FC<{ children: string }> = ({ children }) => (
-  <ClipboardCopy isReadOnly isCode variant="expansion" isExpanded hoverTip="Copy" clickTip="Copied">
-    {children}
-  </ClipboardCopy>
-);
+/** Whole command / config shown once (the expansion ClipboardCopy repeated it in a truncated header: the token was cut) */
+const Snippet: React.FC<{ children: string }> = ({ children }) => {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    // navigator.clipboard only exists in secure contexts (https / localhost): plain http on a LAN address needs execCommand
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(children).then(() => setCopied(true)).catch(() => undefined);
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = children;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    setCopied(document.execCommand('copy'));
+    document.body.removeChild(ta);
+  };
+  return (
+    <CodeBlock actions={(
+      <CodeBlockAction>
+        <ClipboardCopyButton id={`copy-${children.length}`} textId="" aria-label="Copy" onClick={copy}
+          exitDelay={copied ? 1500 : 600} variant="plain" onTooltipHidden={() => setCopied(false)}>
+          {copied ? 'Copied' : 'Copy'}
+        </ClipboardCopyButton>
+      </CodeBlockAction>
+    )}>
+      <CodeBlockCode style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{children}</CodeBlockCode>
+    </CodeBlock>
+  );
+};
 
 /** Setup of the MCP server (POST /api/mcp) for Claude Code, Claude Desktop, Cursor, VS Code */
 export const MCPPage: React.FC = () => {
@@ -117,6 +143,13 @@ export const MCPPage: React.FC = () => {
                       dedicated token instead to revoke the assistant's access on its own (API tokens page).
                     </StackItem>
                     {error && <StackItem><Alert variant="danger" isInline title={error} /></StackItem>}
+                    {!token.trim() && cli.error && (
+                      <StackItem>
+                        <Alert variant="warning" isInline id="mcp-cli-token-error"
+                          title={`Your default CLI token couldn't be read (${cli.error}): create a token for MCP or paste one.`} />
+                      </StackItem>
+                    )}
+                    {!token.trim() && !cli.token && !cli.error && <StackItem><Spinner size="md" /> Reading your default CLI token…</StackItem>}
                     <StackItem>
                       <Button onClick={createToken} isLoading={creating} isDisabled={creating}>
                         Create a token for MCP
