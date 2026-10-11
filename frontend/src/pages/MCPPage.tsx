@@ -8,6 +8,7 @@ import { API_BASE, authApi, CSRF_HEADERS } from '../services/api';
 import { errorText } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
 import { useAuth } from '../hooks/useAuth';
+import { useCliToken } from '../hooks/useCliToken';
 
 interface McpTool { name: string; description: string }
 
@@ -40,7 +41,9 @@ export const MCPPage: React.FC = () => {
 
   const base = API_BASE || window.location.origin;
   const url = `${base}/api/mcp`;
-  const tok = token.trim() || '<your-token>';
+  const cli = useCliToken();
+  // the default CLI token unless a dedicated one is created / pasted
+  const tok = token.trim() || cli.token || 'vmm_…';
   const auth = `Bearer ${tok}`;
   const { protocol, hostname } = new URL(base);
   const remoteHttp = protocol === 'http:' && !['localhost', '127.0.0.1', '::1'].includes(hostname);
@@ -110,8 +113,8 @@ export const MCPPage: React.FC = () => {
                   <Stack hasGutter>
                     <StackItem>
                       The assistant acts as you, with your role ({status.user?.role}){status.user?.role === 'viewer'
-                        ? ': read-only tools only' : ''}. Use a dedicated token so you can revoke it on its own
-                      (API tokens page).
+                        ? ': read-only tools only' : ''}. The configurations below contain your default CLI token; create a
+                      dedicated token instead to revoke the assistant's access on its own (API tokens page).
                     </StackItem>
                     {error && <StackItem><Alert variant="danger" isInline title={error} /></StackItem>}
                     <StackItem>
