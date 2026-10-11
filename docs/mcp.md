@@ -45,6 +45,7 @@ configuration below with the right URL and a token filled in.
 | VMs | `list_vms`, `get_vm`, `create_vm` (cloud image `debian-13`-style or ISO), `vm_power`, `delete_vm`, `add_disk`, `remove_disk` (+ `delete_volume`), `add_nic`, `remove_nic` |
 | Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host) |
 | Lab groups | `list_groups`, `get_group` (+ leases), `create_group`, `add_group_member`, `wireguard_device` |
+| Logs / diagnostics | `vm_logs` (admin), `vm_diagnostics`, `find_pods`, `pod_logs` (admin): server-side filters + known-problem rules, see [logs.md](logs.md) |
 | Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `get_kubeconfig`, `kubectl` (admin), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
 | Other | `list_cloud_images`, `list_networks`, `list_templates`, `create_from_template` (or `dry_run`), `list_tasks`, `wait_for_task` |
 
@@ -57,6 +58,11 @@ configuration below with the right URL and a token filled in.
   Cursor) can run them there: the VPN comes up in one approval.
 - **kubeadm files**: `kubeadm_files` returns admin.conf, the init config the app used, the live ClusterConfiguration,
   kubelet config, CA, a fresh join command, static pod manifests, certificate expiry.
+- **Logs**: "get the logs of the sriov pods and filter the common errors" is one call:
+  `pod_logs(cluster, match='sriov', problems_only=true)` (every container of every matching pod + their events and
+  status lines; `summary` = counts per category with a plain-words hint). `vm_logs(vm, problems_only=true)` does the
+  same for a VM's journal (`source`: dmesg, cloud-init, file). `vm_diagnostics` = OS, firmware versions, NIC drivers,
+  SR-IOV, failed units, `findings`.
 - `kubectl` runs on the first running control plane (guest agent) for kubeadm / k3s, with the app's `oc` on the host
   for OpenShift; `stdin` + `apply -f -` applies manifests (e.g. operators on kubeadm).
 

@@ -48,6 +48,7 @@ import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
 import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
 import { MirroredImages } from '../components/clusters/MirroredImages';
+import { ClusterLogs } from '../components/logs/ClusterLogs';
 
 const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
 const STORAGE_NAMES: Record<string, string> = { none: 'none', lvms: 'LVM Storage', odf: 'OpenShift Data Foundation' };
@@ -230,8 +231,9 @@ export const ClusterDetailPage: React.FC = () => {
   const busy = cluster.task_running;
   const isOpenShift = cluster.type === 'openshift';
   const os = cluster.spec?.openshift || {};
-  // tabs: OpenShift, and kubeadm clusters in a lab group (MetalLB lab + topology)
-  const tabbed = isOpenShift || (cluster.type === 'kubeadm' && !!cluster.group_id);
+  // tabs: every cluster has Logs; OpenShift and kubeadm clusters in a lab group add MetalLB lab + topology
+  const labTabs = isOpenShift || (cluster.type === 'kubeadm' && !!cluster.group_id);
+  const tabbed = true;
 
   return (
     <>
@@ -285,8 +287,9 @@ export const ClusterDetailPage: React.FC = () => {
             usePageInsets aria-label="Cluster sections">
             <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
             {isOpenShift ? <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" /> : null}
-            <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" />
+            {labTabs ? <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" /> : null}
             {cluster.group_id ? <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>} id="os-tab-topology" /> : null}
+            <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} id="cluster-tab-logs" />
           </Tabs>
         </PageSection>
       )}
@@ -299,7 +302,8 @@ export const ClusterDetailPage: React.FC = () => {
         {isOpenShift && tab === 'operators' && (
           <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
         )}
-        {tabbed && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
+        {tab === 'logs' && <Card><CardBody><ClusterLogs clusterId={cluster.id} clusterName={cluster.name} /></CardBody></Card>}
+        {labTabs && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
         {tabbed && tab === 'topology' && cluster.group_id && (
           <Card><CardBody>
             <LabTopology groupId={cluster.group_id} focusCluster={cluster.name}

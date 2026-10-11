@@ -92,6 +92,12 @@ const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: s
         </DescriptionListDescription>
       </DescriptionListGroup>
       <DescriptionListGroup>
+        <DescriptionListTerm>Logs</DescriptionListTerm>
+        <DescriptionListDescription>
+          <Link to={`/vms/${vm.id}/logs`}>Logs</Link>{' · '}<Link to={`/vms/${vm.id}/logs?tab=diagnostics`}>Diagnostics</Link>
+        </DescriptionListDescription>
+      </DescriptionListGroup>
+      <DescriptionListGroup>
         <DescriptionListTerm>CD/DVD</DescriptionListTerm>
         <DescriptionListDescription>
           <CdromControl vm={vm} onResult={onResult} onError={onError} />
