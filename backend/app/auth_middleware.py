@@ -31,7 +31,7 @@ PUBLIC_RE = re.compile(r"^/api/v1/groups/\d+/registry/ca\.crt$")
 VIEWER_WRITES_RE = re.compile(r"^/api/v1/auth/(logout|tokens(/\d+|/cli)?)$")
 # Reads that hand out credentials: admins only
 SECRET_READS_RE = re.compile(
-    r"^/api/v1/(clusters/\d+/(kubeconfig|openshift/(credentials|ssh-key))"
+    r"^/api/v1/(clusters/\d+/(kubeconfig|logs|openshift/(credentials|ssh-key))|vms/\d+/logs"
     r"|groups/\d+/(registry/credentials|wireguard/peers/[^/]+/config))$")
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # The caller's own default token: not masked for viewers

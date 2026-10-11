@@ -11,6 +11,7 @@ import { NetworksPage } from './pages/NetworksPage';
 import { HostsPage } from './pages/HostsPage';
 import { TasksPage } from './pages/TasksPage';
 import { ConsolePage } from './pages/ConsolePage';
+import { VmLogsPage } from './pages/VmLogsPage';
 import { NetworkDetailPage } from './pages/NetworkDetailPage';
 import { GroupsPage } from './pages/GroupsPage';
 import { GroupDetailPage } from './pages/GroupDetailPage';
@@ -30,6 +31,7 @@ export const App: React.FC = () => (
       <Route path="/" element={gated(<DashboardPage />)} />
       <Route path="/vms" element={gated(<VMsPage />)} />
       <Route path="/vms/:id/console" element={gated(<ConsolePage />)} />
+      <Route path="/vms/:id/logs" element={gated(<VmLogsPage />)} />
       <Route path="/groups" element={gated(<GroupsPage />)} />
       <Route path="/groups/:id" element={gated(<GroupDetailPage />)} />
       <Route path="/templates" element={gated(<TemplatesPage />)} />

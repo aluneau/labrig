@@ -612,20 +612,12 @@ def _cluster_orm(cluster_id: int):
 
 
 def _kubectl(cluster_id: int, args: List[str], stdin: Optional[str], timeout: float) -> Dict[str, Any]:
-    from app.services.cluster_drivers import get_driver
-    from app.services.cluster_service import cluster_service
+    from app.services.kube_exec import KubeExecError, run_kubectl
     db, cluster = _cluster_orm(cluster_id)
     try:
-        if cluster.type == "openshift":
-            from app.services.openshift_service import openshift_service
-            out = openshift_service.oc(cluster.name, cluster.version, args, timeout, stdin=stdin)
-            return {"command": "oc " + shlex.join(args), "node": "(vm-manager host)", **out}
-        node = cluster_service._api_node(cluster)
-        if node is None:
-            raise ApiError("The cluster has no control plane")
-        argv = get_driver(cluster.type).kubectl_command(args)
-        out = _agent_exec(node.name, argv, stdin, timeout)
-        return {"command": "kubectl " + shlex.join(args), "node": node.name, **out}
+        return run_kubectl(cluster, args, stdin, timeout)
+    except KubeExecError as e:
+        raise ApiError(str(e))
     finally:
         db.close()
 
@@ -845,3 +837,125 @@ async def wait_for_cluster(ctx: Ctx, cluster: Ref, timeout: int = 900) -> Any:
             return {"still_running": True, **{k: detail.get(k) for k in ("status", "status_message",
                                                                           "task_progress", "task_id")}}
         await asyncio.sleep(10)
+
+
+# ---------------------------------------------------------------------------------------------- logs / diagnostics
+
+def _compact_logs(r: Any) -> Any:
+    """Shorter log answers for a model: no empty context, per-category rule counts only"""
+    if not isinstance(r, dict):
+        return r
+    for e in r.get("entries", []):
+        for k in ("before", "after", "rules"):
+            if not e.get(k):
+                e.pop(k, None)
+        if e.get("level") == "info":
+            e.pop("level")
+    for s in r.get("summary", []):
+        s["rules"] = {x["id"]: x["count"] for x in s.get("rules", [])}
+    return r
+
+
+@tool(admin=True)
+async def vm_logs(ctx: Ctx, vm: Ref, source: Literal["journal", "dmesg", "cloud-init", "file"] = "journal",
+                  lines: int = 1000, unit: Optional[List[str]] = None, since: Optional[str] = None,
+                  boot: Optional[str] = None, grep: Optional[str] = None, path: Optional[str] = None,
+                  level: Optional[Literal["error", "warning"]] = None, include: Optional[str] = None,
+                  exclude: Optional[str] = None, problems_only: bool = False, category: Optional[str] = None,
+                  context: int = 1, max_entries: int = 200) -> Any:
+    """Read a VM's logs through the guest agent (no SSH) and filter them on the server: known-problem rules (OOM,
+    segfault, I/O errors, link down, firmware, SELinux AVC, x509, DNS, connection refused, SR-IOV / VFIO / IOMMU,
+    cloud-init, failed units...) give a category + plain-words hint per matched line and counts per category
+    (`summary`). Typical: problems_only=true, or level='error'. Logs may hold secrets (admins only).
+
+    Args:
+        vm: VM name or id
+        source: journal (journalctl), dmesg (kernel), cloud-init (status --long + its logs), file (any path)
+        lines: lines fetched from the source (tail, max 20000)
+        unit: journal: systemd units, e.g. ['kubelet', 'crio']
+        since: journal / dmesg: '-1h', 'today', '2026-10-11 10:00'
+        boot: journal / dmesg: '0' current boot, '-1' previous, 'all'
+        grep: journal: journalctl --grep in the guest
+        path: file: absolute path in the VM, e.g. /var/log/messages
+        level: keep lines of this level or worse
+        include: regex the lines must match (case-insensitive)
+        exclude: regex of lines to drop
+        problems_only: only lines matching a known-problem rule
+        category: comma-separated categories or rule ids (see summary), e.g. 'memory,storage'
+        context: lines of context around each kept line (0-20)
+        max_entries: max lines returned (most recent kept)
+    """
+    v = await _find(ctx, "vms", vm)
+    return _compact_logs(await ctx.api("GET", f"/vms/{v['id']}/logs", query={
+        "source": source, "lines": lines, "unit": unit, "since": since, "boot": boot, "grep": grep, "path": path,
+        "level": level, "include": include, "exclude": exclude, "problems_only": problems_only,
+        "category": category, "context": context, "max_entries": max_entries}))
+
+
+@tool
+async def vm_diagnostics(ctx: Ctx, vm: Ref) -> Any:
+    """Inventory of a VM through the guest agent, for a support case: OS / kernel / cmdline, BIOS and system
+    (dmidecode: firmware versions), lspci -nnk (drivers), NICs (driver, firmware-version, bus-info, addresses, VFs),
+    disks, file systems, SR-IOV PFs / IOMMU groups / vfio devices, failed systemd units, and `findings` in plain words.
+
+    Args:
+        vm: VM name or id
+    """
+    v = await _find(ctx, "vms", vm)
+    return await ctx.api("GET", f"/vms/{v['id']}/diagnostics")
+
+
+@tool
+async def find_pods(ctx: Ctx, cluster: Ref, match: Optional[str] = None, namespace: Optional[str] = None,
+                    selector: Optional[str] = None, problems_only: bool = False) -> Any:
+    """Find pods in a cluster (k3s / kubeadm / OpenShift) with their phase, restarts and problems
+    (CrashLoopBackOff, ImagePullBackOff, OOMKilled...), e.g. match='sriov' for the SR-IOV operator's pods.
+
+    Args:
+        cluster: cluster name or id
+        match: substring of 'namespace/name' (case-insensitive)
+        namespace: exact namespace
+        selector: label selector, e.g. 'app=sriov-network-config-daemon'
+        problems_only: only pods with a waiting / failed container
+    """
+    c = await _find(ctx, "clusters", cluster)
+    return await ctx.api("GET", f"/clusters/{c['id']}/pods", query={
+        "match": match, "namespace": namespace, "selector": selector, "problems_only": problems_only})
+
+
+@tool(admin=True)
+async def pod_logs(ctx: Ctx, cluster: Ref, match: Optional[str] = None, namespace: Optional[str] = None,
+                   pod: Optional[str] = None, selector: Optional[str] = None, container: Optional[str] = None,
+                   previous: bool = False, tail: int = 500, since: Optional[str] = None,
+                   level: Optional[Literal["error", "warning"]] = None, include: Optional[str] = None,
+                   exclude: Optional[str] = None, problems_only: bool = False, category: Optional[str] = None,
+                   context: int = 1, max_entries: int = 200) -> Any:
+    """Logs of one pod or of every pod matching a name substring / namespace / selector (up to 30 pods, all
+    containers, lines prefixed [ns/pod/container]) plus their events and container status lines, filtered on the
+    server with the known-problem rules (summary = counts per category with a hint). "Logs of the sriov pods with
+    the common errors" = pod_logs(cluster, match='sriov', problems_only=true).
+
+    Args:
+        cluster: cluster name or id
+        match: pods whose 'namespace/name' contains this (case-insensitive)
+        namespace: namespace (needed with pod)
+        pod: one pod name
+        selector: label selector
+        container: only this container
+        previous: logs of the previous (crashed) container instance
+        tail: lines per container
+        since: e.g. '15m', '2h'
+        level: keep lines of this level or worse
+        include: regex the lines must match
+        exclude: regex of lines to drop
+        problems_only: only lines matching a known-problem rule
+        category: comma-separated categories or rule ids, e.g. 'sriov,images'
+        context: lines of context around each kept line
+        max_entries: max lines returned (most recent kept)
+    """
+    c = await _find(ctx, "clusters", cluster)
+    return _compact_logs(await ctx.api("GET", f"/clusters/{c['id']}/logs", query={
+        "match": match, "namespace": namespace, "pod": pod, "selector": selector, "container": container,
+        "previous": previous, "tail": tail, "since": since, "level": level, "include": include, "exclude": exclude,
+        "problems_only": problems_only, "category": category, "context": context, "max_entries": max_entries},
+        timeout=600))

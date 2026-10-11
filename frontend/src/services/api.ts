@@ -15,6 +15,7 @@ import {
   UpdateStatus,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
 } from '../types';
+import { Diagnostics, LogParams, LogResult, LogRules, PodList } from '../types/logs';
 
 export const API_BASE = process.env.REACT_APP_API_URL || '';
 
@@ -304,4 +305,31 @@ export const templateApi = {
     post<TemplateCreated>(`/templates/${encodeURIComponent(id)}/create`, { params, yaml: yaml || null }),
   saveGroup: (body: TemplateSave) => post<TemplateDetail>('/templates', body),
   delete: (id: string) => del(`/templates/${encodeURIComponent(id)}`),
+};
+
+// Log viewer + diagnostics (docs/logs.md)
+function logQuery(params: LogParams): string {
+  const q = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === '' || v === false) return;
+    if (Array.isArray(v)) v.forEach((x) => x && q.append(k, x));
+    else q.append(k, String(v));
+  });
+  const s = q.toString();
+  return s ? `?${s}` : '';
+}
+
+export const logsApi = {
+  rules: () => request<LogRules>('/logs/rules'),
+  /** path = /vms/{id}/logs or /clusters/{id}/logs */
+  get: (path: string, params: LogParams) => request<LogResult>(`${path}${logQuery(params)}`),
+  /** the selected lines as plain text (format=text), for the Download button */
+  text: async (path: string, params: LogParams): Promise<string> => {
+    const r = await fetch(`${API_BASE}/api/v1${path}${logQuery({ ...params, format: 'text' })}`,
+      { credentials: 'same-origin', headers: { ...CSRF_HEADERS } });
+    if (!r.ok) throw new ApiError(r.status, errorMessage(await r.json().catch(() => null), r.status));
+    return r.text();
+  },
+  pods: (clusterId: number, params: LogParams) => request<PodList>(`/clusters/${clusterId}/pods${logQuery(params)}`),
+  diagnostics: (vmId: number) => request<Diagnostics>(`/vms/${vmId}/diagnostics`),
 };

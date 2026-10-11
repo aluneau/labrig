@@ -47,17 +47,19 @@ backend/app/
                       registry_service (router mirror registry: setup, oc-mirror runs, ensure_mirrored), registry_router
                       (router-side script), registry_images + registry_client (copy / upload / list / delete images),
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
-                      k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml)
+                      k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml),
+                      log_service (VM logs + diagnostics via guest agent, pod logs, shared filter; rules in log_rules) +
+                      kube_exec (kubectl / oc on a cluster: one path for MCP kubectl and pod logs)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
   mcp/                MCP server at POST /api/mcp (docs/mcp.md): registry (signature+docstring -> schema), tools, server (JSON-RPC)
-  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates, logs
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
   hooks/              useAuth (AuthProvider: login page until logged in), useEvents (one EventSource, useLiveEvents), usePolling, useVmPower (pending states)
-  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks, MCP
+  pages/              Login, Tokens, Dashboard, VMs, Console (noVNC), Storage, Networks, NetworkDetail, Groups, GroupDetail, Templates, TemplateWizard, Clusters, ClusterDetail, Host, Tasks, MCP, VmLogs (/vms/:id/logs)
   components/         common/, layout/, vms/CreateVMModal + VmDevices, groups/CreateGroupModal, clusters/CreateClusterModal, console/VncConsole
 docs/auth.md          authentication: PAM login, groups -> roles, tokens, CLI, CSRF, disabling it
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
@@ -68,6 +70,7 @@ docs/disconnected.md  egress switch + mirror registry on the router (mirror-regi
 docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
+docs/logs.md          log viewer + diagnostics: sources, filters, known-problems rules, pod logs, adding a rule
 docs/mcp.md           AI assistants: MCP endpoint, Claude Code / Desktop / Cursor / VS Code setup, tools
 docs/updates.md       release installs (/opt/vm-manager), vm-manager-update, GitHub releases (CI, nightly), Host page Update now
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
@@ -293,6 +296,13 @@ e2e/                  Playwright browser tests against the real app (see below)
   `kubeadm init` (v1beta4 config, app token + certificate key, SANs = uplink/router IP + api names),
   Flannel, `kubeadm join` (`--node-name`: EL hostnames are FQDNs; control planes one at a time).
 
+- **Logs / diagnostics** (docs/logs.md, `log_service`, components/logs/): VM logs through guest-exec only (journal as
+  `journalctl -o json` = real priority, `dmesg -T -x`, cloud-init, any file), pod logs through `kube_exec` (per container,
+  + pod status lines and events: ImagePullBackOff never shows in a container log). ONE server-side filter for UI / API /
+  MCP (`analyze`: level, include / exclude regex, `log_rules.RULES` with category + hint, context, counts). Lines our own
+  guest-exec calls produce (Debian's qemu-ga logs every command) never match a rule. `/vms/{id}/logs` and
+  `/clusters/{id}/logs` are SECRET_READS (no viewers); diagnostics / pods stay viewer-readable (raw journal lines
+  dropped). EL VMs outside clusters forbid guest-exec: plain-words error, diagnostics fall back on the agent's info.
 - **MCP** (docs/mcp.md): `/api/mcp` on the app's port, own JSON-RPC (no `mcp` SDK: Python >= 3.10). Tools call the
   REST API **in-process** (httpx ASGITransport) with the caller's Authorization header: never re-implement endpoint
   logic in a tool; `api_describe` / `api_request` expose every endpoint. `admin=True` tools (guest-agent exec/files,
@@ -365,6 +375,7 @@ node ipv6.js                                                    # dual stack: DH
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
+node logs.js                                                    # logs + diagnostics: sources, filters, rules, MCP, UI (EL_IMAGE=almalinux-9 CLUSTER=<name>: EL + pod logs)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
