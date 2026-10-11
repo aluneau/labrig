@@ -330,6 +330,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   EL's qemu-ga forbids guest-exec and is SELinux-confined: cluster nodes get `/etc/sysconfig/qemu-ga`
   with empty filters + a CIL module making `virt_qemu_ga_t` permissive. Right after a restart the
   Kubernetes API still shows the pre-shutdown `Ready`: compare `lastHeartbeatTime` with the boot time.
+- EL cloud images set the hostname to the FQDN (`<vm>.<cluster>.<domain>`), which k3s / kubelet take as the node
+  name: the app looks nodes up by VM name, so k3s gets `node-name` in its config.yaml and kubeadm `--node-name`
+  (without it an EL k3s cluster was healthy but stayed "Waiting for nodes: 0/N Ready" until the 20 min timeout).
 - SQLAlchemy flushes INSERTs before DELETEs: `flush()` after deleting mirrored rows, or a name reused by
   a re-created VM hits `UNIQUE(name)`.
 

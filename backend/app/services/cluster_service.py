@@ -938,13 +938,18 @@ class ClusterService:
                     last_error = (out["stderr"] or out["stdout"]).strip()[-300:] or "API not ready"
             except (libvirt.libvirtError, TimeoutError, KeyError, ValueError) as e:
                 last_error = str(e)
-            count = sum(1 for name in expected if ready.get(name))
+            # clusters made before node names were pinned may use the FQDN (EL hostnames)
+            short = {n.split(".")[0]: r for n, r in ready.items()}
+            count = sum(1 for name in expected if ready.get(name, short.get(name)))
             span = progress_to - progress_from
             self._check(task, cluster, db, progress_from + span * count // max(len(expected), 1),
                         f"Waiting for nodes: {count}/{len(expected)} Ready")
             if count == len(expected):
                 return {"nodes_ready": count}
             if time.monotonic() > deadline:
+                if ready:
+                    last_error = "the API reports " + ", ".join(
+                        f"{n} {'Ready' if r else 'NotReady'}" for n, r in sorted(ready.items()))
                 raise TimeoutError(f"Only {count}/{len(expected)} nodes Ready after {timeout // 60:.0f} min "
                                    f"(last: {last_error})")
             self._sleep(task, 5)

@@ -99,7 +99,9 @@ class K3sDriver(ClusterDriver):  # standalone cluster network (no router)
         """ctx: name, zone, api_hostname, api_ip, token, version, ctlplanes, pod_cidr, service_cidr,
         extra_args, el. node: name, role, ip, first (first control plane)."""
         server_url = f"https://{ctx['api_hostname']}:6443"
-        config: Dict[str, Any] = {"token": ctx["token"], "node-ip": node["ip"]}
+        # node-name: EL cloud images set the hostname to the FQDN, which k3s would use as the node
+        # name (the app looks nodes up by VM name)
+        config: Dict[str, Any] = {"token": ctx["token"], "node-name": node["name"], "node-ip": node["ip"]}
         if node["role"] == "ctlplane":
             service_net = ipaddress.IPv4Network(ctx["service_cidr"], strict=False)
             config.update({

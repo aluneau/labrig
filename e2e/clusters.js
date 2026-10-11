@@ -10,6 +10,9 @@ const BASE = process.env.BASE_URL || 'http://localhost:8000';
 const CHROME = process.env.CHROME_PATH || '/usr/bin/google-chrome-stable';
 const NAME = process.env.CLUSTER_NAME || 'e2e-d-k3s-ui';
 const KUBECTL = process.env.KUBECTL || 'kubectl';
+const IMAGE = process.env.IMAGE || '';  // cloud image option to pick (substring, e.g. "almalinux-10"); default = first
+const WORKERS = Number(process.env.WORKERS || 2);
+const NODES = 1 + WORKERS;
 const shots = path.join(__dirname, 'screenshots');
 fs.mkdirSync(shots, { recursive: true });
 const t0 = Date.now();
@@ -34,9 +37,14 @@ const api = async (p) => (await fetch(`${BASE}/api/v1${p}`)).json();
     await page.getByRole('button', { name: 'Create cluster' }).click();
     const dialog = page.getByRole('dialog');
     await dialog.locator('#cl-name').fill(NAME);
-    await dialog.locator('#cl-workers').fill('2');
+    await dialog.locator('#cl-workers').fill(String(WORKERS));
     await dialog.locator('#cl-password').fill('e2e-pass');
     await dialog.locator('#cl-image option').first().waitFor({ state: 'attached' });
+    if (IMAGE) {
+      const opt = dialog.locator('#cl-image option').filter({ hasText: IMAGE }).first();
+      await dialog.locator('#cl-image').selectOption(await opt.getAttribute('value'));
+      log('image:', (await opt.textContent()).trim());
+    }
     await shot('create-modal');
     await dialog.getByRole('button', { name: 'Create', exact: true }).click();
     await page.waitForURL(/\/clusters\/\d+$/, { timeout: 60000 });
@@ -51,11 +59,11 @@ const api = async (p) => (await fetch(`${BASE}/api/v1${p}`)).json();
     log('cluster ready (live)');
     const out = page.locator('#kubectl-output');
     await out.waitFor({ timeout: 30000 });
-    await page.waitForFunction(() => {
+    await page.waitForFunction((n) => {
       const t = document.querySelector('#kubectl-output')?.textContent || '';
-      return (t.match(/\sReady\s/g) || []).length === 3;
-    }, null, { timeout: 60000 });
-    log('kubectl card shows 3 Ready nodes');
+      return (t.match(/\sReady\s/g) || []).length === n;
+    }, NODES, { timeout: 60000 });
+    log(`kubectl card shows ${NODES} Ready nodes`);
     await shot('ready');
 
     const [download] = await Promise.all([
@@ -123,11 +131,11 @@ const api = async (p) => (await fetch(`${BASE}/api/v1${p}`)).json();
     await page.getByRole('button', { name: 'Start', exact: true }).click();
     await page.getByText('ready', { exact: true }).first().waitFor({ timeout: 10 * 60000 });
     await page.getByRole('button', { name: 'Nodes', exact: true }).click();
-    await page.waitForFunction(() => {
+    await page.waitForFunction((n) => {
       const t = document.querySelector('#kubectl-output')?.textContent || '';
-      return (t.match(/\sReady\s/g) || []).length === 3;
-    }, null, { timeout: 60000 });
-    log('cluster ready again after start, 3 nodes Ready');
+      return (t.match(/\sReady\s/g) || []).length === n;
+    }, NODES, { timeout: 60000 });
+    log(`cluster ready again after start, ${NODES} nodes Ready`);
     await shot('restarted');
 
     await page.getByRole('link', { name: 'Clusters' }).first().click();
