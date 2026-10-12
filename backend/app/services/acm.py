@@ -521,6 +521,10 @@ class AcmService:
             raise LookupError("Cluster to import not found")
         if target.id == hub.id:
             raise ValueError("The hub manages itself already (local-cluster)")
+        from app.services.acm_spokes import provisioner
+        if provisioner(target) is not None:
+            raise ValueError(f"{target.name} is a spoke of ACM hub {provisioner(target).get('hub_name')}: "
+                             "that hub manages it already")
         if target.name == "local-cluster":
             raise ValueError("A cluster named local-cluster can't be imported (the hub's own name for itself)")
         if any(e["name"] == target.name for e in self._entries(hub)):
@@ -530,10 +534,6 @@ class AcmService:
                 raise ValueError(f"{target.name} is already managed by the hub {other.name}: detach it there first")
         if self.svc.to_dict(db, target)["status"] != "ready":
             raise ValueError(f"{target.name} is not ready (status {target.status}): start it or wait for its install")
-        from app.services.acm_spokes import provisioner
-        if provisioner(target) is not None:
-            raise ValueError(f"{target.name} is a spoke of ACM hub {provisioner(target).get('hub_name')}: "
-                             "that hub manages it already")
         if target.type == "openshift" and self.is_hub(target):
             raise ValueError(f"{target.name} is an ACM hub itself: hubs of hubs aren't supported here")
         if not hub.api_ip:
