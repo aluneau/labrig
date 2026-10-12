@@ -186,6 +186,32 @@ async function waitManaged(hubId, name, want) {
     await page.locator('#acm-managed').waitFor({ timeout: 60000 });
     await page.waitForTimeout(800);
     await page.screenshot({ path: 'acm-detached.png', fullPage: true });
+
+    // 7. SPOKE=1: the hub provisions a single-node OpenShift on a BMC machine of its group (needs the host firewall
+    // rule for BMC_HOST_PORTS and 16 GiB free)
+    if (process.env.SPOKE) {
+      const hubC = await api(`/clusters/${ids.hub}`);
+      const bmc = await api(`/groups/${hubC.group_id}/bmc`);
+      if (!bmc.members.length) await post(`/groups/${hubC.group_id}/bmc/spokes`, { count: 1 });
+      const machine = (await api(`/groups/${hubC.group_id}/bmc`)).members[0].name;
+      const sp = await post(`/clusters/${ids.hub}/acm/spokes`, { name: `${P}-sp1`, machine });
+      log(`spoke ${sp.name} (cluster ${sp.id}) on ${machine}, task ${sp.task_id}`);
+      await page.goto(`${BASE}/clusters/${ids.hub}?tab=acm`);
+      await page.locator(`#acm-spoke-${sp.name}`).waitFor({ timeout: 60000 });
+      await page.screenshot({ path: 'acm-spoke-provisioning.png', fullPage: true });
+      await waitTask(sp.task_id, 180 * 60000, 'spoke install');
+      const spc = await api(`/clusters/${sp.id}`);
+      log(`spoke: ${spc.status}, acm ${JSON.stringify(spc.acm)}, api ${spc.api_endpoint}`);
+      log(`oc on the spoke: ${await mcp('oc', { cluster: sp.name, args: 'get nodes,clusterversion' })}`);
+      log(`hub: ${await mcp('oc', { cluster: NAMES.hub, args: `get bmh,agentclusterinstall -n ${sp.name}` })}`);
+      await page.reload();
+      await page.waitForTimeout(1500);
+      await page.screenshot({ path: 'acm-spoke-installed.png', fullPage: true });
+      if (!process.env.KEEP) {
+        await api(`/clusters/${sp.id}`, { method: 'DELETE' });
+        log('spoke deleted (through the hub)');
+      }
+    }
   } catch (e) {
     failed = true;
     log('FAILED:', e.message);
