@@ -18,6 +18,7 @@ import { GroupDetailPage } from './pages/GroupDetailPage';
 import { ClustersPage } from './pages/ClustersPage';
 import { ClusterDetailPage } from './pages/ClusterDetailPage';
 import { BareMetalHostsPage } from './pages/BareMetalHostsPage';
+import { BareMetalHostDetailPage } from './pages/BareMetalHostDetailPage';
 import { TokensPage } from './pages/TokensPage';
 import { MCPPage } from './pages/MCPPage';
 import { TemplatesPage } from './pages/TemplatesPage';
@@ -43,6 +44,7 @@ export const App: React.FC = () => (
       <Route path="/clusters" element={gated(<ClustersPage />)} />
       <Route path="/clusters/:id" element={gated(<ClusterDetailPage />)} />
       <Route path="/bare-metal-hosts" element={<BareMetalHostsPage />} />
+      <Route path="/bare-metal-hosts/:id" element={<BareMetalHostDetailPage />} />
       <Route path="/hosts" element={<HostsPage />} />
       <Route path="/tasks" element={<TasksPage />} />
       <Route path="/tokens" element={<TokensPage />} />

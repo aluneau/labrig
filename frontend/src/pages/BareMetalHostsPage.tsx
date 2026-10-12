@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Alert,
   AlertActionCloseButton,
@@ -133,7 +133,7 @@ export const BareMetalHostsPage: React.FC = () => {
               <Tbody key={h.id} isExpanded={expanded === h.id}>
                 <Tr>
                   <Td expand={{ rowIndex, isExpanded: expanded === h.id, onToggle: () => setExpanded(expanded === h.id ? null : h.id) }} />
-                  <Td><strong>{h.name}</strong></Td>
+                  <Td><Link to={`/bare-metal-hosts/${h.id}`}><strong>{h.name}</strong></Link></Td>
                   <Td>{h.bmc_address.replace(/^https?:\/\//, '')}</Td>
                   <Td>
                     {inv(h).cpu_count ? `${inv(h).cpu_count}× CPU, ${inv(h).memory_gib} GiB` : '—'}

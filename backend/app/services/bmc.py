@@ -183,6 +183,24 @@ class RedfishBMC:
             })
         return out
 
+    def screenshot(self) -> bytes:
+        """A PNG of the host's video console (a quick "what's on screen" without the KVM applet).
+        Dell iDRAC only, through its OEM action; other BMCs raise BMCError."""
+        import base64
+        self._discover()
+        action = f"{self._manager_path}/Oem/Dell/DellLCService/Actions/DellLCService.ExportServerScreenShot"
+        try:
+            data = self._request("POST", action, {"FileType": "ServerScreenShot"})
+        except BMCError:
+            raise BMCError("console screenshot is only supported on Dell iDRAC for now")
+        b64 = data.get("ServerScreenShotFile") or data.get("ScreenShotData")
+        if not b64:
+            raise BMCError("console screenshot is only supported on Dell iDRAC for now")
+        try:
+            return base64.b64decode(b64)
+        except (ValueError, TypeError) as e:
+            raise BMCError(f"bad screenshot data from the BMC: {e}")
+
     # ---------------------------------------------------------------- power
 
     def power_state(self) -> Optional[str]:

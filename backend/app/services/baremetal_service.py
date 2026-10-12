@@ -151,6 +151,9 @@ class BareMetalService:
     def nics(self, db: Session, host: BareMetalHost) -> List[dict]:
         return self.client(db, host).nics()
 
+    def screenshot(self, db: Session, host: BareMetalHost) -> bytes:
+        return self.client(db, host).screenshot()
+
     @staticmethod
     def _normalise(address: str) -> str:
         address = address.strip()

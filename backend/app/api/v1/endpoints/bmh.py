@@ -1,7 +1,7 @@
 """Bare-metal host endpoints (BMC-driven physical servers; services/baremetal_service.py)"""
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -75,6 +75,18 @@ def host_nics(bmh_id: int, db: Session = Depends(get_db)):
         return baremetal_service.nics(db, host)
     except BMCError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/{bmh_id}/console-screenshot")
+def console_screenshot(bmh_id: int, db: Session = Depends(get_db)):
+    """A PNG snapshot of the host's video console (Dell iDRAC only). 502 if the BMC can't provide one, so
+    the UI can fall back to the BMC web console."""
+    host = _host(db, bmh_id)
+    try:
+        png = baremetal_service.screenshot(db, host)
+    except BMCError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @router.post("/{bmh_id}/power")
