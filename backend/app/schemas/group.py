@@ -655,6 +655,9 @@ class MemberSpec(BaseModel):
     mac: Optional[str] = Field(None, pattern=MAC)
     cloud_init: Optional[CloudInitSpec] = None  # None = the group's cloud_init
     user_data: Optional[str] = None             # raw #cloud-config, replaces cloud_init
+    # Emulated BMC (Redfish, sushy-tools on the host, docs/openshift.md "Spoke machines"): an ACM hub's metal3
+    # can power it and boot it from virtual media. Empty-disk / ISO members only.
+    bmc: bool = False
 
     @field_validator("ip")
     @classmethod
@@ -679,6 +682,8 @@ class MemberSpec(BaseModel):
             raise ValueError(f"Member {self.name}: the disk size must be at least 1 GiB")
         if self.source != "cloud_image":
             self.image = None
+        if self.bmc and self.source == "cloud_image":
+            raise ValueError(f"Member {self.name}: a BMC member boots from virtual media (source empty or iso)")
         return self
 
 
@@ -744,6 +749,14 @@ class TemplateRef(BaseModel):
     created_at: Optional[str] = None
 
 
+class BMCSpec(BaseModel):
+    """Assigned by the app when a member has `bmc`: the group's Redfish emulator (one process per group) listens on
+    `listen` (the uplink network's gateway: the address the group's machines reach the host on) port `port`
+    (BMC_HOST_PORTS). Credentials: GET /groups/{id}/bmc/credentials (never in the spec)."""
+    port: Optional[int] = None
+    listen: Optional[str] = None
+
+
 class GroupSpec(BaseModel):
     name: str = Field(..., pattern=LABEL, description="Lowercase letters, digits and '-', max 32 chars")
     cidr: str = Field(..., description="IPv4 subnet of the group network, e.g. 10.42.7.0/24")
@@ -762,6 +775,7 @@ class GroupSpec(BaseModel):
     address_pools: List[AddressPoolSpec] = []  # ranges kept free (MetalLB pools...)
     network: NetworkSpec = NetworkSpec()  # MTU, IPv6 (dual stack)
     template: Optional[TemplateRef] = None  # set by the app when created from a template
+    bmc: Optional[BMCSpec] = None  # assigned: Redfish emulator of the members with `bmc`
 
     def ipv6_prefix(self) -> Optional[str]:
         """The group's IPv6 /64 when dual stack is on (enabled and assigned)"""

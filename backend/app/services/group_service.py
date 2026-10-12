@@ -60,6 +60,15 @@ class LeaseInUse(Exception):
     """The lease belongs to a running VM"""
 
 
+def _bmc_reconcile(db: Session) -> None:
+    """BMC emulators follow the groups' `bmc` members (never fails a group operation)"""
+    try:
+        from app.services import bmc_service
+        bmc_service.reconcile(db)
+    except Exception:
+        logger.exception("BMC emulators")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -246,6 +255,8 @@ class GroupService:
                 subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
             bgps.assign(db, spec, existing.router.bgp if existing else None, group_id, subnets)
         ipv6_service.assign(db, spec, existing, group_id)
+        from app.services import bmc_service
+        bmc_service.assign(db, spec, existing, group_id)
 
         try:
             spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
@@ -350,6 +361,7 @@ class GroupService:
             self.pin_uplink(db, group)
             self._sync_wg_key(db, group)
             wgs.reconcile(db)
+            _bmc_reconcile(db)
             progress(60)
 
             for i, member in enumerate(spec.members):
@@ -648,6 +660,7 @@ class GroupService:
             vm_service.sync_vms(db)
             self._sync_member_rows(db, group, spec)
             wgs.reconcile(db)
+            _bmc_reconcile(db)
             self._publish(group, "updated")
         return group
 
@@ -681,6 +694,7 @@ class GroupService:
                              + [p for p in old.address_pools if p.owner])
         new.owner = old.owner
         new.template = old.template  # set at creation from a template, never by a spec PUT
+        new.bmc = old.bmc  # assigned (bmc_service.assign)
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
         # egress / registry blocks left out (older clients) keep the stored ones; the registry's
         # read-back fields are the app's
@@ -1082,6 +1096,7 @@ class GroupService:
             from app.services import registry_service
             registry_service.forget(name)  # registry credentials / mirror records (the disk went with the router)
         wgs.reconcile(db)  # stops the group's WireGuard relay
+        _bmc_reconcile(db)  # and its BMC emulator
         event_bus.publish({"kind": "group", "event": "deleted", "id": group_id, "name": name})
         return True
 

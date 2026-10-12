@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     WG_RELAY_LISTEN: str = "0.0.0.0"
     # Host name / address put in client configs ("Endpoint"); empty = the host's primary LAN address
     WG_ENDPOINT_HOST: str = ""
+    # Emulated BMCs (Redfish, sushy-tools) of lab group members with `bmc`: one emulator per group on a TCP port
+    # of BMC_HOST_PORTS, listening on BMC_LISTEN (empty = the gateway address of the group's uplink network, e.g.
+    # 192.168.122.1). The group machines (an ACM hub's metal3) must reach it: scripts/setup.sh opens the range on
+    # the libvirt bridges (ufw / firewalld)
+    BMC_HOST_PORTS: str = "8180-8199"
+    BMC_LISTEN: str = ""
     # Tunnel subnets: the first free /24 of this range for each group
     WG_SUBNET_POOL: str = "10.44.0.0/16"
     # BGP announce ranges (addresses lab machines announce to their group router, e.g. a MetalLB BGP

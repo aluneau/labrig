@@ -5,6 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -442,3 +443,64 @@ def registry_ca(group_id: int, db: Session = Depends(get_db)):
     if not ca:
         raise HTTPException(status_code=404, detail="The registry CA is not known yet (set the registry up first)")
     return PlainTextResponse(ca, media_type="application/x-pem-file")
+
+
+# Emulated BMCs (Redfish, docs/openshift.md "Spoke machines (BMC)")
+
+class SpokeRequest(BaseModel):
+    """Empty-disk members with a BMC: machines an ACM hub can provision (BareMetalHost, virtual media)"""
+    count: int = Field(1, ge=1, le=8)
+    prefix: str = Field("spoke", pattern=r"^[a-z]([a-z0-9-]{0,20}[a-z0-9])?$")
+    memory: int = Field(16384, ge=2048)    # MiB (SNO minimum: 16 GiB)
+    vcpu: int = Field(8, ge=1, le=64)
+    disk_size: int = Field(120, ge=20, le=2048)  # GiB, thin
+
+
+@router.get("/{group_id}/bmc")
+def bmc_status(group_id: int, db: Session = Depends(get_db)):
+    """The group's Redfish emulator (address, running) and one redfish-virtualmedia:// address per BMC member"""
+    from app.services import bmc_service
+    return bmc_service.status(_group_or_404(db, group_id))
+
+
+@router.get("/{group_id}/bmc/credentials")
+def bmc_credentials(group_id: int, db: Session = Depends(get_db)):
+    """User / password of the group's BMCs (secret read)"""
+    from app.services import bmc_service
+    group = _group_or_404(db, group_id)
+    if not bmc_service.address(group.spec or {}):
+        raise HTTPException(status_code=400, detail="The group has no BMC member")
+    return bmc_service.credentials(group.name)
+
+
+@router.post("/{group_id}/bmc/spokes", response_model=GroupDetail, status_code=201)
+def add_spokes(group_id: int, data: SpokeRequest, db: Session = Depends(get_db)):
+    """Add `count` empty-disk members with a BMC (<prefix>-1, -2…), powered off: a hub provisions them through
+    their Redfish address (GET /groups/{id}/bmc)"""
+    from app.services import bmc_service
+    problem = bmc_service.available()
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    group = _group_or_404(db, group_id)
+    spec = GroupSpec.model_validate(group.spec)
+    names = {m.name for m in spec.members}
+    added, i = [], 1
+    while len(added) < data.count:
+        name = f"{data.prefix}-{i}"
+        i += 1
+        if name not in names:
+            added.append(MemberSpec(name=name, source="empty", memory=data.memory, vcpu=data.vcpu,
+                                    disk_size=data.disk_size, role="spoke", bmc=True))
+    spec.members += added
+    try:
+        group_service.update_group(db, group_id, spec)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from app.libvirt_client import libvirt_client
+    from app.services.group_service import member_vm_name
+    for m in added:  # nothing to boot yet: the hub powers them on with its discovery ISO
+        try:
+            libvirt_client.stop_vm(member_vm_name(group.name, m.name), force=True)
+        except Exception:
+            pass
+    return _detail(db, group_id)
