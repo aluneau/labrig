@@ -508,6 +508,9 @@ class AcmService:
         if not hub.api_ip:
             raise ValueError(f"Hub {hub.name} has no uplink address for its API")
         self.svc.get_kubeconfig(db, target)  # raises when none
+        self.svc._ensure_idle(hub)
+        # before any change: refused in plain words when the klusterlet couldn't reach the hub (a few seconds)
+        self._check_managed_to_hub(db, hub, target, hub.api_ip)
         self._save_entry(db, hub, target.name, cluster_id=target.id, cluster_type=target.type, state="importing",
                          method=None, message="Queued")
 
@@ -538,8 +541,6 @@ class AcmService:
             svc._check(task, hub, db, pct, f"{name}: {message}")
             self._save_entry(db, hub, name, message=message)
 
-        step(5, f"checking that it reaches the hub API ({hub_ip}:{port})")
-        self._check_managed_to_hub(db, hub, target, hub_ip)
         step(15, f"DNS: {self.hub_api_host(hub)} -> {hub_ip} on its side")
         self._publish_dns(db, hub, target, hub_ip)
         if target.group_id and target.group_id != hub.group_id:
