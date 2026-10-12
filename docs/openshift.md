@@ -174,6 +174,51 @@ its ManagedCluster from the hub; deleting the hub removes its DNS entries from t
   record from the managed group (the klusterlet can't renew its lease); detach and re-import with the other
   method (`"method": "secret"` / `"manifests"`).
 
+### Spoke machines (BMC) and provisioning a spoke
+
+At customers, the hub also **installs** clusters on bare-metal servers through their BMCs (iDRAC, iLO): metal3 /
+Ironic powers a server and boots it from a virtual-media ISO, the assisted installer does the rest (ZTP, GitOps
+`ClusterInstance` / `SiteConfig`, or the `ClusterDeployment` + `AgentClusterInstall` + `InfraEnv` +
+`BareMetalHost` objects underneath). The app emulates the BMCs:
+
+- **BMC members**: a lab group member with `bmc: true` (empty disk or ISO) gets a Redfish BMC from
+  **sushy-tools** running on the host (one process per group, started by the app), listening on the gateway of the
+  group's uplink network (e.g. `192.168.122.1`) on a port of `BMC_HOST_PORTS` (8180-8199), HTTP basic auth with
+  per-group credentials (`GET /groups/{id}/bmc/credentials`, never in the spec), and only the group's BMC members
+  visible (other VMs: 404). Group page → **BMC (Redfish)** tab: each machine's
+  `redfish-virtualmedia://192.168.122.1:8180/redfish/v1/Systems/<uuid>` address (copy it into a BareMetalHost's
+  `bmc.address`, with `disableCertificateVerification: true`), its boot MAC, and **Add spoke machines** (N empty
+  members `spoke-N`, 16 GiB / 8 vCPU / 120 GiB by default, created powered off: the hub powers them).
+  API: `GET /groups/{id}/bmc`, `POST /groups/{id}/bmc/spokes {count, memory, vcpu, disk_size}`; OpenTofu
+  `member { source = "empty", bmc = true }`.
+- The host firewall must let the group machines reach that port: `scripts/setup.sh` adds
+  `ufw allow in on virbr+ to any port 8180:8199 proto tcp` (firewalld: the ports in zone `libvirt`).
+- The emulator resolves the names under every lab cluster's zone (`api`, `*.apps`) to that cluster's router: it
+  downloads the hub's discovery ISO itself when metal3 inserts the virtual media.
+- sushy-tools is pip-installed in the app's venv by `setup.sh` (2.x needs Python ≥ 3.10; on RHEL 9 pip picks an
+  older 1.x). Without it the BMC tab says so and the rest of the app works.
+
+**Provision a spoke** (hub page → ACM → *Provision a spoke*, or `POST /clusters/{hub}/acm/spokes {name, machine}`):
+single-node OpenShift on a BMC member **of the hub's group** (it resolves and reaches the hub's routes through the
+same router). The task on the hub:
+
+1. **Central infrastructure management**, once: `Provisioning` (`provisioningNetwork: Disabled`,
+   `watchAllNamespaces: true`: metal3 on a hub installed with platform none) and `AgentServiceConfig` (assisted
+   service and image service; volumes on the hub's default StorageClass: LVMS).
+2. Records `api`, `api-int`, `*.apps.<spoke>.<domain>` → the machine's reserved IP on the group router.
+3. Namespace `<spoke>`: pull secret, BMC secret, `ClusterImageSet` (the hub's release by default),
+   `ClusterDeployment` + `AgentClusterInstall` (SNO, user-managed networking, machine network = group CIDR),
+   `InfraEnv`, `BareMetalHost` (`bootMode: legacy`, inspection disabled, `automatedCleaningMode: disabled`, label
+   `infraenvs.agent-install.openshift.io`), `ManagedCluster` + `KlusterletAddonConfig`.
+4. Waits: BareMetalHost registering → provisioned (the ISO inserted, the machine powered on), the agent
+   registering, the install (percentage), then the ManagedCluster Available. The spoke's kubeadmin kubeconfig:
+   `GET /clusters/{hub}/acm/spokes/{name}/kubeconfig`.
+
+Deleting a spoke (`DELETE /clusters/{hub}/acm/spokes/{name}`) removes those objects and powers the machine off; the
+machine stays for the next spoke. What to look at: `oc get bmh,infraenv,agent,agentclusterinstall -n <spoke>`,
+`oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
+`DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
+
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub
 subscribes MCE from the mirrored catalog (`installer.open-cluster-management.io/mce-subscription-spec`). Imports

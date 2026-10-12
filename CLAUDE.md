@@ -50,7 +50,9 @@ backend/app/
                       k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml),
                       log_service (VM logs + diagnostics via guest agent, pod logs, shared filter; rules in log_rules) +
                       kube_exec (kubectl / oc on a cluster: one path for MCP kubectl, pod logs and the MCP oc tool),
-                      acm (ACM hub add-on: operator + MultiClusterHub, sizing checks; managed cluster import / detach)
+                      acm (ACM hub add-on: operator + MultiClusterHub, sizing checks; managed cluster import / detach),
+                      acm_spokes (hub provisions SNO on BMC members: metal3 + assisted service, BMH virtual media),
+                      bmc_service (sushy-tools Redfish emulator per group, supervisor) + bmc_emulator (the process)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
@@ -277,6 +279,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   hub's router reaches the managed API, else the app applies the hub's `<name>-import` crds.yaml + import.yaml via
   `kube_exec.run_kubectl`; waits for Joined + Available. Detach = delete the ManagedCluster (hub removes the klusterlet)
   + DNS cleanup; `delete_cluster` calls `acm_service.forget` (managed: off its hub; hub: its DNS entries).
+- **Emulated BMCs** (docs/openshift.md "Spoke machines (BMC)"): member `bmc: true` (empty / iso only) -> spec.bmc
+  {port of `BMC_HOST_PORTS`, listen = uplink network gateway} assigned in normalize (`bmc_service.assign`, kept by
+  `_keep_owned`). One sushy-tools process per group (`python -m app.services.bmc_emulator <json>`, children of the
+  app, `reconcile(db)` DB-only at startup / group create-update-delete, stopped in lifespan): libvirt driver, htpasswd
+  (bcrypt) from `DATA_DIR/groups/<g>/bmc-auth.json`, allow file of VM names (+ their UUIDs, resolved in the process)
+  replacing sushy's `instance_denied`, getaddrinfo patched so lab cluster zones resolve to their router (virtual
+  media downloads). BMC members are not started with the group nor counted in its state. Needs the host firewall
+  rule from setup.sh (VM -> host TCP is dropped by ufw otherwise). Spokes (`acm_spokes`, entries
+  `spec.acm_spokes` of the hub): BMC member of the hub's group, SNO only, `ensure_cim` (Provisioning +
+  AgentServiceConfig), owned records `acm-spoke:<name>`.
 - **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
   `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
   `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into
