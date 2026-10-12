@@ -286,9 +286,13 @@ e2e/                  Playwright browser tests against the real app (see below)
   (bcrypt) from `DATA_DIR/groups/<g>/bmc-auth.json`, allow file of VM names (+ their UUIDs, resolved in the process)
   replacing sushy's `instance_denied`, getaddrinfo patched so lab cluster zones resolve to their router (virtual
   media downloads). BMC members are not started with the group nor counted in its state. Needs the host firewall
-  rule from setup.sh (VM -> host TCP is dropped by ufw otherwise). Spokes (`acm_spokes`, entries
-  `spec.acm_spokes` of the hub): BMC member of the hub's group, SNO only, `ensure_cim` (Provisioning +
-  AgentServiceConfig), owned records `acm-spoke:<name>`.
+  rule from setup.sh (VM -> host TCP is dropped by ufw otherwise). Spokes (`acm_spokes`): cluster rows with
+  `spec.openshift.provisioner {kind: acm, hub_id, hub_name, machine}` (one node = the BMC member of the hub's group,
+  SNO only; metadata on the machine VM for adoption); `ensure_cim` (Provisioning + AgentServiceConfig with the spoke's
+  x86_64 RHCOS only, hub router LBs 6180/6183 for Ironic's image server, which the emulator reaches through its
+  getaddrinfo redirect), records + API LB (6444+) owned `cluster:<spoke>`; kubeconfig from the hub's
+  `<spoke>-admin-kubeconfig`; `delete_cluster` goes through the hub and keeps the machine; a hub with spokes can't be
+  deleted. Every cluster read carries `acm` {role hub|managed|spoke, hub_id, hub_name, state} (`acm_service.relation`).
 - **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
   `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
   `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into

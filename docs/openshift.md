@@ -211,11 +211,15 @@ same router). The task on the hub:
    `InfraEnv`, `BareMetalHost` (`bootMode: legacy`, inspection disabled, `automatedCleaningMode: disabled`, label
    `infraenvs.agent-install.openshift.io`), `ManagedCluster` + `KlusterletAddonConfig`.
 4. Waits: BareMetalHost registering → provisioned (the ISO inserted, the machine powered on), the agent
-   registering, the install (percentage), then the ManagedCluster Available. The spoke's kubeadmin kubeconfig:
-   `GET /clusters/{hub}/acm/spokes/{name}/kubeconfig`.
+   registering, the install (percentage), then the ManagedCluster Available.
 
-Deleting a spoke (`DELETE /clusters/{hub}/acm/spokes/{name}`) removes those objects and powers the machine off; the
-machine stays for the next spoke. What to look at: `oc get bmh,infraenv,agent,agentclusterinstall -n <spoke>`,
+The spoke is a **cluster of the app** (Clusters page, label "spoke of <hub>"): `spec.openshift.provisioner = {kind:
+acm, hub_id, hub_name, machine}`, kubeconfig (the hub's `<spoke>-admin-kubeconfig`, pointed at a port the group
+router forwards to the spoke API, like the hub's own), kubeadmin password, logs and the MCP `oc` tool work as for any
+cluster. `DELETE /clusters/{id}` deletes it **through the hub** (ManagedCluster, ClusterDeployment, BareMetalHost) and
+powers the machine off; the machine stays for the next spoke. A hub with spokes can't be deleted (delete the spokes
+first). The machine VM carries the cluster metadata, so a lost DB adopts the spoke back. OpenTofu:
+`vmmanager_acm_spoke {hub_id, name, machine}` (exports `cluster_id`, `kubeconfig`). What to look at: `oc get bmh,infraenv,agent,agentclusterinstall -n <spoke>`,
 `oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
 `DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
 

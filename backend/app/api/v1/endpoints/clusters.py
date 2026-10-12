@@ -159,7 +159,8 @@ def acm_status(cluster_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{cluster_id}/acm/managed", response_model=Task)
 def acm_import(cluster_id: int, data: AcmImportRequest, db: Session = Depends(get_db)):
-    """Import another cluster of the app (kubeadm, k3s, OpenShift) into this ACM hub (task): ManagedCluster +
+    """Import another cluster of the app (kubeadm, k3s, OpenShift) into the ACM hub `cluster_id` (body cluster_id = the
+    cluster to import; a task on the hub): ManagedCluster +
     KlusterletAddonConfig, then auto-import-secret (when the hub reaches its API) or the import manifests applied
     by the app; waits for Joined + Available. Fails in plain words when the managed cluster can't reach the hub."""
     return _bad_request(acm_service.import_cluster, db, _get(db, cluster_id), data.cluster_id, data.method)
@@ -167,7 +168,8 @@ def acm_import(cluster_id: int, data: AcmImportRequest, db: Session = Depends(ge
 
 @router.delete("/{cluster_id}/acm/managed/{name}", response_model=Task)
 def acm_detach(cluster_id: int, name: str, db: Session = Depends(get_db)):
-    """Detach a managed cluster (deletes its ManagedCluster: the hub removes the klusterlet) (task)"""
+    """Detach the managed cluster `name` from the hub `cluster_id` (task on the hub): deletes its ManagedCluster, the
+    hub removes the klusterlet; a cluster that no longer reports gets its leftover finalizers removed"""
     return _bad_request(acm_service.detach, db, _get(db, cluster_id), name)
 
 
