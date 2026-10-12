@@ -88,14 +88,14 @@ resource "vmmanager_cluster" "hub" {
 
 # The managed cluster lives in its own lab group (one OpenShift cluster per group, and none with kubeadm)
 resource "vmmanager_cluster" "kadm" {
-  name           = "${var.name}-kadm"
-  type           = "kubeadm"
-  ctlplanes      = 1
-  workers        = 1
+  name            = "${var.name}-kadm"
+  type            = "kubeadm"
+  ctlplanes       = 1
+  workers         = 1
   ctlplane_memory = 4096
   worker_memory   = 4096
-  cloud_image_id = vmmanager_cloud_image.debian.id
-  depends_on     = [vmmanager_cloud_image.alma]
+  cloud_image_id  = vmmanager_cloud_image.debian.id
+  depends_on      = [vmmanager_cloud_image.alma]
 }
 
 # Waits until the ManagedCluster is Joined and Available; destroy detaches it (the hub removes the klusterlet)
