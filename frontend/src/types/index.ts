@@ -555,6 +555,20 @@ export interface AcmManagedCluster {
   conditions: { type: string; status: string; reason?: string; message?: string }[];
 }
 
+export interface AcmSpoke {
+  name: string;
+  machine: string;
+  group_id?: number;
+  version?: string;
+  state: string; // pending | provisioning | installed | error
+  message?: string | null;
+  ip?: string | null;
+  bmh_state?: string | null;
+  install_state?: string | null;
+  progress?: number | null;
+  console_url?: string | null;
+}
+
 export interface AcmStatus {
   enabled: boolean;
   state?: string | null; // add-on state
@@ -567,6 +581,8 @@ export interface AcmStatus {
   sizing?: string | null;
   managed: AcmManagedCluster[];
   importable: { id: number; name: string; type: string; status: string; note?: string | null }[];
+  spokes: AcmSpoke[];
+  spoke_machines: { name: string; memory: number; vcpu: number }[];
   error?: string | null;
 }
 
@@ -777,6 +793,18 @@ export interface MemberSpec {
   mac?: string | null;
   cloud_init?: GroupCloudInit | null;
   user_data?: string | null;
+  bmc?: boolean; // emulated BMC (Redfish): empty / iso members only
+}
+
+/** GET /groups/{id}/bmc */
+export interface BmcStatus {
+  enabled: boolean;
+  address?: string | null; // listen:port of the group's emulator
+  running: boolean;
+  username?: string | null;
+  members: { name: string; vm: string; uuid?: string | null; mac?: string | null; ip?: string | null; redfish_url?: string | null }[];
+  error?: string | null;
+  firewall?: string | null;
 }
 
 export interface RouterSpec {

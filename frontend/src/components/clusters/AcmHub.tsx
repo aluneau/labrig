@@ -20,6 +20,7 @@ import {
   Spinner,
   Stack,
   StackItem,
+  TextInput,
 } from '@patternfly/react-core';
 import { ExternalLinkAltIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
@@ -47,6 +48,9 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [busy, setBusy] = useState(false);
   const [detach, setDetach] = useState<AcmManagedCluster | null>(null);
   const [confirmEnable, setConfirmEnable] = useState(false);
+  const [spokeMachine, setSpokeMachine] = useState('');
+  const [spokeName, setSpokeName] = useState('');
+  const [deleteSpoke, setDeleteSpoke] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -58,7 +62,8 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   }, [cluster.id]);
 
   const moving = !!acm && (['pending', 'installing'].includes(acm.state || '')
-    || acm.managed.some((m) => ['importing', 'detaching'].includes(m.state)));
+    || acm.managed.some((m) => ['importing', 'detaching'].includes(m.state))
+    || acm.spokes.some((s) => ['pending', 'provisioning'].includes(s.state)));
   useEffect(() => {
     load();
     const timer = setInterval(() => { if (!document.hidden) load(); }, moving ? 10000 : 30000);
@@ -215,6 +220,80 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
         </StackItem>
       )}
 
+      {acm.enabled && (
+        <StackItem>
+          <Card id="acm-spokes">
+            <CardHeader><CardTitle>Provision a spoke (bare metal, BMC)</CardTitle></CardHeader>
+            <CardBody>
+              <div style={{ ...muted, marginBottom: 12 }}>
+                The hub installs a single-node OpenShift on a <em>spoke machine</em> of its lab group (group page → BMC
+                tab → Add spoke machines): metal3 boots the machine from the discovery ISO through its emulated BMC
+                (Redfish virtual media), the assisted service installs it, ACM imports it. Same objects as a customer&apos;s
+                ZTP: ClusterDeployment, AgentClusterInstall, InfraEnv, BareMetalHost.
+              </div>
+              <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: 12 }}>
+                <FlexItem>
+                  <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 220 }}
+                    onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
+                    <FormSelectOption value="" label={acm.spoke_machines.length ? 'Spoke machine…' : 'No free spoke machine in the group'} isPlaceholder />
+                    {acm.spoke_machines.map((m) => (
+                      <FormSelectOption key={m.name} value={m.name} label={`${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
+                    ))}
+                  </FormSelect>
+                </FlexItem>
+                <FlexItem>
+                  <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
+                    value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
+                </FlexItem>
+                <FlexItem>
+                  <Button id="acm-spoke-create" isDisabled={!spokeMachine || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName)
+                    || !hubUp || !ready || busy || cluster.task_running}
+                    onClick={() => run(async () => { await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine); setSpokeName(''); setSpokeMachine(''); })}>
+                    Provision
+                  </Button>
+                </FlexItem>
+              </Flex>
+              {!!acm.spokes.length && (
+                <Table aria-label="Spokes" variant="compact" id="acm-spokes-table">
+                  <Thead><Tr><Th>Spoke</Th><Th>Machine</Th><Th>State</Th><Th>BareMetalHost</Th><Th>Install</Th><Th screenReaderText="Actions" /></Tr></Thead>
+                  <Tbody>
+                    {acm.spokes.map((s) => (
+                      <Tr key={s.name} id={`acm-spoke-${s.name}`}>
+                        <Td dataLabel="Spoke">
+                          {s.name}
+                          {s.message && <div style={muted}>{s.message}</div>}
+                          {s.state === 'installed' && (
+                            <div>
+                              <Button variant="link" isInline component="a" href={clusterApi.acmSpokeKubeconfigUrl(cluster.id, s.name)}>kubeconfig</Button>
+                              {' · '}<a href={s.console_url || undefined} target="_blank" rel="noreferrer">console</a>
+                            </div>
+                          )}
+                        </Td>
+                        <Td dataLabel="Machine">{s.machine}{s.ip ? ` (${s.ip})` : ''}</Td>
+                        <Td dataLabel="State"><Label isCompact color={s.state === 'installed' ? 'green' : s.state === 'error' ? 'red' : 'blue'}>{s.state}</Label></Td>
+                        <Td dataLabel="BareMetalHost">{s.bmh_state || '—'}</Td>
+                        <Td dataLabel="Install">{s.install_state ? `${s.install_state}${s.progress != null ? ` ${s.progress}%` : ''}` : '—'}</Td>
+                        <Td isActionCell>
+                          <ActionsColumn isDisabled={busy || cluster.task_running || !ready} items={[
+                            { title: 'Delete spoke', onClick: () => setDeleteSpoke(s.name) },
+                          ]} />
+                        </Td>
+                      </Tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              )}
+            </CardBody>
+          </Card>
+        </StackItem>
+      )}
+
+      <ConfirmModal title={`Delete spoke ${deleteSpoke}?`} isOpen={!!deleteSpoke} danger confirmLabel="Delete"
+        onConfirm={() => (deleteSpoke ? run(() => clusterApi.acmSpokeDelete(cluster.id, deleteSpoke)) : undefined)}
+        onClose={() => setDeleteSpoke(null)}>
+        Deletes the spoke&apos;s ManagedCluster, ClusterDeployment and BareMetalHost on the hub and powers its machine
+        off. The machine (group member) stays, ready for another spoke.
+      </ConfirmModal>
       <ConfirmModal title="Enable ACM?" isOpen={confirmEnable} confirmLabel="Enable"
         onConfirm={() => run(() => clusterApi.addAddon(cluster.id, { kind: 'acm' }))} onClose={() => setConfirmEnable(false)}>
         Installs Advanced Cluster Management and a MultiClusterHub (10–20 minutes). It can&apos;t be removed from the app afterwards.

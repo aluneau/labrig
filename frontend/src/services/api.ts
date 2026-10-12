@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -154,6 +154,10 @@ export const networkApi = {
 
 export const groupApi = {
   list: () => request<Group[]>('/groups'),
+  bmc: (id: number) => request<BmcStatus>(`/groups/${id}/bmc`),
+  bmcCredentials: (id: number) => request<{ username: string; password: string }>(`/groups/${id}/bmc/credentials`),
+  addSpokes: (id: number, data: { count: number; memory: number; vcpu: number; disk_size: number; prefix?: string }) =>
+    post<GroupDetail>(`/groups/${id}/bmc/spokes`, data),
   get: (id: number) => request<GroupDetail>(`/groups/${id}`),
   create: (spec: GroupSpec) => post<{ group: Group; task_id: number }>('/groups', spec),
   update: (id: number, spec: GroupSpec) =>
@@ -255,6 +259,11 @@ export const clusterApi = {
   acmImport: (id: number, clusterId: number, method: 'auto' | 'secret' | 'manifests' = 'auto') =>
     post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
   acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
+  acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
+    post<Task>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
+  acmSpokeDelete: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/spokes/${encodeURIComponent(name)}`),
+  acmSpokeKubeconfigUrl: (id: number, name: string) =>
+    `${API_BASE}/api/v1/clusters/${id}/acm/spokes/${encodeURIComponent(name)}/kubeconfig`,
 };
 
 export const openshiftApi = {

@@ -42,6 +42,7 @@ import { imageSlug } from '../components/groups/CreateGroupModal';
 import { GroupDhcp } from '../components/groups/GroupDhcp';
 import { GroupBgp } from '../components/groups/GroupBgp';
 import { GroupRegistry } from '../components/groups/GroupRegistry';
+import { GroupBmc } from '../components/groups/GroupBmc';
 import { GroupIpv6 } from '../components/groups/GroupIpv6';
 import { GroupDnsSettings } from '../components/groups/GroupDnsSettings';
 import { GroupMtu } from '../components/groups/GroupMtu';
@@ -507,6 +508,9 @@ export const GroupDetailPage: React.FC = () => {
 
           <Tab eventKey="registry" title={<TabTitleText>Registry &amp; egress</TabTitleText>}>
             <PageSection variant="light"><GroupRegistry group={group} onDone={onDone} onError={onError} /></PageSection>
+          </Tab>
+          <Tab eventKey="bmc" title={<TabTitleText>BMC (Redfish)</TabTitleText>} id="group-tab-bmc">
+            <PageSection variant="light"><GroupBmc group={group} onDone={onDone} onError={onError} /></PageSection>
           </Tab>
           <Tab eventKey="router" title={<TabTitleText>Router</TabTitleText>}>
             <PageSection variant="light"><RouterTab group={group} onError={onError} onDone={onDone} /></PageSection>
