@@ -88,6 +88,7 @@ type openshiftModel struct {
 	MetalLBDemo     types.Bool   `tfsdk:"metallb_demo"`
 	MetalLBMode     types.String `tfsdk:"metallb_mode"`
 	MetalLBBFD      types.Bool   `tfsdk:"metallb_bfd"`
+	ACM             types.Bool   `tfsdk:"acm"`
 	DisableUpdates  types.Bool   `tfsdk:"disable_updates"`
 	Disconnected    types.Bool   `tfsdk:"disconnected"`
 }
@@ -261,6 +262,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"metallb_demo":      liveBool("Deploy the MetalLB lab demo (hello.<group domain>), default true."),
 					"metallb_mode":      liveStr("l2 (default: pool in the group network, ARP) or bgp (a /27 announced to the group router over BGP, ECMP; enables BGP on the router)."),
 					"disable_updates":   osBool("Clear the update channel (default true)."),
+					"acm":               liveBool("Red Hat Advanced Cluster Management hub: ACM operator (+ multicluster engine) and a MultiClusterHub (availability Basic). Needs ~12 GiB / 4 vCPU above OpenShift's minimum (default sizes are raised at creation). Enabled in place on an installed cluster; can't be disabled. Import clusters with vmmanager_acm_managed_cluster."),
 					"metallb_bfd":       liveBool("metallb_mode = bgp: BFD on the group router and a MetalLB BFDProfile (a dead node's routes are withdrawn in < 1 s instead of the 30 s hold time)."),
 					"disconnected":      osBool("Disconnected install (default false): the group router runs a mirror registry (8 GiB RAM, 4 vCPUs, 250 GiB disk) filled by oc-mirror with the release + the add-ons' operators, the group's egress is blocked before the nodes boot, the cluster pulls from the mirror only. The first mirror downloads ~20+ GB."),
 				},
@@ -446,6 +448,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 			}
 			if !os.DisableUpdates.IsNull() && !os.DisableUpdates.IsUnknown() {
 				opts["disable_updates"] = os.DisableUpdates.ValueBool()
+			}
+			if !os.ACM.IsNull() && !os.ACM.IsUnknown() {
+				opts["acm"] = os.ACM.ValueBool()
 			}
 			if !os.Disconnected.IsNull() && !os.Disconnected.IsUnknown() {
 				opts["disconnected"] = os.Disconnected.ValueBool()
@@ -850,6 +855,10 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 		m.MetalLBMode = types.StringValue("l2")
 	}
 	m.DisableUpdates = flag(o["disable_updates"])
+	m.ACM = flag(o["acm"])
+	if m.ACM.IsNull() {
+		m.ACM = types.BoolValue(false)
+	}
 	m.Disconnected = flag(o["disconnected"])
 	if m.Disconnected.IsNull() {
 		m.Disconnected = types.BoolValue(false)
@@ -952,6 +961,14 @@ func (r *clusterResource) openshiftAddons(ctx context.Context, id string, old, c
 		if !addon(map[string]any{"kind": "metallb-demo"}, "the MetalLB demo") {
 			return false
 		}
+	}
+	acmWas, acmIs := on(old.ACM, false), on(cur.ACM, false)
+	if acmWas && !acmIs {
+		d.AddError("Disabling ACM is not supported", "uninstall it in the cluster, or recreate the cluster")
+		return false
+	}
+	if acmIs && !acmWas && !addon(map[string]any{"kind": "acm"}, "ACM") {
+		return false
 	}
 	return true
 }
