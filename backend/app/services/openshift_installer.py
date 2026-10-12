@@ -41,7 +41,7 @@ from app.schemas.registry import MirrorRequest, OperatorCatalog, OperatorPackage
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
-from app.services import metallb
+from app.services import acm, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
 from app.services.openshift_service import CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
@@ -259,6 +259,10 @@ class OpenShiftInstaller:
             if not given and role in roles:
                 res["memory"] += ODF_EXTRA[opts.odf_profile]["memory"]
                 res["vcpu"] += ODF_EXTRA[opts.odf_profile]["vcpu"]
+            if not given and opts.acm and (role == "worker" or not counts["workers"]):
+                # ACM hub: the nodes that run it get its documented reservation on top
+                for k, v in acm.HUB_DEFAULTS[kind].items():
+                    res[k] = max(res[k], v)
             if role == "ctlplane" or counts["workers"]:
                 low = [f"{k} {res[k]} < {v}" for k, v in MINIMUMS[kind].items() if res[k] < v]
                 if low:
@@ -267,6 +271,10 @@ class OpenShiftInstaller:
                                      + ", ".join(f"{k} {res[k]} {unit[k]} (minimum {MINIMUMS[kind][k]})"
                                                  for k in MINIMUMS[kind] if res[k] < MINIMUMS[kind][k]))
             result[role] = res
+        if opts.acm:
+            problem = acm.sizing_problem(opts.topology, counts, result)
+            if problem:
+                raise ValueError(problem)
         return result
 
     @staticmethod
@@ -465,6 +473,8 @@ class OpenShiftInstaller:
             wanted.setdefault("redhat-operators", []).append("sriov-network-operator")
         if opts.metallb.enabled:
             wanted.setdefault("redhat-operators", []).append("metallb-operator")
+        if opts.acm:  # + multicluster-engine (operator_closure: RUNTIME_DEPENDENCIES)
+            wanted.setdefault("redhat-operators", []).append(acm.PACKAGE)
         mirrored = {name: source for source, name in self.catalog_sources(cluster).items()}
         for op in opts.operators:
             # picked from the cluster's (mirrored) catalog: cs-redhat-operator-index-v4-20 -> redhat-operators
@@ -966,7 +976,10 @@ class OpenShiftInstaller:
             plan.append(("metallb", "metallb-operator"))
             if opts.metallb.demo:
                 plan.append(("metallb-demo", "hello"))
-        managed = {"lvms-operator", "odf-operator", "local-storage-operator", "sriov-network-operator", "metallb-operator"}
+        if opts.acm:
+            plan.append(("acm", acm.PACKAGE))
+        managed = {"lvms-operator", "odf-operator", "local-storage-operator", "sriov-network-operator", "metallb-operator",
+                   acm.PACKAGE, acm.MCE_PACKAGE}
         plan += [("operator", o.name) for o in opts.operators if o.name not in managed]
         for kind, name in plan:
             self._set_addon(db, cluster, kind, name, "pending")
@@ -1027,6 +1040,11 @@ class OpenShiftInstaller:
             self._update_spec(db, cluster, openshift={**os_spec, "metallb": {**os_spec.get("metallb", {}),
                                                                                "demo": True, "service_ip": ip,
                                                                                "hostname": hostname}})
+        elif kind == "acm":
+            # non-OpenShift managed clusters pull the klusterlet from registry.redhat.io with the hub's pull
+            # secret (MultiClusterHub imagePullSecret); a disconnected hub has only its mirror's credentials
+            runner.acm(None if opts.disconnected else openshift_service.pull_secret(),
+                       runner.sources.get("redhat-operators"))
         elif kind == "operator":
             req = next((o for o in opts.operators if o.name == name), None)
             ns = runner.install_operator(name, req.channel if req else None, req.source if req else None,
@@ -1091,6 +1109,17 @@ class OpenShiftInstaller:
             if not (os_spec.get("metallb") or {}).get("pool"):
                 raise ValueError("Enable MetalLB first")
             name = "hello"
+        elif kind == "acm":
+            spec = cluster.spec or {}
+            counts = {"masters": int(spec.get("ctlplanes") or 1), "workers": int(spec.get("workers") or 0)}
+            problem = acm.sizing_problem(os_spec.get("topology") or "sno", counts,
+                                         {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
+            problem = problem or acm.live_headroom_problem(AddonRunner(cluster.name, cluster.version, time.sleep,
+                                                                       lambda m: None))
+            if problem:
+                raise ValueError(problem)
+            os_spec["acm"] = True
+            name = acm.PACKAGE
         else:
             raise ValueError(f"Unknown add-on {kind}")
         self._update_spec(db, cluster, openshift=os_spec)

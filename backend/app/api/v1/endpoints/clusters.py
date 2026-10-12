@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
-from app.schemas.openshift import AddonRequest, MetalLBOptions, MetalLBScenario
+from app.schemas.openshift import AcmImportRequest, AcmStatus, AddonRequest, MetalLBOptions, MetalLBScenario
 from app.schemas.cluster import ClusterMirrorRequest
 from app.services import kube_exec
+from app.services.acm import acm_service
 from app.services.cluster_service import cluster_service
 
 router = APIRouter()
@@ -144,6 +145,30 @@ def set_metallb(cluster_id: int, data: MetalLBOptions, db: Session = Depends(get
         return _bad_request(openshift_installer.add_addon, db, cluster, AddonRequest(kind="metallb", metallb=data))
     from app.services import kubeadm_metallb
     return _bad_request(kubeadm_metallb.set_options, db, cluster, data)
+
+
+@router.get("/{cluster_id}/acm", response_model=AcmStatus)
+def acm_status(cluster_id: int, db: Session = Depends(get_db)):
+    """ACM hub (OpenShift add-on `acm`): MultiClusterHub phase, console link, managed clusters with their
+    ManagedCluster conditions (Joined / Available), clusters of the app that can be imported"""
+    cluster = _get(db, cluster_id)
+    if cluster.type != "openshift":
+        raise HTTPException(status_code=400, detail=f"{cluster.name} is a {cluster.type} cluster: an ACM hub is OpenShift")
+    return _bad_request(acm_service.status, db, cluster)
+
+
+@router.post("/{cluster_id}/acm/managed", response_model=Task)
+def acm_import(cluster_id: int, data: AcmImportRequest, db: Session = Depends(get_db)):
+    """Import another cluster of the app (kubeadm, k3s, OpenShift) into this ACM hub (task): ManagedCluster +
+    KlusterletAddonConfig, then auto-import-secret (when the hub reaches its API) or the import manifests applied
+    by the app; waits for Joined + Available. Fails in plain words when the managed cluster can't reach the hub."""
+    return _bad_request(acm_service.import_cluster, db, _get(db, cluster_id), data.cluster_id, data.method)
+
+
+@router.delete("/{cluster_id}/acm/managed/{name}", response_model=Task)
+def acm_detach(cluster_id: int, name: str, db: Session = Depends(get_db)):
+    """Detach a managed cluster (deletes its ManagedCluster: the hub removes the klusterlet) (task)"""
+    return _bad_request(acm_service.detach, db, _get(db, cluster_id), name)
 
 
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers

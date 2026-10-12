@@ -1186,6 +1186,8 @@ class ClusterService:
             if not task_service.wait(cluster.task_id, 60):
                 raise ValueError("The cluster task did not stop in time, try again")
             db.refresh(cluster)
+        from app.services.acm import acm_service
+        acm_service.forget(db, cluster)  # ACM: off its hub / a hub's DNS entries on its managed clusters
         network = network_for(cluster)
         for node in list(cluster.nodes):
             if not network.owned and not network.fronts_api:

@@ -59,6 +59,10 @@ class OpenShiftOptions(BaseModel):
     operators: List[OperatorRequest] = []
     sriov: SriovOptions = SriovOptions()
     metallb: MetalLBOptions = MetalLBOptions()
+    # Red Hat Advanced Cluster Management hub (docs/openshift.md "ACM hub"): the ACM operator (it installs the
+    # multicluster engine) + a MultiClusterHub (availabilityConfig Basic); other clusters of the app are imported
+    # with POST /clusters/{id}/acm/managed
+    acm: bool = False
     # Stop offering updates (clusterversion channel cleared)
     disable_updates: bool = True
     # Disconnected install (create time only, docs/disconnected.md): the group router runs a mirror
@@ -108,7 +112,7 @@ class CatalogOperator(BaseModel):
     source: str = "redhat-operators"
     category: str = "Other"
     # The app also configures it (CR, storage class, sample objects) when selected through an option
-    managed_by: Optional[str] = None  # "storage:lvms" | "storage:odf" | "sriov" | "metallb"
+    managed_by: Optional[str] = None  # "storage:lvms" | "storage:odf" | "sriov" | "metallb" | "acm"
     min_nodes: int = 1
 
 
@@ -143,7 +147,7 @@ class ClusterCredentials(BaseModel):
 
 class AddonRequest(BaseModel):
     """Day-2: enable an add-on on an installed cluster"""
-    kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo"]
+    kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo", "acm"]
     operator: Optional[OperatorRequest] = None
     sriov: Optional[SriovOptions] = None
     metallb: Optional[MetalLBOptions] = None
@@ -203,3 +207,42 @@ class InstallStatus(BaseModel):
     version: Optional[str] = None
     cluster_operators: List[ClusterOperatorStatus] = []
     addons: List[Dict[str, Any]] = []    # [{kind, name, state: pending|installing|done|error, message}]
+
+
+class AcmImportRequest(BaseModel):
+    """Import another cluster of the app into an ACM hub"""
+    cluster_id: int
+    # auto: auto-import-secret when the hub reaches the cluster's API, else the app applies the import manifests
+    # itself; secret / manifests: force one of them
+    method: Literal["auto", "secret", "manifests"] = "auto"
+
+
+class AcmManagedCluster(BaseModel):
+    name: str                            # ManagedCluster name (= the app cluster's name)
+    cluster_id: Optional[int] = None     # app cluster (None: imported by hand on the hub)
+    cluster_type: Optional[str] = None   # kubeadm | k3s | openshift
+    state: str = "unknown"               # importing | available | unavailable | detaching | error | unknown
+    method: Optional[str] = None         # secret (auto-import-secret) | manifests (applied by the app)
+    message: Optional[str] = None
+    joined: Optional[bool] = None        # ManagedClusterJoined
+    available: Optional[bool] = None     # ManagedClusterConditionAvailable (None = Unknown)
+    hub_accepted: Optional[bool] = None
+    kubernetes_version: Optional[str] = None
+    vendor: Optional[str] = None
+    conditions: List[Dict[str, Any]] = []
+
+
+class AcmStatus(BaseModel):
+    """ACM tab of an OpenShift cluster: hub state + managed clusters"""
+    enabled: bool = False
+    state: Optional[str] = None          # add-on: pending | installing | done | error
+    message: Optional[str] = None
+    hub_phase: Optional[str] = None      # MultiClusterHub status.phase (Running...)
+    hub_version: Optional[str] = None
+    mce_phase: Optional[str] = None
+    console_url: Optional[str] = None    # OpenShift console, "All Clusters" perspective
+    hub_api: Optional[str] = None        # what klusterlets connect to
+    sizing: Optional[str] = None         # plain words when the cluster is too small for a hub
+    managed: List[AcmManagedCluster] = []
+    importable: List[Dict[str, Any]] = []  # [{id, name, type, status, note}]
+    error: Optional[str] = None

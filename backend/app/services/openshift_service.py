@@ -61,6 +61,9 @@ CATALOG: List[Dict[str, Any]] = [
      "managed_by": "sriov", "description": "VFs as secondary pod networks (emulated igb NICs in this lab)."},
     {"name": "metallb-operator", "display_name": "MetalLB", "category": "Networking", "managed_by": "metallb",
      "description": "LoadBalancer Services on bare metal: L2 (ARP) or BGP announcements."},
+    {"name": "advanced-cluster-management", "display_name": "Advanced Cluster Management", "category": "Multicluster",
+     "managed_by": "acm", "description": "ACM hub: manage other clusters (import, policies, applications). Pulls the "
+     "multicluster engine; needs 12 GiB and 4 vCPU more than OpenShift alone."},
     {"name": "kubernetes-nmstate-operator", "display_name": "Kubernetes NMState", "category": "Networking",
      "description": "Declarative node network configuration (NodeNetworkConfigurationPolicy)."},
     {"name": "kubevirt-hyperconverged", "display_name": "OpenShift Virtualization", "category": "Virtualization",
@@ -96,9 +99,10 @@ CATALOG_INDEXES = {"redhat-operators": "redhat-operator-index", "certified-opera
 CATALOG_CACHE_TTL = 7 * 24 * 3600
 CATALOG_TIMEOUT = 20 * 60
 # Subscriptions an operator creates itself at run time (not declared in its bundle): mirrored with it
-RUNTIME_DEPENDENCIES = {"odf-operator": ["odf-dependencies"]}
+# (ACM's MultiClusterHub operator subscribes to multicluster-engine itself)
+RUNTIME_DEPENDENCIES = {"odf-operator": ["odf-dependencies"], "advanced-cluster-management": ["multicluster-engine"]}
 # When the catalog can't be read: what redhat-operator-index v4.20 resolves to
-FALLBACK_DEPENDENCIES = {"odf-operator": [
+FALLBACK_DEPENDENCIES = {"advanced-cluster-management": ["multicluster-engine"], "odf-operator": [
     "odf-dependencies", "ocs-operator", "mcg-operator", "ocs-client-operator", "odf-csi-addons-operator",
     "odf-external-snapshotter-operator", "odf-prometheus-operator", "recipe", "rook-ceph-operator", "cephcsi-operator"]}
 
