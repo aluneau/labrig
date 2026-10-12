@@ -420,6 +420,8 @@ export interface Cluster {
   nodes: ClusterNode[];
   created_at: string;
   updated_at: string;
+  // ACM relationship (GET /clusters/{hub_id}/acm for the details)
+  acm?: { role: 'hub' | 'managed' | 'spoke'; hub_id?: number | null; hub_name?: string | null; state?: string | null } | null;
 }
 
 // OpenShift (backend/app/schemas/openshift.py)
@@ -555,12 +557,13 @@ export interface AcmManagedCluster {
   conditions: { type: string; status: string; reason?: string; message?: string }[];
 }
 
+/** A spoke = a cluster of the app (id) provisioned by the hub */
 export interface AcmSpoke {
+  id: number;
   name: string;
   machine: string;
-  group_id?: number;
   version?: string;
-  state: string; // pending | provisioning | installed | error
+  state: string; // the cluster's status: provisioning | ready | error | stopped
   message?: string | null;
   ip?: string | null;
   bmh_state?: string | null;

@@ -1,25 +1,33 @@
 """ACM hub provisions a single-node OpenShift "spoke" on emulated bare metal (docs/openshift.md "Provision a spoke").
 
-The machine is a BMC member of the hub's lab group (bmc_service: Redfish emulator on the host), so it resolves and
-reaches the hub's routes through the group router like the hub itself. On the hub (central infrastructure
-management, the customer's ZTP building blocks):
+A spoke is a cluster of the app like the others (a `clusters` row, type openshift, in the hub's lab group) whose
+`spec.openshift.provisioner = {kind: acm, hub_id, hub_name, machine}`: kubeconfig, logs, the MCP oc tool, the
+Clusters list work as usual. Its one node is a BMC member of the hub's group (bmc_service: Redfish emulator on the
+host), so it resolves and reaches the hub's routes through the group router like the hub itself. On the hub
+(central infrastructure management, the customer's ZTP building blocks):
   Provisioning (metal3 on a non-bare-metal hub: provisioningNetwork Disabled, watchAllNamespaces) +
   AgentServiceConfig (assisted service, volumes on the hub's default StorageClass), then per spoke:
   Namespace, pull secret, BMC secret, ClusterImageSet, ClusterDeployment + AgentClusterInstall (SNO, user-managed
   networking), InfraEnv, BareMetalHost (redfish-virtualmedia, bootMode legacy, inspection off: the assisted
   agent reports the hardware), ManagedCluster + KlusterletAddonConfig (imported once installed).
-metal3 inserts the InfraEnv's discovery ISO through the BMC (virtual media) and powers the machine on; the agent
-registers, the BareMetalHost agent controller approves it and the assisted service installs. The group router serves
-api / api-int / *.apps.<spoke>.<domain> -> the machine (owned records "acm-spoke:<name>").
+metal3 inserts the discovery ISO through the BMC (virtual media) and powers the machine on; the agent registers,
+the assisted service installs. The group router serves api / api-int / *.apps.<spoke>.<domain> -> the machine and
+forwards a free port (6444...) of its uplink address to the spoke API: the host's kubeconfig (from the hub's
+<spoke>-admin-kubeconfig secret) points there (tls-server-name api.<spoke>.<domain>), like the hub's.
+The machine VM carries the cluster metadata (provisioner acm, hub), so sync_clusters adopts the spoke back.
+Deleting the spoke goes through the hub (ClusterDeployment, BareMetalHost, ManagedCluster); the machine stays.
 """
+import base64
 import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import quoteattr
 
 from sqlalchemy.orm import Session
 
-from app.models import Cluster, Group, Task
+from app.libvirt_client import libvirt_client
+from app.models import Cluster, ClusterNode, Group, Task
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +38,10 @@ DISCOVERY_TIMEOUT = 40 * 60
 INSTALL_TIMEOUT = 150 * 60
 
 
-def owner(name: str) -> str:
-    return f"acm-spoke:{name}"
+def provisioner(cluster: Cluster) -> Optional[Dict[str, Any]]:
+    """{kind: acm, hub_id, hub_name, machine} for a spoke provisioned by an ACM hub"""
+    p = (((cluster.spec or {}).get("openshift") or {}).get("provisioner"))
+    return p if isinstance(p, dict) and p.get("kind") == "acm" else None
 
 
 class SpokeService:
@@ -45,25 +55,18 @@ class SpokeService:
         from app.services.cluster_service import cluster_service
         return cluster_service
 
-    @staticmethod
-    def _entries(hub: Cluster) -> List[Dict[str, Any]]:
-        return [dict(e) for e in (hub.spec or {}).get("acm_spokes") or []]
+    @property
+    def installer(self):
+        from app.services.openshift_installer import openshift_installer
+        return openshift_installer
 
-    def _save(self, db: Session, hub: Cluster, name: str, **values: Any) -> None:
-        db.refresh(hub)
-        entries = self._entries(hub)
-        entry = next((e for e in entries if e["name"] == name), None)
-        if entry is None:
-            entry = {"name": name}
-            entries.append(entry)
-        entry.update(values)
-        self.acm.installer._update_spec(db, hub, acm_spokes=entries)
-        self.svc._publish(hub)
+    def spokes_of(self, db: Session, hub: Cluster) -> List[Cluster]:
+        return [c for c in db.query(Cluster).filter(Cluster.type == "openshift").all()
+                if (provisioner(c) or {}).get("hub_id") == hub.id]
 
-    def _drop(self, db: Session, hub: Cluster, name: str) -> None:
-        db.refresh(hub)
-        self.acm.installer._update_spec(db, hub, acm_spokes=[e for e in self._entries(hub) if e["name"] != name])
-        self.svc._publish(hub)
+    def hub_of(self, db: Session, spoke: Cluster) -> Optional[Cluster]:
+        p = provisioner(spoke)
+        return self.svc.get_cluster(db, p["hub_id"]) if p else None
 
     # ------------------------------------------------------------------------------------------------ hub side
 
@@ -142,25 +145,28 @@ class SpokeService:
 
     # ------------------------------------------------------------------------------------------------ spoke
 
-    def provision(self, db: Session, hub: Cluster, name: str, machine: str, version: Optional[str]) -> Task:
+    def provision(self, db: Session, hub: Cluster, name: str, machine: str, version: Optional[str]) -> Cluster:
+        """POST /clusters/{hub}/acm/spokes: the spoke's cluster row + its provisioning task"""
         from app.services import bmc_service
+        from app.services.group_service import member_vm_name
         from app.services.openshift_service import openshift_service
+        from app.schemas import TaskCreate
+        from app.services.task_service import task_service
         if not self.acm.is_hub(hub) or self.acm._addon(hub).get("state") != "done":
             raise ValueError(f"ACM is not installed on {hub.name}: enable it first")
         if self.svc.to_dict(db, hub)["status"] != "ready":
             raise ValueError(f"Hub {hub.name} is not ready")
-        if any(e["name"] == name for e in self._entries(hub)) \
-                or db.query(Cluster).filter(Cluster.name == name).first() is not None:
+        if db.query(Cluster).filter(Cluster.name == name).first() is not None:
             raise ValueError(f"A cluster named {name} already exists")
         group = db.query(Group).filter(Group.id == hub.group_id).first()
-        spec = group.spec or {}
-        member = next((m for m in spec.get("members") or [] if m["name"] == machine), None)
+        gspec = group.spec or {}
+        member = next((m for m in gspec.get("members") or [] if m["name"] == machine), None)
         if member is None or not member.get("bmc"):
             raise ValueError(f"{machine} is not a BMC member of the hub's group {group.name}: add spoke machines "
-                             "first (group page, Spoke machines for the hub)")
+                             "first (group page, BMC tab)")
         if int(member.get("memory") or 0) < 16384 or int(member.get("vcpu") or 0) < 8:
             raise ValueError(f"{machine} is too small for single-node OpenShift (16 GiB / 8 vCPU minimum)")
-        if any(e.get("machine") == machine for e in self._entries(hub)):
+        if any((provisioner(c) or {}).get("machine") == machine for c in self.spokes_of(db, hub)):
             raise ValueError(f"{machine} is already used by another spoke")
         status = bmc_service.status(group)
         if not status["running"] or bmc_service.available():
@@ -170,55 +176,91 @@ class SpokeService:
             raise ValueError(f"{machine}: its VM is missing")
         version = version or hub.version
         openshift_service.pull_secret()
-        self.svc._ensure_idle(hub)
-        self._save(db, hub, name, machine=machine, group_id=group.id, version=version, state="pending",
-                   message="Queued", ip=member.get("ip"))
+        domain = gspec.get("domain") or f"{group.name}.lab"
+        vm = member_vm_name(group.name, machine)
+        spec = {"name": name, "type": "openshift", "ctlplanes": 1, "workers": 0, "addons": [],
+                "ctlplane": {"memory": member.get("memory"), "vcpu": member.get("vcpu"),
+                             "disk_size": member.get("disk_size")},
+                "cidr": gspec.get("cidr"), "image": f"OpenShift {version}",
+                "openshift": {"version": version, "topology": "sno", "storage": "none",
+                              "provisioner": {"kind": "acm", "hub_id": hub.id, "hub_name": hub.name,
+                                              "machine": machine}}}
+        cluster = Cluster(name=name, type="openshift", version=version, network=f"vmm-g-{group.name}",
+                          network_owned=False, group_id=group.id, group_owned=False, domain=domain, spec=spec,
+                          status="provisioning", status_message=f"Queued: provisioned by ACM hub {hub.name}")
+        cluster.nodes.append(ClusterNode(name=vm, role="ctlplane", ip=member.get("ip"), mac=member.get("mac")))
+        db.add(cluster)
+        db.commit()
+        db.refresh(cluster)
+        self.installer.save_spec(cluster)
+        self._set_metadata(cluster, hub, group)
+        self.svc._publish(cluster)
+        task = task_service.start(db, TaskCreate(
+            name=f"Provision spoke {name} from ACM hub {hub.name}", type="cluster_create", target_type="cluster",
+            target_id=cluster.id, target_name=name,
+            description=f"OpenShift {version}, single node on {machine} (BMC), by ACM hub {hub.name}",
+        ), self._run, cluster.id, hub.id, dict(member), dict(host))
+        cluster.task_id = task.id
+        db.commit()
+        return cluster
 
-        def run(db: Session, task: Task, hub_id: int) -> Dict[str, Any]:
-            def body(hub: Cluster) -> Dict[str, Any]:
-                try:
-                    self._provision(db, task, hub, name, group, member, host, version)
-                except Exception as e:
-                    from app.services.cluster_service import Cancelled
-                    self._save(db, hub, name, state="error",
-                               message="Cancelled" if isinstance(e, Cancelled) else str(e)[-500:])
-                    raise
-                self.svc._set_status(db, hub, "ready", None)
-                return {"spoke": name}
-            return self.svc._guarded(db, task, hub_id, body, failed_status="ready")
-        return self.svc._run_task(db, hub, "acm_spoke", f"Provision spoke {name} from", run)
+    @staticmethod
+    def _set_metadata(cluster: Cluster, hub: Cluster, group: Group) -> None:
+        """Cluster metadata on the machine VM: sync_clusters adopts the spoke from it (+ spec.json)"""
+        from app.services.cluster_service import METADATA_KEY, METADATA_URI
+        node = cluster.nodes[0]
+        attrs = {"name": cluster.name, "type": "openshift", "role": "ctlplane", "ip": node.ip or "",
+                 "domain": cluster.domain, "network": cluster.network, "owned": "no", "version": cluster.version or "",
+                 "group": group.name, "group_owned": "no", "provisioner": "acm", "hub": hub.name}
+        xml = "<cluster " + " ".join(f"{k}={quoteattr(str(v))}" for k, v in attrs.items()) + "/>"
+        try:
+            libvirt_client.set_domain_metadata(node.name, xml, METADATA_KEY, METADATA_URI)
+        except Exception as e:  # the VM is the group's: never fail the request for this
+            logger.warning(f"Spoke {cluster.name}: metadata on {node.name}: {e}")
 
-    def _provision(self, db: Session, task: Task, hub: Cluster, name: str, group: Group, member: Dict[str, Any],
-                   host: Dict[str, Any], version: str) -> None:
+    def _run(self, db: Session, task: Task, cluster_id: int, hub_id: int, member: Dict[str, Any],
+             host: Dict[str, Any]) -> Dict[str, Any]:
+        def body(cluster: Cluster) -> Dict[str, Any]:
+            hub = self.svc.get_cluster(db, hub_id)
+            if hub is None:
+                raise ValueError("The hub was deleted")
+            self._provision(db, task, hub, cluster, member, host)
+            self.svc._set_status(db, cluster, "ready", None)
+            return {"spoke": cluster.name}
+        return self.svc._guarded(db, task, cluster_id, body)
+
+    def _provision(self, db: Session, task: Task, hub: Cluster, cluster: Cluster, member: Dict[str, Any],
+                   host: Dict[str, Any]) -> None:
         from app.services import bmc_service
-        from app.services.group_service import group_service
-        from app.schemas.group import DNSRecord
+        from app.services.cluster_network import GroupClusterNetwork
+        from app.services.openshift_addons import AddonRunner
         from app.services.openshift_service import openshift_service
-        runner = self.acm._runner(hub, task, db)
         svc = self.svc
+        name, version = cluster.name, cluster.version
+        group = db.query(Group).filter(Group.id == cluster.group_id).first()
 
-        def step(pct: int, message: str, state: str = "provisioning") -> None:
-            svc._check(task, hub, db, pct, f"Spoke {name}: {message}")
-            self._save(db, hub, name, state=state, message=message)
+        def step(pct: int, message: str, phase: str = "preparing", progress: Optional[int] = None) -> None:
+            svc._check(task, cluster, db, pct, message)
+            self.installer._set_live(cluster.id, phase=phase, progress=progress, assisted_info=message)
+        runner = AddonRunner(hub.name, hub.version, lambda s: svc._sleep(task, s),
+                             lambda m: svc._check(task, cluster, db, None, m))
 
-        step(5, "central infrastructure management on the hub (metal3, assisted service)")
+        step(5, f"Hub {hub.name}: central infrastructure management (metal3, assisted service)")
         self.ensure_cim(runner, hub, version)
 
-        domain = (group.spec or {}).get("domain") or f"{group.name}.lab"
-        zone = f"{name}.{domain}"
+        zone = f"{name}.{cluster.domain}"
         ip = member["ip"]
-        tag = owner(name)
+        network = GroupClusterNetwork(group.id, name, owned=False)
+        port = network.free_lb_port(6444)
+        network.publish(ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"])
+        network.publish_lb(f"{name}-api", port, [f"{ip}:6443"])
+        step(15, f"Router: api / *.apps.{zone} -> {ip}, API on {network.uplink_ip()}:{port}")
+        network.commit()
+        cluster.api_ip = network.uplink_ip()
+        self.installer._update_spec(db, cluster, api_port=port)
 
-        def records(spec) -> None:
-            names = {f"api.{zone}.", f"api-int.{zone}.", f"*.apps.{zone}."}
-            spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != tag and r.name not in names]
-            spec.router.dns.records += [DNSRecord(name=n, a=ip, owner=tag) for n in sorted(names)]
-        step(15, f"DNS api / *.apps.{zone} -> {ip} on the group router")
-        group_service.update_owned(db, group.id, records)
-
-        step(20, "ClusterDeployment, AgentClusterInstall, InfraEnv, BareMetalHost on the hub")
-        key_dir = openshift_service.cluster_dir(hub.name) / "spokes" / name
-        key_dir.mkdir(parents=True, exist_ok=True)
+        step(20, "Hub: ClusterDeployment, AgentClusterInstall, InfraEnv, BareMetalHost")
+        key_dir = openshift_service.cluster_dir(name)
         ssh_pub = openshift_service.ssh_keypair(key_dir)
         creds = bmc_service.credentials(group.name)
         imageset = f"img{version}-x86-64"
@@ -235,20 +277,19 @@ class SpokeService:
             out = runner.oc(["create", "-f", "-"], 60, stdin=json.dumps(secret))
             if out["exitcode"] != 0:
                 raise RuntimeError(f"Secret {secret['metadata']['name']}: {(out['stderr'] or '').strip()[-300:]}")
-        cidr = (group.spec or {}).get("cidr")
         runner.apply_retry([
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterImageSet", "metadata": {"name": imageset},
              "spec": {"releaseImage": f"quay.io/openshift-release-dev/ocp-release:{version}-x86_64"}},
             {"apiVersion": "extensions.hive.openshift.io/v1beta1", "kind": "AgentClusterInstall",
              "metadata": {"name": name, "namespace": name},
              "spec": {"clusterDeploymentRef": {"name": name}, "imageSetRef": {"name": imageset},
-                      "networking": {"machineNetwork": [{"cidr": cidr}],
+                      "networking": {"machineNetwork": [{"cidr": (group.spec or {}).get("cidr")}],
                                      "clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
                                      "serviceNetwork": ["172.30.0.0/16"], "networkType": "OVNKubernetes"},
                       "provisionRequirements": {"controlPlaneAgents": 1}, "sshPublicKey": ssh_pub}},
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterDeployment",
              "metadata": {"name": name, "namespace": name},
-             "spec": {"baseDomain": domain, "clusterName": name,
+             "spec": {"baseDomain": cluster.domain, "clusterName": name,
                       "clusterInstallRef": {"group": "extensions.hive.openshift.io", "kind": "AgentClusterInstall",
                                             "name": name, "version": "v1beta1"},
                       "platform": {"agentBareMetal": {"agentSelector": {"matchLabels": {"vmm-spoke": name}}}},
@@ -261,7 +302,7 @@ class SpokeService:
              "metadata": {"name": member["name"], "namespace": name,
                           "labels": {"infraenvs.agent-install.openshift.io": name},
                           "annotations": {"inspect.metal3.io": "disabled",
-                                          "bmac.agent-install.openshift.io/hostname": member["name"],
+                                          "bmac.agent-install.openshift.io/hostname": cluster.nodes[0].name,
                                           "bmac.agent-install.openshift.io/role": "master"}},
              "spec": {"online": True, "bootMACAddress": member["mac"], "bootMode": "legacy",
                       "automatedCleaningMode": "disabled",
@@ -286,49 +327,76 @@ class SpokeService:
             agents = self._get(runner, ["get", "agents", "-n", name]).get("items", [])
             if agents:
                 break
-            msg = (f"BareMetalHost {bstatus.get('provisioning', {}).get('state') or 'registering'}"
+            msg = (f"BareMetalHost {(bstatus.get('provisioning') or {}).get('state') or 'registering'}"
                    + (f", {bstatus.get('operationalStatus')}" if bstatus.get("operationalStatus") else "")
                    + (f": {bstatus.get('errorMessage')}" if bstatus.get("errorMessage") else "")
                    + "; waiting for the discovery agent")
             if msg != last:
-                step(30, msg)
+                step(30, msg, "booting")
                 last = msg
             if time.monotonic() > deadline:
                 raise TimeoutError(f"No agent registered after {DISCOVERY_TIMEOUT // 60} min ({msg}). The machine's "
                                    "console shows whether it booted the discovery ISO; the BMC emulator log is "
                                    f"{bmc_service.group_dir(group.name) / 'bmc-emulator.log'}.")
             svc._sleep(task, 20)
-        step(40, f"agent {agents[0]['metadata']['name'][:8]} registered, installing")
-        # install
+        step(40, f"Agent {agents[0]['metadata']['name'][:8]} registered: installing", "installing")
         deadline = time.monotonic() + INSTALL_TIMEOUT
         while True:
             aci = self._get(runner, ["get", "agentclusterinstall", name, "-n", name])
             conds = {c.get("type"): c for c in (aci.get("status") or {}).get("conditions") or []}
-            done = conds.get("Completed") or {}
-            failed = conds.get("Failed") or {}
-            if done.get("status") == "True":
+            if (conds.get("Completed") or {}).get("status") == "True":
                 break
-            if failed.get("status") == "True":
-                raise RuntimeError(f"Spoke install failed: {failed.get('message')}")
-            pct = ((aci.get("status") or {}).get("progress") or {}).get("totalPercentage") or 0
-            state = (aci.get("status") or {}).get("debugInfo", {}).get("state") or "preparing"
-            info = (aci.get("status") or {}).get("debugInfo", {}).get("stateInfo") or ""
-            msg = f"install {state} {pct}%" + (f": {info[:150]}" if info else "")
+            if (conds.get("Failed") or {}).get("status") == "True":
+                raise RuntimeError(f"Spoke install failed: {conds['Failed'].get('message')}")
+            pct = int(((aci.get("status") or {}).get("progress") or {}).get("totalPercentage") or 0)
+            debug = (aci.get("status") or {}).get("debugInfo") or {}
+            msg = f"Install {debug.get('state') or 'preparing'} {pct}%" + (
+                f": {debug['stateInfo'][:150]}" if debug.get("stateInfo") else "")
             if msg != last:
-                step(40 + int(pct) * 55 // 100, msg)
+                step(40 + pct * 50 // 100, msg, "installing", pct)
                 last = msg
             if time.monotonic() > deadline:
                 raise TimeoutError(f"Spoke not installed after {INSTALL_TIMEOUT // 60} min ({msg})")
             svc._sleep(task, 30)
-        step(97, "installed; waiting for the ManagedCluster to become Available")
+        step(92, "Installed: kubeconfig from the hub", "finalizing", 100)
+        self.write_kubeconfig(db, hub, cluster)
+        step(95, "Waiting for the ManagedCluster to become Available", "finalizing", 100)
         deadline = time.monotonic() + 20 * 60
+        from app.services.acm import conditions_state
         while time.monotonic() < deadline:
-            from app.services.acm import conditions_state
-            st = conditions_state(self._get(runner, ["get", "managedcluster", name]))
-            if st.get("available"):
+            if conditions_state(self._get(runner, ["get", "managedcluster", name])).get("available"):
                 break
             svc._sleep(task, 20)
-        self._save(db, hub, name, state="installed", message=None)
+        self.installer._set_live(cluster.id, phase="ready")
+
+    def write_kubeconfig(self, db: Session, hub: Cluster, cluster: Cluster) -> str:
+        """The hub's <spoke>-admin-kubeconfig, pointed at the router's forwarded port (like the hub's own); the
+        kubeadmin password next to it"""
+        from app.services.openshift_addons import AddonRunner
+        from app.services.openshift_service import openshift_service
+        import os
+        runner = AddonRunner(hub.name, hub.version, time.sleep, lambda m: None)
+        name = cluster.name
+        data = self._get(runner, ["get", "secret", f"{name}-admin-kubeconfig", "-n", name]).get("data") or {}
+        if "kubeconfig" not in data:
+            raise ValueError("The spoke has no kubeconfig yet (written by the install)")
+        port = int((cluster.spec or {}).get("api_port") or 6443)
+        text = openshift_service.kubeconfig_for_host(base64.b64decode(data["kubeconfig"]).decode(), name,
+                                                     f"https://{cluster.api_ip}:{port}", f"api.{name}.{cluster.domain}")
+        workdir = openshift_service.cluster_dir(name)
+        for fname, content in (("host-kubeconfig", text),):
+            fd = os.open(str(workdir / fname), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        pw = (self._get(runner, ["get", "secret", f"{name}-admin-password", "-n", name]).get("data") or {})
+        if pw.get("password"):
+            (workdir / "auth").mkdir(exist_ok=True)
+            fd = os.open(str(workdir / "auth" / "kubeadmin-password"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(base64.b64decode(pw["password"]).decode())
+        cluster.kubeconfig = text
+        db.commit()
+        return text
 
     @staticmethod
     def _get(runner: Any, args: List[str]) -> Dict[str, Any]:
@@ -339,75 +407,55 @@ class SpokeService:
 
     # ------------------------------------------------------------------------------------------------ views
 
-    def status(self, db: Session, hub: Cluster) -> List[Dict[str, Any]]:
+    def summary(self, db: Session, hub: Cluster) -> List[Dict[str, Any]]:
+        """The hub's spokes for its ACM tab (cluster rows; live BareMetalHost / install state when the hub is up)"""
         out = []
-        runner = self.acm._runner(hub) if self.svc.to_dict(db, hub)["status"] == "ready" else None
-        for e in self._entries(hub):
-            entry = dict(e)
-            if runner is not None and e.get("state") not in ("pending",):
-                bmh = self._get(runner, ["get", "bmh", e["machine"], "-n", e["name"]])
+        ready = self.svc.to_dict(db, hub)["status"] == "ready"
+        runner = self.acm._runner(hub) if ready else None
+        for c in self.spokes_of(db, hub):
+            p = provisioner(c) or {}
+            d = self.svc.to_dict(db, c)
+            entry = {"id": c.id, "name": c.name, "machine": p.get("machine"), "version": c.version,
+                     "state": d["status"], "message": d["status_message"],
+                     "ip": c.nodes[0].ip if c.nodes else None, "console_url": d.get("console_url")}
+            if runner is not None:
+                bmh = self._get(runner, ["get", "bmh", p.get("machine") or "-", "-n", c.name])
                 entry["bmh_state"] = ((bmh.get("status") or {}).get("provisioning") or {}).get("state")
-                aci = self._get(runner, ["get", "agentclusterinstall", e["name"], "-n", e["name"]])
+                aci = self._get(runner, ["get", "agentclusterinstall", c.name, "-n", c.name])
                 entry["install_state"] = ((aci.get("status") or {}).get("debugInfo") or {}).get("state")
                 entry["progress"] = ((aci.get("status") or {}).get("progress") or {}).get("totalPercentage")
-            entry["console_url"] = (f"https://console-openshift-console.apps.{e['name']}."
-                                    f"{self._domain(db, e.get('group_id'))}")
             out.append(entry)
         return out
 
-    @staticmethod
-    def _domain(db: Session, group_id: Optional[int]) -> str:
-        group = db.query(Group).filter(Group.id == group_id).first() if group_id else None
-        return ((group.spec or {}).get("domain") or f"{group.name}.lab") if group else "lab"
+    # ------------------------------------------------------------------------------------------------ delete
 
-    def kubeconfig(self, db: Session, hub: Cluster, name: str) -> str:
-        """The spoke's admin kubeconfig (hive secret <name>-admin-kubeconfig on the hub)"""
-        import base64
-        if not any(e["name"] == name for e in self._entries(hub)):
-            raise LookupError(f"No spoke {name} on {hub.name}")
-        data = self._get(self.acm._runner(hub), ["get", "secret", f"{name}-admin-kubeconfig", "-n", name]).get("data")
-        if not data or "kubeconfig" not in data:
-            raise ValueError("The spoke has no kubeconfig yet (written by the install)")
-        return base64.b64decode(data["kubeconfig"]).decode()
-
-    def delete(self, db: Session, hub: Cluster, name: str) -> Task:
-        entry = next((e for e in self._entries(hub) if e["name"] == name), None)
-        if entry is None:
-            raise LookupError(f"No spoke {name} on {hub.name}")
-        if self.svc.to_dict(db, hub)["status"] != "ready":
-            raise ValueError(f"Hub {hub.name} is not ready")
-
-        def run(db: Session, task: Task, hub_id: int) -> Dict[str, Any]:
-            def body(hub: Cluster) -> Dict[str, Any]:
-                from app.services.group_service import group_service, member_vm_name
-                from app.libvirt_client import libvirt_client
-                runner = self.acm._runner(hub, task, db)
-                self.svc._check(task, hub, db, 10, f"Deleting spoke {name} (ManagedCluster, install, BareMetalHost)")
-                runner.oc(["delete", "managedcluster", name, "--ignore-not-found", "--wait=false"], 60)
-                runner.oc(["delete", "clusterdeployment", name, "-n", name, "--ignore-not-found", "--wait=true",
-                           "--timeout=10m"], 660)
-                runner.oc(["delete", "bmh", entry["machine"], "-n", name, "--ignore-not-found", "--wait=true",
-                           "--timeout=5m"], 330)
-                runner.oc(["delete", "namespace", name, "--ignore-not-found", "--wait=false"], 60)
-                tag = owner(name)
-
-                def records(spec) -> None:
-                    spec.router.dns.records = [r for r in spec.router.dns.records if r.owner != tag]
+    def release(self, db: Session, cluster: Cluster) -> None:
+        """cluster_service.delete_cluster of a spoke: its objects on the hub (no wait: the hub finishes the
+        cleanup), the machine powered off and its cluster metadata removed (the VM stays, the group's)"""
+        from app.services.cluster_service import METADATA_KEY, METADATA_URI
+        hub = self.hub_of(db, cluster)
+        p = provisioner(cluster) or {}
+        if hub is not None and self.svc.to_dict(db, hub)["status"] == "ready":
+            runner = self.acm._runner(hub)
+            for args in (["delete", "managedcluster", cluster.name],
+                         ["delete", "clusterdeployment", cluster.name, "-n", cluster.name],
+                         ["delete", "bmh", p.get("machine") or "-", "-n", cluster.name],
+                         ["delete", "namespace", cluster.name]):
                 try:
-                    group_service.update_owned(db, entry["group_id"], records)
-                except ValueError as e:
-                    logger.warning(f"Spoke {name} DNS cleanup: {e}")
-                group = db.query(Group).filter(Group.id == entry["group_id"]).first()
-                if group is not None:
-                    try:
-                        libvirt_client.stop_vm(member_vm_name(group.name, entry["machine"]), force=True)
-                    except Exception:
-                        pass
-                self._drop(db, hub, name)
-                self.svc._set_status(db, hub, "ready", None)
-                return {"deleted": name}
-            return self.svc._guarded(db, task, hub_id, body, failed_status="ready")
-        return self.svc._run_task(db, hub, "acm_spoke_delete", f"Delete spoke {name} of", run)
+                    runner.oc(args + ["--ignore-not-found", "--wait=false"], 60)
+                except (RuntimeError, ValueError) as e:
+                    logger.warning(f"Spoke {cluster.name}: oc {' '.join(args[:2])} on {hub.name}: {e}")
+        elif hub is not None:
+            logger.warning(f"Spoke {cluster.name}: hub {hub.name} not ready, its objects stay on the hub")
+        for node in cluster.nodes:
+            try:
+                libvirt_client.stop_vm(node.name, force=True)
+            except Exception:
+                pass
+            try:
+                libvirt_client.set_domain_metadata(node.name, None, METADATA_KEY, METADATA_URI)
+            except Exception as e:
+                logger.warning(f"Spoke {cluster.name}: metadata of {node.name}: {e}")
 
 
 spoke_service = SpokeService()

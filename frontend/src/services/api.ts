@@ -259,11 +259,9 @@ export const clusterApi = {
   acmImport: (id: number, clusterId: number, method: 'auto' | 'secret' | 'manifests' = 'auto') =>
     post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
   acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
+  /** The hub provisions a spoke: returns the new cluster (its own page, kubeconfig, delete) */
   acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
-    post<Task>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
-  acmSpokeDelete: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/spokes/${encodeURIComponent(name)}`),
-  acmSpokeKubeconfigUrl: (id: number, name: string) =>
-    `${API_BASE}/api/v1/clusters/${id}/acm/spokes/${encodeURIComponent(name)}/kubeconfig`,
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
 };
 
 export const openshiftApi = {

@@ -300,6 +300,20 @@ class AcmService:
     def is_hub(self, cluster: Cluster) -> bool:
         return cluster.type == "openshift" and bool(((cluster.spec or {}).get("openshift") or {}).get("acm"))
 
+    def relation(self, db: Session, cluster: Cluster) -> Optional[Dict[str, Any]]:
+        """{role: hub | managed | spoke, hub_id, hub_name, state} for every cluster read (stored lists, no oc)"""
+        from app.services.acm_spokes import provisioner
+        p = provisioner(cluster)
+        if p:
+            return {"role": "spoke", "hub_id": p.get("hub_id"), "hub_name": p.get("hub_name"), "state": cluster.status}
+        if self.is_hub(cluster):
+            return {"role": "hub", "hub_id": cluster.id, "hub_name": cluster.name, "state": self._addon(cluster).get("state")}
+        for hub in db.query(Cluster).filter(Cluster.type == "openshift", Cluster.id != cluster.id).all():
+            entry = next((e for e in self._entries(hub) if e["name"] == cluster.name), None)
+            if entry is not None:
+                return {"role": "managed", "hub_id": hub.id, "hub_name": hub.name, "state": entry.get("state")}
+        return None
+
     # ---------------------------------------------------------------------------------------- views
 
     def status(self, db: Session, hub: Cluster) -> Dict[str, Any]:
@@ -345,8 +359,9 @@ class AcmService:
         taken = set(entries)
         importable = []
         uplink = self._uplink_network(hub)
+        from app.services.acm_spokes import provisioner
         for c in db.query(Cluster).order_by(Cluster.name).all():
-            if c.id == hub.id or c.name in taken:
+            if c.id == hub.id or c.name in taken or provisioner(c) is not None:
                 continue
             note = None
             if c.type == "k3s" and not c.group_id and c.network != uplink:
@@ -355,7 +370,7 @@ class AcmService:
             importable.append({"id": c.id, "name": c.name, "type": c.type, "status": c.status, "note": note})
         result["importable"] = importable
         from app.services.acm_spokes import spoke_service
-        result["spokes"] = spoke_service.status(db, hub)
+        result["spokes"] = spoke_service.summary(db, hub)
         used = {s.get("machine") for s in result["spokes"]}
         gspec = self._group_spec(db, hub.group_id) if hub.group_id else None
         if gspec is not None:
@@ -515,6 +530,10 @@ class AcmService:
                 raise ValueError(f"{target.name} is already managed by the hub {other.name}: detach it there first")
         if self.svc.to_dict(db, target)["status"] != "ready":
             raise ValueError(f"{target.name} is not ready (status {target.status}): start it or wait for its install")
+        from app.services.acm_spokes import provisioner
+        if provisioner(target) is not None:
+            raise ValueError(f"{target.name} is a spoke of ACM hub {provisioner(target).get('hub_name')}: "
+                             "that hub manages it already")
         if target.type == "openshift" and self.is_hub(target):
             raise ValueError(f"{target.name} is an ACM hub itself: hubs of hubs aren't supported here")
         if not hub.api_ip:

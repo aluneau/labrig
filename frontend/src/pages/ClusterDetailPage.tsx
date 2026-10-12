@@ -48,6 +48,7 @@ import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
 import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
 import { AcmHub } from '../components/clusters/AcmHub';
+import { AcmBanner, AcmLabel } from '../components/clusters/AcmRelation';
 import { MirroredImages } from '../components/clusters/MirroredImages';
 import { ClusterLogs } from '../components/logs/ClusterLogs';
 
@@ -248,6 +249,7 @@ export const ClusterDetailPage: React.FC = () => {
             <Title headingLevel="h1">{cluster.name}</Title>
             <div style={{ marginTop: 8 }}>
               <ClusterStatus cluster={cluster} />
+              <AcmLabel cluster={cluster} />
               {((isOpenShift && os.disconnected) || (!isOpenShift && cluster.spec?.disconnected)) && (
                 <Label id="cluster-disconnected" color="purple" isCompact style={{ marginLeft: 8 }}>disconnected</Label>
               )}
@@ -320,6 +322,9 @@ export const ClusterDetailPage: React.FC = () => {
               <Alert variant="danger" isInline title={error || loadError}
                 actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
             </StackItem>
+          )}
+          {(cluster.acm?.role === 'managed' || cluster.acm?.role === 'spoke' || (!cluster.acm && cluster.status === 'ready')) && (
+            <StackItem><AcmBanner cluster={cluster} onChanged={reload} /></StackItem>
           )}
           {isOpenShift && install.status?.phase !== 'ready' && (
             <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>

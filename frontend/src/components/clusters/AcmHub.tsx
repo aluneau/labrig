@@ -24,7 +24,7 @@ import {
 } from '@patternfly/react-core';
 import { ExternalLinkAltIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { AcmManagedCluster, AcmStatus, Cluster } from '../../types';
+import { AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
 import { clusterApi } from '../../services/api';
 import { useLiveEvents } from '../../hooks/useEvents';
 import { errorText } from '../../utils/format';
@@ -50,7 +50,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [confirmEnable, setConfirmEnable] = useState(false);
   const [spokeMachine, setSpokeMachine] = useState('');
   const [spokeName, setSpokeName] = useState('');
-  const [deleteSpoke, setDeleteSpoke] = useState<string | null>(null);
+  const [deleteSpoke, setDeleteSpoke] = useState<AcmSpoke | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -247,7 +247,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                 </FlexItem>
                 <FlexItem>
                   <Button id="acm-spoke-create" isDisabled={!spokeMachine || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName)
-                    || !hubUp || !ready || busy || cluster.task_running}
+                    || !hubUp || !ready || busy}
                     onClick={() => run(async () => { await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine); setSpokeName(''); setSpokeMachine(''); })}>
                     Provision
                   </Button>
@@ -260,22 +260,22 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                     {acm.spokes.map((s) => (
                       <Tr key={s.name} id={`acm-spoke-${s.name}`}>
                         <Td dataLabel="Spoke">
-                          {s.name}
+                          <Link to={`/clusters/${s.id}`}>{s.name}</Link>
                           {s.message && <div style={muted}>{s.message}</div>}
-                          {s.state === 'installed' && (
+                          {s.state === 'ready' && (
                             <div>
-                              <Button variant="link" isInline component="a" href={clusterApi.acmSpokeKubeconfigUrl(cluster.id, s.name)}>kubeconfig</Button>
+                              <Button variant="link" isInline component="a" href={clusterApi.kubeconfigUrl(s.id)}>kubeconfig</Button>
                               {' · '}<a href={s.console_url || undefined} target="_blank" rel="noreferrer">console</a>
                             </div>
                           )}
                         </Td>
                         <Td dataLabel="Machine">{s.machine}{s.ip ? ` (${s.ip})` : ''}</Td>
-                        <Td dataLabel="State"><Label isCompact color={s.state === 'installed' ? 'green' : s.state === 'error' ? 'red' : 'blue'}>{s.state}</Label></Td>
+                        <Td dataLabel="State"><Label isCompact color={s.state === 'ready' ? 'green' : s.state === 'error' ? 'red' : 'blue'}>{s.state}</Label></Td>
                         <Td dataLabel="BareMetalHost">{s.bmh_state || '—'}</Td>
                         <Td dataLabel="Install">{s.install_state ? `${s.install_state}${s.progress != null ? ` ${s.progress}%` : ''}` : '—'}</Td>
                         <Td isActionCell>
-                          <ActionsColumn isDisabled={busy || cluster.task_running || !ready} items={[
-                            { title: 'Delete spoke', onClick: () => setDeleteSpoke(s.name) },
+                          <ActionsColumn isDisabled={busy || !ready} items={[
+                            { title: 'Delete spoke', onClick: () => setDeleteSpoke(s) },
                           ]} />
                         </Td>
                       </Tr>
@@ -288,8 +288,8 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
         </StackItem>
       )}
 
-      <ConfirmModal title={`Delete spoke ${deleteSpoke}?`} isOpen={!!deleteSpoke} danger confirmLabel="Delete"
-        onConfirm={() => (deleteSpoke ? run(() => clusterApi.acmSpokeDelete(cluster.id, deleteSpoke)) : undefined)}
+      <ConfirmModal title={`Delete spoke ${deleteSpoke?.name}?`} isOpen={!!deleteSpoke} danger confirmLabel="Delete"
+        onConfirm={() => (deleteSpoke ? run(() => clusterApi.delete(deleteSpoke.id)) : undefined)}
         onClose={() => setDeleteSpoke(null)}>
         Deletes the spoke&apos;s ManagedCluster, ClusterDeployment and BareMetalHost on the hub and powers its machine
         off. The machine (group member) stays, ready for another spoke.
