@@ -354,6 +354,13 @@ class AcmService:
                         "router, the import will be refused")
             importable.append({"id": c.id, "name": c.name, "type": c.type, "status": c.status, "note": note})
         result["importable"] = importable
+        from app.services.acm_spokes import spoke_service
+        result["spokes"] = spoke_service.status(db, hub)
+        used = {s.get("machine") for s in result["spokes"]}
+        gspec = self._group_spec(db, hub.group_id) if hub.group_id else None
+        if gspec is not None:
+            result["spoke_machines"] = [{"name": m.name, "memory": m.memory, "vcpu": m.vcpu}
+                                        for m in gspec.members if m.bmc and m.name not in used]
         return result
 
     # ---------------------------------------------------------------------------------------- networking

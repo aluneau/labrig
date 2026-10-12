@@ -245,4 +245,16 @@ class AcmStatus(BaseModel):
     sizing: Optional[str] = None         # plain words when the cluster is too small for a hub
     managed: List[AcmManagedCluster] = []
     importable: List[Dict[str, Any]] = []  # [{id, name, type, status, note}]
+    # Spokes the hub provisioned on BMC machines: [{name, machine, group_id, version, state, message, ip,
+    # bmh_state, install_state, progress, console_url}]
+    spokes: List[Dict[str, Any]] = []
+    # BMC members of the hub's group not used by a spoke: [{name, memory, vcpu, redfish_url}]
+    spoke_machines: List[Dict[str, Any]] = []
     error: Optional[str] = None
+
+
+class AcmSpokeRequest(BaseModel):
+    """The hub provisions a single-node OpenShift on a BMC member of its lab group"""
+    name: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    machine: str = Field(..., pattern=PACKAGE)   # member name (bmc: true) of the hub's group
+    version: Optional[str] = Field(None, pattern=OCP_VERSION)  # default: the hub's

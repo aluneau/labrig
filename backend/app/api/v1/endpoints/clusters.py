@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
-from app.schemas.openshift import AcmImportRequest, AcmStatus, AddonRequest, MetalLBOptions, MetalLBScenario
+from app.schemas.openshift import AcmImportRequest, AcmSpokeRequest, AcmStatus, AddonRequest, MetalLBOptions, MetalLBScenario
 from app.schemas.cluster import ClusterMirrorRequest
 from app.services import kube_exec
 from app.services.acm import acm_service
@@ -169,6 +169,31 @@ def acm_import(cluster_id: int, data: AcmImportRequest, db: Session = Depends(ge
 def acm_detach(cluster_id: int, name: str, db: Session = Depends(get_db)):
     """Detach a managed cluster (deletes its ManagedCluster: the hub removes the klusterlet) (task)"""
     return _bad_request(acm_service.detach, db, _get(db, cluster_id), name)
+
+
+@router.post("/{cluster_id}/acm/spokes", response_model=Task)
+def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depends(get_db)):
+    """The hub provisions a single-node OpenShift on a BMC member of its lab group (task): metal3 + assisted
+    service on the hub, then ClusterDeployment / AgentClusterInstall / InfraEnv / BareMetalHost (redfish virtual
+    media through the app's BMC emulator); waits for the install and the ManagedCluster"""
+    from app.services.acm_spokes import spoke_service
+    return _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version)
+
+
+@router.delete("/{cluster_id}/acm/spokes/{name}", response_model=Task)
+def acm_spoke_delete(cluster_id: int, name: str, db: Session = Depends(get_db)):
+    """Delete a provisioned spoke on the hub (ManagedCluster, ClusterDeployment, BareMetalHost); its machine stays
+    (powered off)"""
+    from app.services.acm_spokes import spoke_service
+    return _bad_request(spoke_service.delete, db, _get(db, cluster_id), name)
+
+
+@router.get("/{cluster_id}/acm/spokes/{name}/kubeconfig", response_class=PlainTextResponse)
+def acm_spoke_kubeconfig(cluster_id: int, name: str, db: Session = Depends(get_db)):
+    from app.services.acm_spokes import spoke_service
+    text = _bad_request(spoke_service.kubeconfig, db, _get(db, cluster_id), name)
+    return PlainTextResponse(text, media_type="application/yaml", headers={
+        "Content-Disposition": f'attachment; filename="{name}-kubeconfig.yaml"'})
 
 
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers
