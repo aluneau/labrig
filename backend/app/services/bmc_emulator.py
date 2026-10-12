@@ -4,7 +4,7 @@ Run by bmc_service as `python -m app.services.bmc_emulator <config.json>` (one p
 Only stdlib + sushy_tools + libvirt here: no app settings / DB import.
 
 config.json: {listen, port, libvirt_uri, auth_file (htpasswd, bcrypt), allow_file (JSON list of VM names),
-state_dir, hosts: {"<zone>": "<ip>"}, cert?, key?}
+state_dir, hosts: {"<zone>": "<ip>"}, redirects: {"<group cidr>": "<router uplink ip>"}, redirect_ports, cert?, key?}
 - allow_file is re-read when it changes: the allowed identities are those VM names and their UUIDs (Redfish system
   ids); everything else is "not found", in the systems list too.
 - hosts: names under <zone> (e.g. a hub cluster's api / *.apps) resolve to <ip> (its router's uplink address) in
@@ -24,12 +24,15 @@ def _load(path):
         return json.load(f)
 
 
-def _patch_resolver(hosts):
-    """getaddrinfo for names under the configured zones -> the zone's address"""
-    if not hosts:
-        return
+def _patch_resolver(hosts, redirects, ports):
+    """getaddrinfo: names under the configured zones -> the zone's address; addresses of a lab group network on
+    `ports` (a hub's Ironic image server on its nodes' host network) -> the group router's uplink address (the
+    router forwards those ports; the host has no route to group networks)"""
+    import ipaddress
     real = socket.getaddrinfo
-    zones = sorted(((z.lower().rstrip("."), ip) for z, ip in hosts.items()), key=lambda x: -len(x[0]))
+    zones = sorted(((z.lower().rstrip("."), ip) for z, ip in (hosts or {}).items()), key=lambda x: -len(x[0]))
+    nets = [(ipaddress.ip_network(c), ip) for c, ip in (redirects or {}).items()]
+    ports = {int(p) for p in ports or []}
 
     def getaddrinfo(host, port, *args, **kwargs):
         if isinstance(host, str):
@@ -37,6 +40,14 @@ def _patch_resolver(hosts):
             for zone, ip in zones:
                 if name == zone or name.endswith("." + zone):
                     return real(ip, port, *args, **kwargs)
+            try:
+                addr = ipaddress.ip_address(name.strip("[]"))
+            except ValueError:
+                addr = None
+            if addr is not None and port is not None and int(port) in ports:
+                for net, ip in nets:
+                    if addr in net:
+                        return real(ip, port, *args, **kwargs)
         return real(host, port, *args, **kwargs)
     socket.getaddrinfo = getaddrinfo
 
@@ -82,7 +93,7 @@ class _Allowed:
 
 def main():
     config = _load(sys.argv[1])
-    _patch_resolver(config.get("hosts") or {})
+    _patch_resolver(config.get("hosts") or {}, config.get("redirects") or {}, config.get("redirect_ports") or [])
     from sushy_tools.emulator import api_utils
     from sushy_tools.emulator import main as emulator
 

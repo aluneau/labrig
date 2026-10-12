@@ -119,6 +119,21 @@ def credentials(group_name: str) -> Dict[str, str]:
     return data
 
 
+# Ironic's image server ports on a hub's nodes (host network): forwarded by the hub's router (acm_spokes.ensure_cim)
+IRONIC_PORTS = [6180, 6183]
+
+
+def _redirects(db: Session) -> Dict[str, str]:
+    """group CIDR -> its router's uplink address (virtual media URLs pointing at a hub node)"""
+    out = {}
+    for g in db.query(Group).all():
+        spec = g.spec or {}
+        uplink = (spec.get("router") or {}).get("uplink_ip")
+        if uplink and spec.get("cidr"):
+            out[spec["cidr"]] = uplink
+    return out
+
+
 def _hosts(db: Session) -> Dict[str, str]:
     """<cluster>.<domain> -> router uplink address of every cluster in a lab group (hub routes for virtual media)"""
     out = {}
@@ -184,6 +199,7 @@ def reconcile(db: Session) -> None:
     if available() is not None:
         return
     hosts = _hosts(db)
+    redirects = _redirects(db)
     wanted: Dict[str, Dict[str, Any]] = {}
     for group in db.query(Group).all():
         spec = group.spec or {}
@@ -202,7 +218,8 @@ def reconcile(db: Session) -> None:
         state.mkdir(exist_ok=True)
         config = {"listen": bmc["listen"], "port": int(bmc["port"]), "libvirt_uri": settings.LIBVIRT_URI,
                   "auth_file": str(gdir / "bmc-htpasswd"), "allow_file": str(allow), "state_dir": str(state),
-                  "hosts": hosts, "storage_pool": settings.DEFAULT_POOL_NAME}
+                  "hosts": hosts, "redirects": redirects, "redirect_ports": IRONIC_PORTS,
+                  "storage_pool": settings.DEFAULT_POOL_NAME}
         config["_hash"] = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         wanted[group.name] = config
     supervisor.apply(wanted)

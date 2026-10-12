@@ -67,8 +67,31 @@ class SpokeService:
 
     # ------------------------------------------------------------------------------------------------ hub side
 
-    def ensure_cim(self, runner: Any) -> None:
-        """metal3 + assisted service on the hub (idempotent)"""
+    @staticmethod
+    def os_image(version: str) -> Dict[str, Any]:
+        """The assisted service's RHCOS live ISO for `version` (x86_64 only: its default list is every architecture
+        and release, ~15 ISOs that overflow the image store)"""
+        import subprocess
+        from app.services.openshift_service import openshift_service
+        installer = openshift_service.bin_dir(version) / "openshift-install"
+        if not installer.is_file():
+            openshift_service.ensure_binaries(version, lambda m, p: None, lambda: False)
+        out = subprocess.run([str(installer), "coreos", "print-stream-json"], capture_output=True, text=True,
+                             timeout=120)
+        metal = json.loads(out.stdout)["architectures"]["x86_64"]["artifacts"]["metal"]
+        return {"openshiftVersion": ".".join(version.split(".")[:2]), "version": metal["release"],
+                "url": metal["formats"]["iso"]["disk"]["location"], "cpuArchitecture": "x86_64"}
+
+    def ensure_cim(self, runner: Any, hub: Cluster, version: str) -> None:
+        """metal3 + assisted service on the hub (idempotent). The hub router forwards Ironic's image ports
+        (6180 http / 6183 https, on the hub nodes' host network) from its uplink address: the BMC emulator on the
+        host downloads virtual media from there (it has no route to the group network)."""
+        from app.services.cluster_network import GroupClusterNetwork
+        network = GroupClusterNetwork(hub.group_id, hub.name, owned=bool(hub.group_owned))
+        masters = [n.ip for n in hub.nodes if n.role == "ctlplane" and n.ip]
+        for port in (6180, 6183):
+            network.publish_lb(f"{hub.name}-ironic-{port}", port, [f"{ip}:{port}" for ip in masters])
+        network.commit()
         runner.log("Hub: metal3 (Provisioning, no provisioning network) for BareMetalHosts")
         runner.apply_retry([{"apiVersion": "metal3.io/v1alpha1", "kind": "Provisioning",
                              "metadata": {"name": "provisioning-configuration"},
@@ -83,10 +106,17 @@ class SpokeService:
 
         def volume(size: str) -> Dict[str, Any]:
             return {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": size}}}
+        image = self.os_image(version)
+        try:
+            current = runner.oc_json(["get", "agentserviceconfig", "agent"], 30).get("spec", {}).get("osImages") or []
+        except (RuntimeError, ValueError):
+            current = []
+        images = [i for i in current if i.get("openshiftVersion") != image["openshiftVersion"]] + [image]
         runner.apply_retry([{"apiVersion": "agent-install.openshift.io/v1beta1", "kind": "AgentServiceConfig",
                              "metadata": {"name": "agent"},
                              "spec": {"databaseStorage": volume("10Gi"), "filesystemStorage": volume("20Gi"),
-                                      "imageStorage": volume("10Gi")}}], "AgentServiceConfig", timeout=5 * 60)
+                                      "imageStorage": volume("20Gi"), "osImages": images}}],
+                           "AgentServiceConfig", timeout=5 * 60)
         deadline = time.monotonic() + CIM_TIMEOUT
         last = ""
         while True:
@@ -172,7 +202,7 @@ class SpokeService:
             self._save(db, hub, name, state=state, message=message)
 
         step(5, "central infrastructure management on the hub (metal3, assisted service)")
-        self.ensure_cim(runner)
+        self.ensure_cim(runner, hub, version)
 
         domain = (group.spec or {}).get("domain") or f"{group.name}.lab"
         zone = f"{name}.{domain}"
