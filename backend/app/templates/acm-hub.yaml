@@ -1,0 +1,62 @@
+id: acm-hub
+title: ACM hub (Advanced Cluster Management)
+summary: A single-node OpenShift ACM hub in a lab group; import kubeadm / k3s / OpenShift clusters of the app as managed clusters. Heavy.
+tags: [openshift, acm, multicluster]
+requires: [openshift]
+heavy: true
+resources: {vcpus: 13, memory_mb: 33280, disk_gb: 130}
+params:
+  - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
+  - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
+  - {name: channel, label: Update channel, type: choice, choices: [stable-4.20, stable-4.19, stable-4.18], default: stable-4.20}
+  - {name: version, label: Exact release, type: string, pattern: '^\d+\.\d+\.\d+$', help: 'e.g. 4.20.40; empty = latest of the channel'}
+  - {name: storage, label: Storage, type: choice, choices: [lvms, none], default: lvms,
+     help: 'lvms adds a 100 GiB disk and a default StorageClass (for ACM add-ons that want volumes, e.g. observability)'}
+  - {name: password, label: Login password (user admin), type: string, default: lab12345}
+name: "c{{case}}-hub"
+group:
+  cidr: "{{cidr}}"
+  cloud_init: {username: admin, password: "{{password}}"}
+cluster:
+  name: "c{{case}}-hub"
+  type: openshift
+  ctlplane: {memory: 32768, vcpu: 12, disk_size: 120}
+  openshift:
+    channel: "{{channel}}"
+    version: "{{version}}"
+    topology: sno
+    storage: "{{storage}}"
+    acm: true
+guide: |
+  # Case {{case}}: ACM hub
+
+  For customers running Red Hat Advanced Cluster Management: import, klusterlet, add-ons, policies.
+  **Heavy:** the hub node takes 32 GiB of RAM and 12 vCPUs (OpenShift + ACM); install 45–90 minutes, then
+  ACM 10–20 minutes.
+
+  ## What is in the lab
+  - Lab group **{{group}}** on **{{cidr}}**; the router `{{ip:1}}` serves `api.c{{case}}-hub.{{domain}}` and
+    `*.apps.c{{case}}-hub.{{domain}}` and load-balances 6443 / 22623 / 80 / 443
+  - Cluster **c{{case}}-hub** (SNO, {{channel}}, storage {{storage}}) with the ACM operator, the multicluster
+    engine and a MultiClusterHub (availability Basic)
+  - Managed clusters are other clusters of the app, imported from the hub's **ACM** tab (a template holds one
+    cluster: create them from the Clusters page)
+
+  ## Steps
+  1. Wait for the cluster task (install, then the ACM add-on: MultiClusterHub Running).
+  2. Clusters page → Create cluster → **kubeadm** (its own lab group, 1 control plane + 1 worker, 4 GiB each).
+  3. Hub page → **ACM** tab → *Import cluster* → pick it. The app adds `api.c{{case}}-hub.{{domain}}` to the
+     managed cluster's group DNS, creates the ManagedCluster and the klusterlet joins (a few minutes).
+  4. Console (`https://console-openshift-console.apps.c{{case}}-hub.{{domain}}`, kubeadmin): perspective switcher
+     → **All Clusters** → Infrastructure → Clusters.
+
+  ## Checks
+  - `oc get mch -n open-cluster-management` phase Running
+  - `oc get managedclusters`: the imported cluster JOINED and AVAILABLE True
+  - On the managed cluster: `kubectl get pods -n open-cluster-management-agent` (klusterlet) and
+    `-n open-cluster-management-agent-addon` (add-ons) Running
+
+  ## Things to try
+  - Detach and re-import with the other method (auto-import-secret vs import manifests)
+  - Stop the managed cluster: the ManagedCluster goes Unknown after ~5 min, back when started
+  - A `Policy` + `Placement` from the customer's case, `oc get policy -A`
