@@ -85,6 +85,31 @@ tag filters narrow the gallery; see [docs/templates.md](docs/templates.md).
 the API endpoint and the backing network; the detail page has copy-paste `kubectl`/`oc` commands and a
 kubeconfig download. See [docs/openshift.md](docs/openshift.md).
 
+![Lab topology](docs/images/group-topology.png)
+
+**Lab topology** — a lab group drawn as one diagram: your laptop over a WireGuard tunnel, the host
+relaying it, the router (DHCP / DNS / NAT / NTP, load balancer, WireGuard, BGP), the L2 lab network with
+the cluster nodes, and the MetalLB virtual IPs. Each control-plane node shows its BGP session (with BFD)
+announcing the service IP, and dashed lines trace how traffic reaches a floating address. "Follow a
+packet" animates a chosen flow and every box has a plain-words tooltip (with *What is BGP / L2 / NAT?*
+explainers). The same view is a tab on a lab group and on an OpenShift cluster.
+
+![BGP on the router](docs/images/bgp.png)
+
+**BGP (FRR) on the router** — live routing state for the lab: a BGP session from each node (AS 64513 →
+router AS 64512), BFD sessions with sub-second failure detection (3 × 200 ms), and the routes the router
+learned — here a MetalLB service IP (`10.45.0.1/32`) reachable over **ECMP** across all three control
+planes and installed in the kernel. MetalLB in BGP mode and BFD make failover ~0.6 s instead of the BGP
+hold time. See [docs/bgp.md](docs/bgp.md).
+
+![Remote access (WireGuard)](docs/images/remote-access.png)
+
+**Remote access (WireGuard)** — connect a laptop straight into a lab over WireGuard, relayed by the host
+so no inbound firewall holes are needed. The tab lists the routed subnets (lab network, tunnel, cluster
+API, BGP ranges), connected devices with live handshake and traffic counters, and a per-device config /
+QR download; a cluster's kubeconfig then works as-is from the connected device. See
+[docs/wireguard.md](docs/wireguard.md).
+
 ![Networks](docs/images/networks.png)
 
 **Networks** — NAT, routed and isolated libvirt networks with state, bridge, subnet, DHCP range and
