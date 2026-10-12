@@ -26,10 +26,6 @@ export function useReloadOnNewVersion(active: boolean, from: string | undefined)
 /** Why "Update now" can't run, in plain words (null = it can) */
 function updateBlocked(st: UpdateStatus): string | null {
   if (st.updating) return 'An update is already running.';
-  if (st.mode !== 'release') {
-    return 'This instance runs from a git checkout: only release installs (/opt/vm-manager, docs/updates.md) update '
-      + 'from here.';
-  }
   if (st.error) return st.error;
   if (!st.latest) return 'No release checked yet: click Check now.';
   if (!st.available) return `Up to date: ${st.version} is the latest ${st.channel} release.`;
@@ -122,16 +118,16 @@ export const UpdateCard: React.FC = () => {
             {st.updating && <Alert isInline variant="info" title="An update is running: the page reloads when it's done"
               style={{ marginTop: 12 }} />}
 
-            <div style={{ marginTop: 12 }}>
+            {st.mode === 'release' && <div style={{ marginTop: 12 }}>
               {!readOnly && (
                 <Button id="update-now" variant="primary" isDisabled={!!updateBlocked(st) || busy} onClick={update}>
                   {st.available && st.latest ? `Update now to ${st.latest.version}` : 'Update now'}
                 </Button>
               )}
               {updateBlocked(st) && <span id="update-blocked" style={{ marginLeft: 8 }}>{updateBlocked(st)}</span>}
-            </div>
+            </div>}
 
-            {(st.mode !== 'release' || st.available) && (
+            {st.available && (
               <div>
                 <p style={{ margin: '8px 0 4px' }}>
                   {st.mode === 'release' ? 'Or on the host:' : 'This instance runs from a git checkout: update it with'}

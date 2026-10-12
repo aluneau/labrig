@@ -53,7 +53,7 @@ export const UpdateButton: React.FC = () => {
       </>
     );
   }
-  if (st.available && latest) {
+  if (st.available && latest && st.mode === 'release') {
     return <Button id="dashboard-update" variant="secondary" onClick={toHost}>Update available: {latest}</Button>;
   }
   return (
@@ -64,7 +64,7 @@ export const UpdateButton: React.FC = () => {
 };
 
 /** Masthead (every page): "Update available: <latest>" when the channel has a newer release, "Updating…"
- * while one runs; both open the Host page's Version and updates card. Nothing when up to date. */
+ * while one runs; both open the Host page's Version and updates card. Nothing when up to date or on a checkout. */
 export const UpdatePill: React.FC = () => {
   const navigate = useNavigate();
   const [st, setSt] = useState<UpdateStatus | null>(null);
@@ -82,7 +82,8 @@ export const UpdatePill: React.FC = () => {
   if (st.updating) {
     return <Label id="update-pill" color="blue" icon={<Spinner size="sm" />}>Updating…</Label>;
   }
-  if (!st.available || !st.latest) return null;
+  // a git checkout (development) updates with git: no pill there
+  if (st.mode !== 'release' || !st.available || !st.latest) return null;
   return (
     <Button id="update-pill" variant="primary" size="sm" onClick={() => navigate('/hosts')}
       title={`${st.version} -> ${st.latest.version} (${st.channel} channel)`}>

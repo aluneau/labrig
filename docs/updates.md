@@ -53,8 +53,8 @@ helper (`self-update`), which starts the updater detached (`vm-manager-update.se
 restart); the page reloads when the new version answers. The **Dashboard** header has the same action
 (**Update to <version>**, with a confirmation) when an update is available, else the running version. On every page
 the masthead shows **Update available: <version>** (opens the Host page) and the user menu has **Version and updates**.
-**Update now** is always on the Host page: greyed out with the reason when it can't run (git checkout, up to date,
-GitHub unreachable). The helper only installs the **current latest release
+On a release install **Update now** is always on the Host page, greyed out with the reason when it can't run (up to
+date, GitHub unreachable); a git checkout (development) shows only the `git pull` command, and no masthead button. The helper only installs the **current latest release
 of the channel** from the repo in `/etc/vm-manager/update.conf`: the app can't pick another source or an older
 version.
 
