@@ -128,7 +128,8 @@ async function waitManaged(hubId, name, want) {
 
     // 5. k3s (default network) through the API
     if (ids.k3s) {
-      await post(`/clusters/${ids.hub}/acm/managed`, { cluster_id: ids.k3s });
+      // the other import path: the app applies the hub's import manifests itself
+      await post(`/clusters/${ids.hub}/acm/managed`, { cluster_id: ids.k3s, method: 'manifests' });
       m = await waitManaged(ids.hub, NAMES.k3s, 'available');
       log(`${NAMES.k3s}: available via ${m.method}, Kubernetes ${m.kubernetes_version}`);
     }

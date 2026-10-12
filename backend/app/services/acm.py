@@ -344,11 +344,12 @@ class AcmService:
         result["managed"] = managed
         taken = set(entries)
         importable = []
+        uplink = self._uplink_network(hub)
         for c in db.query(Cluster).order_by(Cluster.name).all():
             if c.id == hub.id or c.name in taken:
                 continue
             note = None
-            if c.type == "k3s" and not c.group_id and self._uplink_network(hub) not in (c.network,):
+            if c.type == "k3s" and not c.group_id and c.network != uplink:
                 note = (f"on its own NAT network {c.network}: libvirt blocks connections from it to the hub's "
                         "router, the import will be refused")
             importable.append({"id": c.id, "name": c.name, "type": c.type, "status": c.status, "note": note})
@@ -457,6 +458,8 @@ class AcmService:
             if out["exitcode"] != 0:
                 raise RuntimeError(f"Cannot add the hub's DNS zone to {target.name}'s CoreDNS: "
                                    f"{(out['stderr'] or out['stdout']).strip()[-300:]}")
+        # CoreDNS's reload plugin watches the Corefile, not the imported files
+        kube_exec.run_kubectl(target, ["-n", "kube-system", "rollout", "restart", "deployment", "coredns"], timeout=60)
 
     def _unpublish_dns(self, db: Session, hub: Cluster, target: Optional[Cluster]) -> None:
         if target is None:
@@ -476,6 +479,8 @@ class AcmService:
                 kube_exec.run_kubectl(target, ["-n", "kube-system", "patch", "configmap", "coredns-custom", "--type",
                                                "json", "-p", json.dumps([{"op": "remove",
                                                                           "path": f"/data/acm-{hub.name}.server"}])],
+                                      timeout=60)
+                kube_exec.run_kubectl(target, ["-n", "kube-system", "rollout", "restart", "deployment", "coredns"],
                                       timeout=60)
         except Exception as e:  # cleanup: never block a detach / delete
             logger.warning(f"Removing the hub {hub.name}'s DNS entries from {target.name}: {e}")
