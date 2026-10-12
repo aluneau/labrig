@@ -748,6 +748,13 @@ func (r *clusterResource) Delete(ctx context.Context, req resource.DeleteRequest
 }
 
 func (r *clusterResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	if c, err := r.get(ctx, req.ID); err == nil {
+		if os, ok := c.Spec["openshift"].(map[string]any); ok && os["provisioner"] != nil {
+			resp.Diagnostics.AddError("A spoke of an ACM hub",
+				c.Name+" was provisioned by an ACM hub: manage it as vmmanager_acm_spoke, not vmmanager_cluster")
+			return
+		}
+	}
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 	// an empty openshift block: Read fills it from the server (dropped again for other types)
 	empty := openshiftModel{Operators: types.ListNull(types.StringType)}

@@ -1,11 +1,13 @@
-# Red Hat Advanced Cluster Management: a single-node OpenShift hub (ACM add-on) and a kubeadm cluster in its
-# own lab group, imported as a managed cluster (docs/openshift.md "ACM hub").
+# Red Hat Advanced Cluster Management (docs/openshift.md "ACM hub"): a single-node OpenShift hub (ACM add-on) in a lab
+# group that also holds a spoke machine with an emulated BMC; a kubeadm cluster in its own lab group, imported as a
+# managed cluster; a single-node OpenShift spoke the hub provisions on the BMC machine (set spoke = false to skip it:
+# it needs the host firewall rule for the BMC ports, see setup.sh --bmc-ports, and 16 GiB more).
 #
 #   cd opentofu_provider && make install     # once
 #   tofu init && tofu apply                  # ~90 min (OpenShift install, ACM, kubeadm, import)
 #   tofu output -raw hub_kubeconfig > hub.yaml && oc --kubeconfig hub.yaml get managedclusters
 #
-# Needs ~42 GiB of free RAM: hub 32 GiB (OpenShift + ACM), kubeadm 2 x 4 GiB, 2 routers.
+# Needs ~42 GiB of free RAM (+16 GiB for the spoke): hub 32 GiB (OpenShift + ACM), kubeadm 2 x 4 GiB, 2 routers.
 
 terraform {
   required_providers {
@@ -24,6 +26,11 @@ variable "endpoint" {
 variable "name" {
   type    = string
   default = "tofu-acm"
+}
+
+variable "spoke" {
+  type    = bool
+  default = true
 }
 
 variable "pull_secret_path" {
@@ -51,9 +58,26 @@ resource "vmmanager_cloud_image" "alma" {
   keep_on_destroy = true
 }
 
+# The hub's lab group, with one empty machine whose BMC (Redfish, on the host) the hub's metal3 drives
+resource "vmmanager_group" "hub" {
+  name         = "${var.name}-hub"
+  cidr         = "10.42.70.0/24"
+  router_image = "almalinux-9"
+  member {
+    name      = "spoke-1"
+    source    = "empty"
+    bmc       = true
+    memory    = 16384
+    vcpu      = 8
+    disk_size = 120
+  }
+  depends_on = [vmmanager_cloud_image.alma]
+}
+
 resource "vmmanager_cluster" "hub" {
-  name = "${var.name}-hub"
-  type = "openshift"
+  name     = "${var.name}-hub"
+  type     = "openshift"
+  group_id = vmmanager_group.hub.id
   openshift = {
     topology = "sno"
     storage  = "lvms"
@@ -78,6 +102,20 @@ resource "vmmanager_cluster" "kadm" {
 resource "vmmanager_acm_managed_cluster" "kadm" {
   hub_id     = vmmanager_cluster.hub.id
   cluster_id = vmmanager_cluster.kadm.id
+}
+
+# Single-node OpenShift installed by the hub on spoke-1 (ClusterDeployment, AgentClusterInstall, InfraEnv,
+# BareMetalHost): a cluster of the app like the others (cluster_id, kubeconfig)
+resource "vmmanager_acm_spoke" "spoke" {
+  count   = var.spoke ? 1 : 0
+  hub_id  = vmmanager_cluster.hub.id
+  name    = "${var.name}-sp1"
+  machine = "spoke-1"
+}
+
+output "spoke_kubeconfig" {
+  value     = var.spoke ? vmmanager_acm_spoke.spoke[0].kubeconfig : null
+  sensitive = true
 }
 
 output "hub_kubeconfig" {
