@@ -944,10 +944,8 @@ func (r *clusterResource) openshiftAddons(ctx context.Context, id string, old, c
 		if v := intPtr(cur.MetalLBAddrs); v != nil {
 			mlb["addresses"] = *v
 		}
+		// demo: true deploys the demo with MetalLB (and a mode switch moves it)
 		if !addon(map[string]any{"kind": "metallb", "metallb": mlb}, "MetalLB ("+mode(cur)+")") {
-			return false
-		}
-		if !wasOn && demo && !addon(map[string]any{"kind": "metallb-demo"}, "the MetalLB demo") {
 			return false
 		}
 	} else if isOn && demo && !on(old.MetalLBDemo, true) {

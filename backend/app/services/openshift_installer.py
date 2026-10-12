@@ -1105,11 +1105,23 @@ class OpenShiftInstaller:
                         if kind == "metallb-demo":
                             wanted.metallb.demo = True
                         self._mirror_more(db, task, cluster, wanted)
-                    self.run_addon(db, cluster, self._runner(db, task, cluster), kind, name, opts)
+                    runner = self._runner(db, task, cluster)
+                    self.run_addon(db, cluster, runner, kind, name, opts)
                 except Exception as e:
                     self._set_addon(db, cluster, kind, name, "error", str(e)[-500:])
                     raise
                 self._set_addon(db, cluster, kind, name, "done")
+                # first day-2 enable with demo (the default): like at install, the demo follows the operator
+                # (a mode switch already moved an existing demo in run_addon)
+                if kind == "metallb" and opts.metallb.demo \
+                        and not (cluster.spec.get("openshift") or {}).get("metallb", {}).get("service_ip"):
+                    self._set_addon(db, cluster, "metallb-demo", "hello", "installing")
+                    try:
+                        self.run_addon(db, cluster, runner, "metallb-demo", "hello", opts)
+                    except Exception as e:
+                        self._set_addon(db, cluster, "metallb-demo", "hello", "error", str(e)[-500:])
+                        raise
+                    self._set_addon(db, cluster, "metallb-demo", "hello", "done")
                 self.svc._set_status(db, cluster, "ready", None)
                 return {"addon": name}
             return self.svc._guarded(db, task, cluster_id, body, failed_status="ready")
