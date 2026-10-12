@@ -1,120 +1,54 @@
-# Handoff: state on 2026-10-05 (late evening, end of session)
+# Handoff: state on 2026-10-12 (evening, end of session)
 
-Read `CLAUDE.md` first (layout, run/verify commands, architecture rules, portability rules), then
-`future-features.md` ("Status at a glance", designs, §3.3 OpenShift plan, §4 next steps). This file covers
-**where we are and what's next**.
+Read `CLAUDE.md` first (layout, verify commands, architecture rules incl. the **ACM** and **Emulated BMCs**
+paragraphs), then `docs/openshift.md` "ACM hub" and "Spoke machines (BMC) and provisioning a spoke".
+Earlier handoffs are in git history (`git log -p HANDOFF.md`).
 
-## What this session added (all on `main`, service restarted, verified)
+## Where we are
 
-| Feature | State | Docs |
-|---|---|---|
-| **WireGuard remote access** to a lab group | Router runs wg0; the app relays host UDP `51820-51869` → router (no root, no DNAT: libvirt's NAT rules reject inbound). Remote access tab: devices, QR code, `.conf` download, copy-paste commands to connect / clean up the laptop (NetworkManager, wg-quick, a one-line base64 import that works in bash/zsh/fish). Split tunnel (group CIDR + tunnel + router uplink + BGP ranges), router DNS. | `docs/wireguard.md` |
-| **OpenShift** (agent-based installer) | SNO / compact / HA in a lab group; router = DNS (`api`, `api-int`, `*.apps`) + haproxy (6443, 22623, 80, 443) ⇒ **one OpenShift cluster per group**. Version picker (upgrade graph API), cached `openshift-install`/`oc`, pull secret stored 0600 (never in DB/API). Install progress from the Assisted Service (curled from the router) then cluster operators; CSR approval; console, kubeadmin, kubeconfig with `tls-server-name`, SSH key. | `docs/openshift.md` |
-| **Add-ons** | Any OLM operator (curated list at create, live catalog after), LVMS, ODF (LSO + lean StorageCluster), SR-IOV (igb NICs on an isolated `vmm-s-<cluster>` network, vIOMMU, operator in dev mode, sample policy), MetalLB L2 or BGP + `hello` demo. Day-2 from the Operators tab. | `docs/openshift.md` |
-| **BGP** on group routers | FRR, router AS 64512, dynamic neighbors from the group network, only "announce ranges" accepted (a /27 of `10.45.0.0/16` per group), ECMP with port hashing. BGP tab with sessions/routes + copy-paste FRR / upstream MetalLB configs. | `docs/bgp.md` |
-| **Topology view** (owner's ask: "self-explanatory") | Topology tab on groups and OpenShift clusters: laptop → host → router → lab network → nodes → virtual IPs, plain-words tooltips, "Follow a packet" stepper, BGP / L2-ARP / NAT / WireGuard / DHCP-DNS explainers. MetalLB lab tab: diagram + live checks + failover demo. | in the UI |
-| Routers | Now also serve **NTP** (chrony `allow <cidr>` + DHCP option): the OpenShift installer checks node clocks. Group spec `address_pools` keep MetalLB pools out of DHCP/static IPs. | |
-| **OpenTofu** | `vmmanager_group` `wireguard*` + `bgp`; `vmmanager_wireguard_peer`; `vmmanager_cluster` `type = "openshift"` + `openshift {…}` block (read back from the server; in place: add operators, enable MetalLB / demo, switch L2⇄BGP), `console_url`, `kubeadmin_password`, import; `vmmanager_openshift_pull_secret`; data source `vmmanager_openshift_release`. Example `examples/opentofu/openshift`. | `docs/openshift.md` §OpenTofu |
-| Small fixes | Unknown `/api/...` paths return a JSON 404 (a newer UI on a not-restarted backend used to show "Unexpected token '<' … not valid JSON"). Clusters rebuilt from libvirt metadata: OpenShift spec comes back from `backend/data/openshift/clusters/<name>/spec.json`, kubeconfig from the install dir. | |
+- `main` = GitHub `aluneau/labrig`, release **v0.1.3** published (stable channel), CI + release green.
+  The rig runs `main` in checkout mode (`vm-manager` service restarted on it). No `e2e-acm-*` VMs/networks left.
+- 0.1.2: update UI (masthead "Update available", Host page Update now; hidden on git checkouts).
+- 0.1.3: ACM (below) + OpenShift day-2 MetalLB demo fix.
 
-### Verified for real (2026-10-05)
-- **OpenShift SNO 4.20.39** (`e2e-ocp`) installed end to end by the app: 34/34 cluster operators, LVMS default
-  StorageClass, SR-IOV 4 VFs on igb, NMState, MetalLB L2 then **BGP** (switched day 2): all 6 MetalLB lab checks
-  green on :8000, `hello.lab` answered from the router and from a WireGuard client.
-- WireGuard end to end in a nested AlmaLinux 9 install with a NetworkManager client VM (nmcli import, DNS,
-  split tunnel, disable/enable, device removal, restarts, `kubectl get nodes` over the tunnel, OpenTofu).
-- BGP lab (`e2e/bgp.js`): 2 members announcing an anycast /32, ECMP over both, refused out-of-range prefix,
-  failover when a member stops, reachability from a WireGuard client.
-- OpenTofu: import of the live SNO plans no changes; adding `web-terminal` applied in place (50 s); removing an
-  operator is refused; k3s example apply / re-plan / destroy unchanged.
-- On :8000 after the restart: `smoke.js` and `groups.js` pass; all OpenShift tabs load without errors.
+## ACM: what is verified and what is NOT
 
-### Not verified (do these before relying on them)
-- **ODF** (needs 3 nodes with ~16 vCPU / 40 GiB each: doesn't fit next to the owner's VMs on this rig — try on a RHEL lab host).
-- **Compact / HA OpenShift** installs (same code path, never run), BGP ECMP over several OpenShift nodes,
-  creating a cluster directly in `metallb_mode = "bgp"`, the SR-IOV fix on a *fresh* install (on e2e-ocp the
-  policy was re-triggered by hand; the code now waits for NIC discovery), `vfio-pci` device type.
-- A full `tofu apply` that **creates** an OpenShift cluster (only import + in-place were run), `tofu apply` with
-  the group `bgp` attribute.
-- WireGuard from outside the LAN (needs a port forward on the home router), Windows/macOS/phone clients,
-  the ufw branch of `setup.sh --wg-ports`, an EL10 router with FRR.
+| Part | State |
+|---|---|
+| ACM hub add-on (`openshift.acm`, Operators tab, ACM tab) | **Verified for real**: SNO 4.20.40 (32 GiB / 12 vCPU, LVMS), MultiClusterHub Running, ACM 2.17.3. Measured Basic requests ~2.8 vCPU / 8.9 GiB. |
+| Import / detach (`/clusters/{hub}/acm/managed`) | **Verified for real**: kubeadm (own group, auto-import-secret, UI) and k3s on `default` (import manifests, API) both JOINED/AVAILABLE; detach clean. k3s on its own NAT network refused (plain words). |
+| UI relations (list labels, "Managed by" banner, "Import into ACM hub") | **Verified** by `e2e/acm.js` (screenshots in the agent worktree, see below). |
+| Emulated BMC (sushy-tools per group, `bmc: true` members, BMC tab) | **Partly**: emulator checked **from the host only** (401 without creds, only the group's spoke listed, 404 for other VMs). sushy-tools 2.1.0 works on Python 3.9. Never reached **from the hub**. |
+| Spoke provisioning (`/clusters/{hub}/acm/spokes`, spokes = cluster rows with `spec.openshift.provisioner`) | **NOT verified**: no spoke ever installed. Code + `SPOKE=1` e2e path exist, shipped in 0.1.3 untested. |
+| OpenTofu `vmmanager_acm_managed_cluster`, `vmmanager_acm_spoke`, member `bmc` | Builds, example validates (`tofu fmt`/validate); not applied for real. |
 
-### SR-IOV on real hardware (branch feat/sriov-real, 2026-10-09): what remains to verify on a RHEL lab host
-Built and verified nested only (AlmaLinux 10 L1 with emulated igb + vIOMMU, see docs/sriov.md §3 "Verified nested").
-On a host with a real SR-IOV NIC and IOMMU, run docs/sriov.md §3 "How to verify" and `e2e/sriov-real.js`, and check:
-- Intel **ixgbe / i40e / ice** and **mlx5** PFs: the Host checks (driver notes, firmware VF limit hints: mstconfig,
-  NVM, ice DDP), VF counts > 7, libvirt setting MAC + VLAN on those PFs, `trust` / `spoofchk` accepted by each driver.
-- `vm-manager-sriov.service` at boot with slow PF drivers (ice DDP load, mlx5 firmware init; the helper waits 90 s per
-  PF) and with libvirt enabled at boot (the unit is ordered before libvirtd / virtqemud: autostarted VMs with VFs).
-- A slot without ACS (VF sharing an IOMMU group) and an ENOMEM when setting VFs (BIOS "SR-IOV Global Enable" off /
-  MMIO short): the plain-words messages were only exercised on a fake sysfs tree.
-- VLAN tagging reaching a real switch port (trunk on the switch side), bonding in a guest over 2 VFs with trust on.
+### Why the spoke part is blocked
+The host's ufw drops VM -> host TCP (only DNS/DHCP/WireGuard UDP are open). The hub's metal3/Ironic must reach the
+emulator on the uplink gateway `192.168.122.1:<BMC_HOST_PORTS 8180-8199>`. setup.sh now adds the rule
+(`--bmc-ports`), but this rig was never re-run with it. **The owner must run once:**
 
-## This host (CachyOS gaming rig)
-
-- `vm-manager` service (User=aluneau, 127.0.0.1:8000) and libvirtd are **not enabled at boot**. After a reboot:
-  `sudo systemctl start libvirtd vm-manager`. **Restart the service after merging backend changes** (and rebuild
-  the frontend): the UI is served from `frontend/build`, so a new UI on an old backend breaks new pages.
-- ufw: `51820:51869/udp` opened this session (WireGuard relay), plus the older `virbr+` rules.
-- **Still pending owner action:** `scripts/setup.sh --no-boot` (installs the root helper + polkit rules; the Host
-  page says "Privileged helper not installed"). Not needed for WireGuard/OpenShift/BGP.
-- **Running now** (owner's decision whether to keep them):
-  - (`e2e-ocp`, the test SNO of this session, was deleted on 2026-10-06 with its group, ISO and networks.)
-  - `test2` — an OpenShift cluster the **owner** started from the UI this evening (installing at last check). Not ours: don't touch.
-  - `test` (kubeadm) and its group — the owner's.
-- OpenShift data: `backend/data/openshift/` (pull secret 0600, `bin/4.20.39`, base ISO cache ~1.4 GB,
-  `clusters/<name>/` install dirs with kubeadmin password + SSH key). `~/pull-secret.json` is mode 644: suggest `chmod 600`.
-- Git: **public** remote `origin` = https://github.com/aluneau/labrig (pushed 2026-10-06). Before the first
-  push the history was scanned for secrets (pull secret values, keys, kubeconfigs, tokens: none) and rewritten so
-  every commit is `Adrien Luneau <adrien.luneau@gmail.com>` (no work email) and the docs have no personal details.
-  Keep it that way: never commit `backend/data/` (pull secret, install dirs, DB), `*.tfstate`, kubeconfigs.
-
-## Known limitations / open issues
-
-- **No authentication** (127.0.0.1 by default). The WireGuard relay listens on 0.0.0.0 (UDP 51820-51869).
-- OpenShift: one cluster per group (fixed router ports); no add/remove nodes, upgrades, OKD, disconnected,
-  `platform: baremetal` VIPs; the RAM budget check refuses overcommit (by design). Don't stop a cluster in its
-  first 24 h (certificate rotation). Operators can't be uninstalled from the app.
-- Dev backends on DB copies (how agents test) leave the :8000 DB stale for the objects they touched: the service
-  rebuilds clusters from libvirt metadata, but `sync_groups` doesn't refresh an existing group's spec — reload it
-  from the router's `<vmm:group>` metadata if a group looks out of date (done for `e2e-ocp` this session).
-- BGP: only on the "el" router; announce ranges are per group (/27); no BFD, no route export to the uplink.
-- Everything from the previous handoff still applies (no VM CPU/memory edit, groups without uplink, kubeadm
-  upgrades, OpenTofu wholesale `dns_record`/`dhcp_host` lists, …).
-
-## How this session worked
-
-Owner asked for agents; pattern from `parallel-agents-workflow` memory: research agent (kcli study) → plan in
-`future-features.md` §3.3 → coordinator wrote the OpenShift backend while a UI agent built the pages against the
-agreed schemas, and a BGP/topology agent worked in parallel; each in its own worktree, port, DB copy and scratch
-dir; one OpenShift install at a time (RAM). A real SNO install surfaced 4 bugs fixed on `main` (SR-IOV NIC on the
-group network → address overlap; no NTP for the installer; SR-IOV policy race; demo pods couldn't write their
-docroot). Usage limits interrupted agents twice; resuming them with SendMessage worked.
-
-## Next steps (owner's priorities)
-
-0. **Rename to Labrig** (name chosen 2026-10-06; repo already `aluneau/labrig`): UI title, docs, README, package
-   name first; then the OpenTofu provider (`vmmanager_*` → `labrig_*`, needs a migration note for existing state),
-   Go module path, systemd unit / helper / polkit names (setup.sh must migrate an installed `vm-manager`). The
-   `vmm-` prefixes of libvirt objects and the metadata namespace URL can stay (internal; changing them would orphan
-   existing labs).
-
-1. Owner: try the new UI on `test2` / `e2e-ocp` (laptop over WireGuard: group → Remote access → Add device,
-   then the Topology and MetalLB lab tabs), decide whether to keep `e2e-ocp`; run `scripts/setup.sh --no-boot`.
-2. Verify on a bigger host (RHEL lab machine): ODF on compact, HA install, BGP ECMP over 3 nodes, `tofu apply`
-   creating an OpenShift cluster from scratch, SR-IOV on a fresh install. Add `e2e/openshift.js` (SNO + LVMS +
-   MetalLB demo, long) to the suite.
-3. OpenShift next: add workers (`oc adm node-image create`), OKD (no pull secret), disconnected (mirror
-   registry; needs groups without uplink), `platform: baremetal` VIPs as an option, upgrades.
-4. Groups v2: no-uplink groups, VLANs, site-to-site WireGuard between hosts, snapshots/templates.
-5. Before sharing widely: authentication, a remote + CI, resource budget for every group/cluster type.
-
-## How to verify after changes
-
-```bash
-cd backend && venv/bin/python -c "import app.main" && cd .. && scripts/check-python.py
-cd frontend && node node_modules/.bin/tsc --noEmit -p . && CI=true node node_modules/.bin/react-scripts build   # npm isn't installed here
-sudo systemctl restart vm-manager
-cd e2e && node smoke.js && node groups.js     # + wireguard.js (needs CLIENT_SH, nested host), bgp.js, the rest in CLAUDE.md
-cd opentofu_provider && go vet ./... && make install   # then tofu init -upgrade in example dirs (provider checksum changes)
 ```
+sudo ufw allow in on virbr+ to any port 8180:8199 proto tcp comment 'vm-manager BMC (Redfish emulator)'
+```
+
+## Next session (owner said: do it tomorrow; needs ~2–3 h and ~50–60 GiB free RAM)
+
+1. Owner adds the ufw rule above. Check from a group router: `curl -sk -o /dev/null -w '%{http_code}' http://192.168.122.1:8180/redfish/v1/Systems` -> 401
+   (plain http unless the emulator got a cert; the group's port is in `GET /groups/{id}/bmc`).
+2. Run with a fresh token: `cd e2e && VMM_TOKEN=… SPOKE=1 KEEP=1 node acm.js` (hub SNO + BMC machine + spoke;
+   `REUSE=1` reuses an existing hub). Watch: BareMetalHost `provisioned`/agent registered via virtual media, assisted
+   install progress, spoke row in Clusters with kubeconfig / logs / MCP `oc`, delete through the hub (machine stays).
+   Likely weak spots (unverified code): Ironic image server ports 6180/6183 forwarded by the hub router + emulator
+   redirect (commit 50f724b), virtual media download from the host (getaddrinfo patch -> lab zones via router),
+   `ensure_cim` AgentServiceConfig storage on LVMS, BMH `bootMode legacy`.
+3. Fix what breaks, then OpenTofu: apply `examples/opentofu/acm` once (hub + import + spoke), destroy.
+4. Until verified: consider marking spoke provisioning **experimental** in docs/openshift.md + ACM tab (offered,
+   not done). Then secret-scan, push, release 0.1.4.
+5. Clean up `e2e-acm-*` / `tofu-acm-*` at the end (delete clusters through the API: owned groups go with them).
+
+## Notes
+- The ACM agent's worktree is still at `.claude/worktrees/agent-a03663a218382d2da` (branch merged; screenshots in
+  its `e2e/screenshots/acm-*.png`). Safe to remove with `git worktree remove` once no longer useful.
+- npm/npx aren't in PATH: `node node_modules/typescript/bin/tsc --noEmit -p .`,
+  `CI=true node node_modules/react-scripts/bin/react-scripts.js build`.
+- Pushing needs `gh` logged in (token was refreshed today); scan before every push (memory: public repo).
