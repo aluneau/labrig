@@ -20,6 +20,7 @@ import { BarsIcon, UserIcon } from '@patternfly/react-icons';
 import { useEventsConnected } from '../../hooks/useEvents';
 import { useLibvirt } from '../../hooks/useLibvirt';
 import { useAuth } from '../../hooks/useAuth';
+import { UpdatePill } from '../host/UpdateButton';
 
 /** Logged-in user: API tokens, log out. With authentication off, a small notice instead. */
 const UserMenu: React.FC = () => {
@@ -51,6 +52,9 @@ const UserMenu: React.FC = () => {
             {user.name}
           </DropdownItem>
           <Divider key="d" />
+          <DropdownItem key="updates" id="user-menu-updates" onClick={() => { setOpen(false); navigate('/hosts'); }}>
+            Version and updates
+          </DropdownItem>
           <DropdownItem key="tokens" id="user-menu-tokens" onClick={() => { setOpen(false); navigate('/tokens'); }}>
             API tokens
           </DropdownItem>
@@ -102,6 +106,7 @@ export const AppHeader: React.FC = () => {
       </MastheadMain>
       <MastheadContent>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 16 }}>
+          <UpdatePill />
           <LibvirtPill />
           <span
             style={{ color: 'var(--pf-v5-global--Color--light-200)', fontSize: 14 }}

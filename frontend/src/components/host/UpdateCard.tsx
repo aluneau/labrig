@@ -23,6 +23,19 @@ export function useReloadOnNewVersion(active: boolean, from: string | undefined)
   }, [active, from]);
 }
 
+/** Why "Update now" can't run, in plain words (null = it can) */
+function updateBlocked(st: UpdateStatus): string | null {
+  if (st.updating) return 'An update is already running.';
+  if (st.mode !== 'release') {
+    return 'This instance runs from a git checkout: only release installs (/opt/vm-manager, docs/updates.md) update '
+      + 'from here.';
+  }
+  if (st.error) return st.error;
+  if (!st.latest) return 'No release checked yet: click Check now.';
+  if (!st.available) return `Up to date: ${st.version} is the latest ${st.channel} release.`;
+  return null;
+}
+
 /** Running version, latest GitHub release of the channel, update command / button (docs/updates.md) */
 export const UpdateCard: React.FC = () => {
   const { readOnly } = useAuth();
@@ -109,13 +122,17 @@ export const UpdateCard: React.FC = () => {
             {st.updating && <Alert isInline variant="info" title="An update is running: the page reloads when it's done"
               style={{ marginTop: 12 }} />}
 
-            {st.available && st.latest && (
-              <div style={{ marginTop: 12 }}>
-                {st.can_update && !readOnly && (
-                  <Button id="update-now" variant="primary" isDisabled={busy || st.updating} onClick={update}>
-                    Update now to {st.latest.version}
-                  </Button>
-                )}
+            <div style={{ marginTop: 12 }}>
+              {!readOnly && (
+                <Button id="update-now" variant="primary" isDisabled={!!updateBlocked(st) || busy} onClick={update}>
+                  {st.available && st.latest ? `Update now to ${st.latest.version}` : 'Update now'}
+                </Button>
+              )}
+              {updateBlocked(st) && <span id="update-blocked" style={{ marginLeft: 8 }}>{updateBlocked(st)}</span>}
+            </div>
+
+            {(st.mode !== 'release' || st.available) && (
+              <div>
                 <p style={{ margin: '8px 0 4px' }}>
                   {st.mode === 'release' ? 'Or on the host:' : 'This instance runs from a git checkout: update it with'}
                 </p>
@@ -123,7 +140,7 @@ export const UpdateCard: React.FC = () => {
                 <p style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', marginTop: 4 }}>
                   Running labs are not affected: the app restarts, the VMs keep running. Log: {st.log}
                 </p>
-                {st.latest.notes && (
+                {st.available && st.latest?.notes && (
                   <ExpandableSection toggleText="Release notes" style={{ marginTop: 8 }}>
                     <Markdown source={st.latest.notes} />
                   </ExpandableSection>

@@ -51,7 +51,10 @@ The **Host page** shows the running version, the latest release of the channel (
 release notes, and the command. On a release install, admins get **Update now**: the app asks the privileged
 helper (`self-update`), which starts the updater detached (`vm-manager-update.service`, it survives the app's
 restart); the page reloads when the new version answers. The **Dashboard** header has the same action
-(**Update to <version>**, with a confirmation) when an update is available, else the running version. The helper only installs the **current latest release
+(**Update to <version>**, with a confirmation) when an update is available, else the running version. On every page
+the masthead shows **Update available: <version>** (opens the Host page) and the user menu has **Version and updates**.
+**Update now** is always on the Host page: greyed out with the reason when it can't run (git checkout, up to date,
+GitHub unreachable). The helper only installs the **current latest release
 of the channel** from the repo in `/etc/vm-manager/update.conf`: the app can't pick another source or an older
 version.
 

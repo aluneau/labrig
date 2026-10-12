@@ -62,3 +62,31 @@ export const UpdateButton: React.FC = () => {
     </Button>
   );
 };
+
+/** Masthead (every page): "Update available: <latest>" when the channel has a newer release, "Updating…"
+ * while one runs; both open the Host page's Version and updates card. Nothing when up to date. */
+export const UpdatePill: React.FC = () => {
+  const navigate = useNavigate();
+  const [st, setSt] = useState<UpdateStatus | null>(null);
+
+  useEffect(() => {
+    const load = () => hostApi.update().then(setSt).catch(() => undefined);
+    load();
+    const timer = window.setInterval(load, 30 * 60 * 1000);  // the server asks GitHub at most every 6 h
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useReloadOnNewVersion(!!st?.updating, st?.version);
+
+  if (!st) return null;
+  if (st.updating) {
+    return <Label id="update-pill" color="blue" icon={<Spinner size="sm" />}>Updating…</Label>;
+  }
+  if (!st.available || !st.latest) return null;
+  return (
+    <Button id="update-pill" variant="primary" size="sm" onClick={() => navigate('/hosts')}
+      title={`${st.version} -> ${st.latest.version} (${st.channel} channel)`}>
+      Update available: {st.latest.version}
+    </Button>
+  );
+};
