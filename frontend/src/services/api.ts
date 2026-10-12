@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -250,6 +250,11 @@ export const clusterApi = {
   metallb: (id: number) => request<MetalLBScenario>(`/clusters/${id}/metallb`),
   setMetallb: (id: number, data: MetalLBOptions) =>
     request<Task>(`/clusters/${id}/metallb`, { method: 'PUT', body: JSON.stringify(data) }),
+  // ACM hub (OpenShift add-on acm)
+  acm: (id: number) => request<AcmStatus>(`/clusters/${id}/acm`),
+  acmImport: (id: number, clusterId: number, method: 'auto' | 'secret' | 'manifests' = 'auto') =>
+    post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
+  acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
 };
 
 export const openshiftApi = {

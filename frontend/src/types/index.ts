@@ -468,6 +468,7 @@ export interface OpenShiftOptions {
   operators: OperatorRequest[];
   sriov: SriovOptions;
   metallb: MetalLBOptions;
+  acm?: boolean; // Advanced Cluster Management hub (operator + MultiClusterHub)
   disable_updates: boolean;
   // Disconnected install (create time only): mirror registry on the group router, group egress blocked
   disconnected?: boolean;
@@ -536,7 +537,38 @@ export interface ClusterCredentials {
   console_url?: string | null;
 }
 
-export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo';
+export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo' | 'acm';
+
+/** ACM: a managed cluster of a hub (GET /clusters/{id}/acm) */
+export interface AcmManagedCluster {
+  name: string;
+  cluster_id?: number | null;
+  cluster_type?: string | null;
+  state: string; // importing | available | unavailable | detaching | error | unknown
+  method?: string | null; // secret (auto-import-secret) | manifests (applied by the app)
+  message?: string | null;
+  joined?: boolean | null;
+  available?: boolean | null;
+  hub_accepted?: boolean | null;
+  kubernetes_version?: string | null;
+  vendor?: string | null;
+  conditions: { type: string; status: string; reason?: string; message?: string }[];
+}
+
+export interface AcmStatus {
+  enabled: boolean;
+  state?: string | null; // add-on state
+  message?: string | null;
+  hub_phase?: string | null;
+  hub_version?: string | null;
+  mce_phase?: string | null;
+  console_url?: string | null;
+  hub_api?: string | null;
+  sizing?: string | null;
+  managed: AcmManagedCluster[];
+  importable: { id: number; name: string; type: string; status: string; note?: string | null }[];
+  error?: string | null;
+}
 
 export interface AddonRequest {
   kind: AddonKind;

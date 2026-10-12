@@ -47,6 +47,7 @@ import { ConsoleAccess, InstallPanel } from '../components/clusters/OpenShiftIns
 import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
 import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
+import { AcmHub } from '../components/clusters/AcmHub';
 import { MirroredImages } from '../components/clusters/MirroredImages';
 import { ClusterLogs } from '../components/logs/ClusterLogs';
 
@@ -287,6 +288,7 @@ export const ClusterDetailPage: React.FC = () => {
             usePageInsets aria-label="Cluster sections">
             <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
             {isOpenShift ? <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" /> : null}
+            {isOpenShift ? <Tab eventKey="acm" title={<TabTitleText>ACM</TabTitleText>} id="os-tab-acm" /> : null}
             {labTabs ? <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" /> : null}
             {cluster.group_id ? <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>} id="os-tab-topology" /> : null}
             <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} id="cluster-tab-logs" />
@@ -302,6 +304,7 @@ export const ClusterDetailPage: React.FC = () => {
         {isOpenShift && tab === 'operators' && (
           <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
         )}
+        {isOpenShift && tab === 'acm' && <AcmHub cluster={cluster} onChanged={() => { reload(); install.reload(); }} />}
         {tab === 'logs' && <Card><CardBody><ClusterLogs clusterId={cluster.id} clusterName={cluster.name} /></CardBody></Card>}
         {labTabs && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
         {tabbed && tab === 'topology' && cluster.group_id && (
