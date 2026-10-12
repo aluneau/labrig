@@ -114,14 +114,15 @@ case "$FAMILY" in
     $SUDO pacman -S --needed --noconfirm "${pkgs[@]}"
     ;;
   rhel)
+    # nmstate: openshift-install validates a bare-metal node's static networkConfig with nmstatectl (docs/bmh.md)
     $SUDO dnf install -y libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client python3 python3-libvirt \
-      dnsmasq-utils polkit
+      dnsmasq-utils polkit nmstate
     ;;
   debian)
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils ovmf dnsmasq-base python3 python3-venv python3-libvirt \
-      dnsmasq-utils polkitd pkexec
+      dnsmasq-utils polkitd pkexec nmstate
     ;;
 esac
 ok "packages installed"

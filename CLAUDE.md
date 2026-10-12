@@ -64,6 +64,7 @@ frontend/src/
 docs/auth.md          authentication: PAM login, groups -> roles, tokens, CLI, CSRF, disabling it
 docs/sriov.md         SR-IOV labs (igb emulation, vIOMMU, VF pools, OpenShift operator settings)
 docs/openshift.md     OpenShift (agent-based installer): topologies, add-ons, MetalLB L2 lab, reaching the console
+docs/bmh.md           bare-metal hosts (BMC/Redfish): single-node OpenShift on physical servers (no lab group)
 docs/wireguard.md     lab remote access: enable, devices, laptop steps (nmcli import), troubleshooting
 docs/bgp.md           BGP on the group router (FRR), MetalLB BGP mode, beginner-friendly
 docs/disconnected.md  egress switch + mirror registry on the router (mirror-registry, oc-mirror v2, own images)

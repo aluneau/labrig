@@ -526,6 +526,42 @@ class OpenShiftService:
         return config
 
     @staticmethod
+    def agent_config_bmh(name: str, rendezvous_ip: str, hosts: List[Dict[str, Any]],
+                         ntp: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Bare-metal agent-config: static networking (nmstate) per host, no router DHCP. The NIC is
+        matched by MAC (identifier: mac-address), so the kernel's name for it doesn't matter.
+        hosts: [{name, role, mac, ip, prefix, gateway, dns: [...], root_device?}]"""
+        def entry(h: Dict[str, Any]) -> Dict[str, Any]:
+            iface = "bmhnet0"
+            nmstate = {
+                "interfaces": [{
+                    "name": iface, "type": "ethernet", "state": "up",
+                    "identifier": "mac-address", "mac-address": h["mac"],
+                    "ipv4": {"enabled": True, "dhcp": False,
+                             "address": [{"ip": h["ip"], "prefix-length": int(h["prefix"])}]},
+                    "ipv6": {"enabled": False},
+                }],
+                "dns-resolver": {"config": {"server": list(h["dns"])}},
+                "routes": {"config": [{"destination": "0.0.0.0/0", "next-hop-address": h["gateway"],
+                                       "next-hop-interface": iface}]},
+            }
+            host: Dict[str, Any] = {
+                "hostname": h["name"], "role": h["role"],
+                "interfaces": [{"name": iface, "macAddress": h["mac"]}],
+                "networkConfig": nmstate,
+            }
+            if h.get("root_device"):
+                host["rootDeviceHints"] = {"deviceName": h["root_device"]}
+            return host
+        config: Dict[str, Any] = {
+            "apiVersion": "v1beta1", "kind": "AgentConfig", "metadata": {"name": name},
+            "rendezvousIP": rendezvous_ip, "hosts": [entry(h) for h in hosts],
+        }
+        if ntp:
+            config["additionalNTPSources"] = list(ntp)
+        return config
+
+    @staticmethod
     def check_cidr(cidr: str) -> None:
         net = ipaddress.IPv4Network(cidr, strict=False)
         for reserved in RESERVED_CIDRS:

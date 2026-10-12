@@ -14,6 +14,7 @@ import {
   AuthStatus, ApiToken, ApiTokenCreated,
   UpdateStatus,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
+  BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo,
 } from '../types';
 import { Diagnostics, LogParams, LogResult, LogRules, PodList } from '../types/logs';
 
@@ -332,4 +333,17 @@ export const logsApi = {
   },
   pods: (clusterId: number, params: LogParams) => request<PodList>(`/clusters/${clusterId}/pods${logQuery(params)}`),
   diagnostics: (vmId: number) => request<Diagnostics>(`/vms/${vmId}/diagnostics`),
+};
+
+export const bareMetalApi = {
+  list: () => request<BareMetalHost[]>('/bare-metal-hosts'),
+  get: (id: number) => request<BareMetalHost>(`/bare-metal-hosts/${id}`),
+  create: (data: BareMetalHostCreate) => post<BareMetalHost>('/bare-metal-hosts', data),
+  update: (id: number, data: BareMetalHostUpdate) =>
+    request<BareMetalHost>(`/bare-metal-hosts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: number) => del(`/bare-metal-hosts/${id}`),
+  refresh: (id: number) => post<BareMetalHost>(`/bare-metal-hosts/${id}/refresh`),
+  nics: (id: number) => request<BareMetalHostNicInfo[]>(`/bare-metal-hosts/${id}/nics`),
+  power: (id: number, action: 'on' | 'off' | 'cycle', graceful = false) =>
+    post<{ power_state: string }>(`/bare-metal-hosts/${id}/power`, { action, graceful }),
 };
