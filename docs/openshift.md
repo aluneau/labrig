@@ -195,8 +195,8 @@ Ironic powers a server and boots it from a virtual-media ISO, the assisted insta
   `ufw allow in on virbr+ to any port 8180:8199 proto tcp` (firewalld: the ports in zone `libvirt`).
 - The emulator resolves the names under every lab cluster's zone (`api`, `*.apps`) to that cluster's router: it
   downloads the hub's discovery ISO itself when metal3 inserts the virtual media.
-- sushy-tools is pip-installed in the app's venv by `setup.sh` (2.x needs Python ≥ 3.10; on RHEL 9 pip picks an
-  older 1.x). Without it the BMC tab says so and the rest of the app works.
+- sushy-tools is pip-installed in the app's venv by `setup.sh` (on Python 3.9 / RHEL 9 pip picks 2.1.0, same
+  emulator API). Without it the BMC tab says so and the rest of the app works.
 
 **Provision a spoke** (hub page → ACM → *Provision a spoke*, or `POST /clusters/{hub}/acm/spokes {name, machine}`):
 single-node OpenShift on a BMC member **of the hub's group** (it resolves and reaches the hub's routes through the

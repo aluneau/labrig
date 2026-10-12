@@ -368,7 +368,7 @@ grep -v '^libvirt-python' "$APP_DIR/backend/requirements.txt" | code_run tee "$A
 code_run "$VENV/bin/pip" install -q --disable-pip-version-check -r "$APP_DIR/backend/.requirements-pip.txt"
 code_run rm -f "$APP_DIR/backend/.requirements-pip.txt"
 # Emulated BMCs (Redfish) for lab machines: optional, the rest of the app works without it. sushy-tools 2.x needs
-# Python >= 3.10: pip picks the newest release the venv's Python supports (RHEL 9: an older 1.x)
+# Python >= 3.10: pip picks the newest release the venv's Python supports (Python 3.9 / RHEL 9: 2.1.0)
 if code_run "$VENV/bin/pip" install -q --disable-pip-version-check sushy-tools \
     && code_run "$VENV/bin/python" -c 'import sushy_tools.emulator.main' 2>/dev/null; then
   ok "sushy-tools installed (emulated BMCs)"

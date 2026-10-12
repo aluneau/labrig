@@ -182,7 +182,7 @@ async function waitManaged(hubId, name, want) {
     if ((await api(`/clusters/${ids.kadm}`)).acm) throw new Error('relation still there after detach');
     const mcs2 = await mcp('oc', { cluster: NAMES.hub, args: 'get managedclusters' });
     log(`after detach:\n${mcs2}`);
-    await page.reload();
+    await page.goto(`${BASE}/clusters/${ids.hub}?tab=acm`);
     await page.locator('#acm-managed').waitFor({ timeout: 60000 });
     await page.waitForTimeout(800);
     await page.screenshot({ path: 'acm-detached.png', fullPage: true });
