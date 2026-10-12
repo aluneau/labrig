@@ -53,6 +53,56 @@ A web UI and REST API to manage KVM virtual machines through libvirt.
 libvirt is the source of truth: VMs, pools and networks created with `virsh` or virt-manager show up
 too. The SQLite database only keeps metadata (descriptions, cloud images, task history).
 
+## Screenshots
+
+The React + PatternFly UI is served by the backend on the same port as the API. Everything below is
+live data from a running host: libvirt state is pushed over Server-Sent Events, so counts, task
+progress and power states update without a refresh (note the **Live** indicator and `libvirt: running`
+badge in the header).
+
+![Dashboard](docs/images/dashboard.png)
+
+**Dashboard** — host overview at a glance: VM / network / storage counts, CPU model and thread count,
+and live CPU, memory and VM-disk usage for the hypervisor (`qemu:///system`).
+
+![Virtual machines](docs/images/vms.png)
+
+**Virtual machines** — every domain with status, vCPUs, memory and detected OS (here a three-node
+OpenShift control plane plus a router VM). Rows expand for disks, NICs and IPs; the screen icon opens
+the in-browser noVNC console. Create from a cloud image, an install ISO, or an empty disk.
+
+![Templates](docs/images/templates.png)
+
+**Templates** — ready-made labs for reproducing customer cases: pick one, enter the case number, review
+the rendered spec and create it. Built-ins cover OpenShift/ACM, air-gapped kubeadm with a mirror
+registry, BGP + MetalLB (with BFD), FRR anycast, HTTP-proxy-only egress and IPv6 dual stack. Search and
+tag filters narrow the gallery; see [docs/templates.md](docs/templates.md).
+
+![Clusters](docs/images/clusters.png)
+
+**Clusters** — Kubernetes and OpenShift clusters managed from one place: k3s, kubeadm, and OpenShift
+(agent-based installer) as single-node or compact/HA topologies. Each row shows version, node roles,
+the API endpoint and the backing network; the detail page has copy-paste `kubectl`/`oc` commands and a
+kubeconfig download. See [docs/openshift.md](docs/openshift.md).
+
+![Networks](docs/images/networks.png)
+
+**Networks** — NAT, routed and isolated libvirt networks with state, bridge, subnet, DHCP range and
+autostart. Edit the subnet, DHCP range, domain and forward mode live, add static reservations, or drop
+to a raw XML editor.
+
+![Bare-metal hosts](docs/images/bare-metal-hosts.png)
+
+**Bare-metal hosts** — real servers driven over their BMC (Redfish / Dell iDRAC): inventory, power
+state and provisioning status, used to install OpenShift on physical hardware via virtual media.
+
+![AI assistants (MCP)](docs/images/mcp.png)
+
+**AI assistants (MCP)** — the app is also an MCP server on the same port, so Claude Code, Claude
+Desktop, Cursor or VS Code can drive it (VMs, disks, NICs, lab groups, clusters, commands inside the
+guests) with your role and token. Copy-paste setup per client; see [docs/mcp.md](docs/mcp.md). *(The
+token in this screenshot is redacted.)*
+
 ## Architecture
 
 - **Backend**: FastAPI + SQLAlchemy + libvirt-python (`backend/`)
