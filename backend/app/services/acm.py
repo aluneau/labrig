@@ -650,6 +650,13 @@ class AcmService:
             svc._sleep(task, 15)
 
     @staticmethod
+    def _get_mc(runner: Any, name: str) -> Dict[str, Any]:
+        try:
+            return runner.oc_json(["get", "managedcluster", name], 30)
+        except (RuntimeError, ValueError):
+            return {}
+
+    @staticmethod
     def _server(kubeconfig: str) -> Optional[tuple]:
         try:
             config = yaml.safe_load(kubeconfig)
@@ -717,7 +724,22 @@ class AcmService:
                 self.svc._check(task, hub, db, 10, f"Detaching {name} (the hub removes its klusterlet)")
                 runner.oc(["delete", "managedcluster", name, "--ignore-not-found", "--wait=false"], 60)
                 deadline = time.monotonic() + DETACH_TIMEOUT
+                lost_since = None
                 while runner.oc(["get", "managedcluster", name, "-o", "name"], 30)["exitcode"] == 0:
+                    lost = conditions_state(self._get_mc(runner, name)).get("available") is not True
+                    lost_since = (lost_since or time.monotonic()) if lost else None
+                    if lost_since is not None and time.monotonic() - lost_since > 120:
+                        # the klusterlet no longer reports (removed, or the cluster unreachable / deleted): nobody
+                        # will acknowledge the cleanup. As the ACM docs do for unreachable clusters, drop the
+                        # leftover finalizers (ManifestWorks, then the ManagedCluster's) so it can go
+                        self.svc._check(task, hub, db, 50, f"{name}: its klusterlet no longer reports: removing the "
+                                                           "leftover finalizers")
+                        for work in runner.oc(["get", "manifestwork", "-n", name, "-o", "name"], 30)["stdout"].split():
+                            runner.oc(["patch", work, "-n", name, "--type", "merge", "-p",
+                                       '{"metadata":{"finalizers":null}}'], 30)
+                        runner.oc(["patch", "managedcluster", name, "--type", "merge", "-p",
+                                   '{"metadata":{"finalizers":null}}'], 30)
+                        lost_since = time.monotonic()
                     if time.monotonic() > deadline:
                         msg = (f"{name} is still being detached after {DETACH_TIMEOUT // 60} min: the hub waits for "
                                "the klusterlet's cleanup (an unreachable or deleted cluster keeps it waiting; "

@@ -153,6 +153,17 @@ async function waitManaged(hubId, name, want) {
     await page.locator(`#acm-mc-${NAMES.kadm}`).getByText('available').waitFor({ timeout: 60000 });
     await page.waitForTimeout(800);
     await page.screenshot({ path: 'acm-managed.png', fullPage: true });
+    // the relation on every cluster read: list label, banner on the managed cluster's page
+    const kc = await api(`/clusters/${ids.kadm}`);
+    const hc = await api(`/clusters/${ids.hub}`);
+    log(`relations: ${NAMES.kadm} ${JSON.stringify(kc.acm)}, ${NAMES.hub} ${JSON.stringify(hc.acm)}`);
+    if (kc.acm?.role !== 'managed' || kc.acm.hub_id !== ids.hub || hc.acm?.role !== 'hub') throw new Error('ACM relation missing');
+    await page.goto(`${BASE}/clusters`);
+    await page.locator('.acm-label').first().waitFor({ timeout: 60000 });
+    await page.screenshot({ path: 'acm-clusters-list.png', fullPage: true });
+    await page.goto(`${BASE}/clusters/${ids.kadm}`);
+    await page.locator('#acm-banner').waitFor({ timeout: 60000 });
+    await page.screenshot({ path: 'acm-managed-banner.png', fullPage: true });
 
     // 6. detach
     for (const [k, n] of [['kadm', NAMES.kadm], ['k3s', NAMES.k3s]]) {
@@ -165,6 +176,10 @@ async function waitManaged(hubId, name, want) {
       }, 10 * 60000, `${n}: klusterlet removed`);
       log(`${n} detached, klusterlet namespace ${left}`);
     }
+    // not managed any more: its page offers "Import into ACM hub"
+    await page.goto(`${BASE}/clusters/${ids.kadm}`);
+    await page.locator('#acm-import-banner').waitFor({ timeout: 60000 });
+    if ((await api(`/clusters/${ids.kadm}`)).acm) throw new Error('relation still there after detach');
     const mcs2 = await mcp('oc', { cluster: NAMES.hub, args: 'get managedclusters' });
     log(`after detach:\n${mcs2}`);
     await page.reload();
