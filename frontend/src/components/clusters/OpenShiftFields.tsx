@@ -49,6 +49,7 @@ export interface OsDraft {
   extraOperators: string[]; // added by package name
   sriov: SriovOptions;
   metallb: MetalLBOptions;
+  acm: boolean; // Advanced Cluster Management hub
   disableUpdates: boolean;
   disconnected: boolean; // mirror registry on the group router, egress blocked
 }
@@ -79,9 +80,25 @@ export const defaultOsDraft = (): OsDraft => ({
   extraOperators: [],
   sriov: { enabled: false, nics: 1, vfs: 4, device_type: 'netdevice', ipam_range: '192.168.50.0/24' },
   metallb: { enabled: false, mode: 'l2', addresses: 16, demo: true },
+  acm: false,
   disableUpdates: true,
   disconnected: false,
 });
+
+/** ACM hub node sizes (backend acm.HUB_DEFAULTS): 12 GiB / 4 vCPU above OpenShift's minimum where ACM runs */
+export const ACM_SIZES: Record<OpenShiftTopology, { ctl: Role; wrk: Role }> = {
+  sno: { ctl: { memory: '32', vcpu: '12', disk: '120' }, wrk: TOPOLOGY_SIZES.sno.wrk },
+  compact: { ctl: { memory: '20', vcpu: '8', disk: '120' }, wrk: TOPOLOGY_SIZES.compact.wrk },
+  ha: { ctl: TOPOLOGY_SIZES.ha.ctl, wrk: { memory: '16', vcpu: '4', disk: '120' } },
+};
+
+/** Sizes raised to the ACM defaults (never lowered) */
+const withAcmSizes = (d: OsDraft, topology: OpenShiftTopology): Pick<OsDraft, 'ctl' | 'wrk'> => {
+  const up = (r: Role, min: Role): Role => ({
+    ...r, memory: String(Math.max(Number(r.memory) || 0, Number(min.memory))), vcpu: String(Math.max(Number(r.vcpu) || 0, Number(min.vcpu))),
+  });
+  return { ctl: up(d.ctl, ACM_SIZES[topology].ctl), wrk: up(d.wrk, ACM_SIZES[topology].wrk) };
+};
 
 export const nodeCounts = (d: OsDraft) => ({
   ctlplanes: d.topology === 'sno' ? 1 : 3,
@@ -135,6 +152,7 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
       enabled: d.metallb.enabled, mode: d.metallb.mode || 'l2', addresses: d.metallb.addresses, demo: d.metallb.demo,
       bfd: d.metallb.mode === 'bgp' && !!d.metallb.bfd,
     },
+    acm: d.acm,
     disable_updates: d.disableUpdates,
     disconnected: d.disconnected,
   };
@@ -321,7 +339,7 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
 
 export const TopologySection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => {
   const setTopology = (topology: OpenShiftTopology) => patch({
-    topology, ...TOPOLOGY_SIZES[topology],
+    topology, ...(draft.acm ? withAcmSizes({ ...draft, ...TOPOLOGY_SIZES[topology] }, topology) : TOPOLOGY_SIZES[topology]),
     // ODF is not possible on SNO
     ...(topology === 'sno' && draft.storage === 'odf' ? { storage: 'lvms' as OpenShiftStorage } : {}),
   });
@@ -406,12 +424,13 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
 // Operators
 
 const managedOption = (managedBy: string) => (managedBy.startsWith('storage') ? 'Storage'
-  : managedBy === 'sriov' ? 'SR-IOV' : managedBy === 'metallb' ? 'MetalLB' : managedBy);
+  : managedBy === 'sriov' ? 'SR-IOV' : managedBy === 'metallb' ? 'MetalLB' : managedBy === 'acm' ? 'ACM hub' : managedBy);
 
 /** Is a managed operator installed by the current options? managed_by: storage:lvms | storage:odf | sriov | metallb */
 const managedOn = (op: CatalogOperator, d: OsDraft) => {
   if (op.managed_by === 'sriov') return d.sriov.enabled;
   if (op.managed_by === 'metallb') return d.metallb.enabled;
+  if (op.managed_by === 'acm') return d.acm;
   if (op.managed_by?.startsWith('storage:')) return d.storage === op.managed_by.slice(8);
   return false;
 };
@@ -585,6 +604,20 @@ export const MetalLBFields: React.FC<{ value: MetalLBOptions; onChange: (m: Meta
 
 export const MetalLBSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => (
   <MetalLBFields value={draft.metallb} onChange={(metallb) => patch({ metallb })} />
+);
+
+// ACM hub
+
+export const AcmSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => (
+  <FormSection title="Multicluster" titleElement="h3">
+    <Switch id="os-acm" label="Advanced Cluster Management hub (ACM)" isChecked={draft.acm}
+      onChange={(_e, v) => patch({ acm: v, ...(v ? withAcmSizes(draft, draft.topology) : {}) })} />
+    <div style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' }}>
+      Installs Red Hat Advanced Cluster Management (with the multicluster engine) and a MultiClusterHub, so other
+      clusters of this app (kubeadm, k3s, OpenShift) can be imported from the cluster&apos;s ACM tab, as at customers
+      running a hub. ACM needs about 12 GiB and 4 vCPU on top of OpenShift: the node sizes are raised accordingly.
+    </div>
+  </FormSection>
 );
 
 // Disconnected

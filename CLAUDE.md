@@ -49,7 +49,10 @@ backend/app/
                       cluster (k3s, kubeadm; cluster_drivers per type, cluster_network = Libvirt / Group node network),
                       k8s_mirror (disconnected kubeadm: images to mirror, containerd hosts.toml),
                       log_service (VM logs + diagnostics via guest agent, pod logs, shared filter; rules in log_rules) +
-                      kube_exec (kubectl / oc on a cluster: one path for MCP kubectl, pod logs and the MCP oc tool)
+                      kube_exec (kubectl / oc on a cluster: one path for MCP kubectl, pod logs and the MCP oc tool),
+                      acm (ACM hub add-on: operator + MultiClusterHub, sizing checks; managed cluster import / detach),
+                      acm_spokes (hub provisions SNO on BMC members: metal3 + assisted service, BMH virtual media),
+                      bmc_service (sushy-tools Redfish emulator per group, supervisor) + bmc_emulator (the process)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
@@ -73,8 +76,8 @@ docs/templates.md     customer-case templates: file format, placeholders, API, a
 docs/logs.md          log viewer + diagnostics: sources, filters, known-problems rules, pod logs, adding a rule
 docs/mcp.md           AI assistants: MCP endpoint, Claude Code / Desktop / Cursor / VS Code setup, tools
 docs/updates.md       release installs (/opt/vm-manager), vm-manager-update, GitHub releases (CI, nightly), Host page Update now
-opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf
-examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters)
+opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf, _acm_managed_cluster
+examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters), acm (hub + imported kubeadm)
 e2e/                  Playwright browser tests against the real app (see below)
 ```
 
@@ -262,6 +265,34 @@ e2e/                  Playwright browser tests against the real app (see below)
   `OperatorHub.disableAllDefaultSources`, CatalogSource READY; `AddonRunner.sources` maps redhat-operators -> the
   mirrored CatalogSource. Day-2 add-ons mirror first with the union of the cluster's operators (one filtered catalog
   image per index: a smaller request would drop packages).
+- **ACM** (docs/openshift.md "ACM hub", `services/acm.py`): OpenShift add-on `acm` (`openshift.acm`, AddonRequest kind
+  `acm`): `advanced-cluster-management` in `open-cluster-management` (its MCH operator subscribes `multicluster-engine`
+  itself: `RUNTIME_DEPENDENCIES` for the mirror; disconnected = MCH annotation `mce-subscription-spec` -> mirrored
+  source), MultiClusterHub `availabilityConfig: Basic` + `imagePullSecret` = the user's pull secret (klusterlet of
+  non-OpenShift clusters). Sizing in plain words before anything: 12 GiB / 4 vCPU above `MINIMUMS` on the nodes that
+  run it (`HUB_DEFAULTS` raise default sizes at create), day 2 also unrequested CPU / memory vs `LIVE_REQUESTS`.
+  Import (`POST /clusters/{hub}/acm/managed`, a task on the hub, entries in `spec.acm_managed`): curl from the managed
+  side (its router, or its k3s node) to the hub router's uplink:6443 first (k3s on its own NAT network can't: libvirt
+  refuses NAT -> NAT; egress blocked = hint), DNS `api.` / `*.apps.<hub zone>` -> hub uplink as records owned
+  `acm:<hub>` in the managed group (k3s: `coredns-custom` `.server` block), Namespace + ManagedCluster +
+  KlusterletAddonConfig, then `auto-import-secret` (`oc create`, never apply: no kubeconfig in an annotation) when the
+  hub's router reaches the managed API, else the app applies the hub's `<name>-import` crds.yaml + import.yaml via
+  `kube_exec.run_kubectl`; waits for Joined + Available. Detach = delete the ManagedCluster (hub removes the klusterlet)
+  + DNS cleanup; `delete_cluster` calls `acm_service.forget` (managed: off its hub; hub: its DNS entries).
+- **Emulated BMCs** (docs/openshift.md "Spoke machines (BMC)"): member `bmc: true` (empty / iso only) -> spec.bmc
+  {port of `BMC_HOST_PORTS`, listen = uplink network gateway} assigned in normalize (`bmc_service.assign`, kept by
+  `_keep_owned`). One sushy-tools process per group (`python -m app.services.bmc_emulator <json>`, children of the
+  app, `reconcile(db)` DB-only at startup / group create-update-delete, stopped in lifespan): libvirt driver, htpasswd
+  (bcrypt) from `DATA_DIR/groups/<g>/bmc-auth.json`, allow file of VM names (+ their UUIDs, resolved in the process)
+  replacing sushy's `instance_denied`, getaddrinfo patched so lab cluster zones resolve to their router (virtual
+  media downloads). BMC members are not started with the group nor counted in its state. Needs the host firewall
+  rule from setup.sh (VM -> host TCP is dropped by ufw otherwise). Spokes (`acm_spokes`): cluster rows with
+  `spec.openshift.provisioner {kind: acm, hub_id, hub_name, machine}` (one node = the BMC member of the hub's group,
+  SNO only; metadata on the machine VM for adoption); `ensure_cim` (Provisioning + AgentServiceConfig with the spoke's
+  x86_64 RHCOS only, hub router LBs 6180/6183 for Ironic's image server, which the emulator reaches through its
+  getaddrinfo redirect), records + API LB (6444+) owned `cluster:<spoke>`; kubeconfig from the hub's
+  `<spoke>-admin-kubeconfig`; `delete_cluster` goes through the hub and keeps the machine; a hub with spokes can't be
+  deleted. Every cluster read carries `acm` {role hub|managed|spoke, hub_id, hub_name, state} (`acm_service.relation`).
 - **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
   `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
   `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into
@@ -380,6 +411,7 @@ node bgp.js                                                     # BGP: FRR membe
 node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
+node acm.js                                                     # ACM hub (SNO) + import kubeadm / k3s, Available, refused k3s on own NAT, detach (REUSE=1 KEEP=1, ~2 h fresh)
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node logs.js                                                    # logs + diagnostics: sources, filters, rules, MCP, UI (EL_IMAGE=almalinux-9 CLUSTER=<name>: EL + pod logs)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU

@@ -420,6 +420,8 @@ export interface Cluster {
   nodes: ClusterNode[];
   created_at: string;
   updated_at: string;
+  // ACM relationship (GET /clusters/{hub_id}/acm for the details)
+  acm?: { role: 'hub' | 'managed' | 'spoke'; hub_id?: number | null; hub_name?: string | null; state?: string | null } | null;
 }
 
 // OpenShift (backend/app/schemas/openshift.py)
@@ -468,6 +470,7 @@ export interface OpenShiftOptions {
   operators: OperatorRequest[];
   sriov: SriovOptions;
   metallb: MetalLBOptions;
+  acm?: boolean; // Advanced Cluster Management hub (operator + MultiClusterHub)
   disable_updates: boolean;
   // Disconnected install (create time only): mirror registry on the group router, group egress blocked
   disconnected?: boolean;
@@ -536,7 +539,55 @@ export interface ClusterCredentials {
   console_url?: string | null;
 }
 
-export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo';
+export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo' | 'acm';
+
+/** ACM: a managed cluster of a hub (GET /clusters/{id}/acm) */
+export interface AcmManagedCluster {
+  name: string;
+  cluster_id?: number | null;
+  cluster_type?: string | null;
+  state: string; // importing | available | unavailable | detaching | error | unknown
+  method?: string | null; // secret (auto-import-secret) | manifests (applied by the app)
+  message?: string | null;
+  joined?: boolean | null;
+  available?: boolean | null;
+  hub_accepted?: boolean | null;
+  kubernetes_version?: string | null;
+  vendor?: string | null;
+  conditions: { type: string; status: string; reason?: string; message?: string }[];
+}
+
+/** A spoke = a cluster of the app (id) provisioned by the hub */
+export interface AcmSpoke {
+  id: number;
+  name: string;
+  machine: string;
+  version?: string;
+  state: string; // the cluster's status: provisioning | ready | error | stopped
+  message?: string | null;
+  ip?: string | null;
+  bmh_state?: string | null;
+  install_state?: string | null;
+  progress?: number | null;
+  console_url?: string | null;
+}
+
+export interface AcmStatus {
+  enabled: boolean;
+  state?: string | null; // add-on state
+  message?: string | null;
+  hub_phase?: string | null;
+  hub_version?: string | null;
+  mce_phase?: string | null;
+  console_url?: string | null;
+  hub_api?: string | null;
+  sizing?: string | null;
+  managed: AcmManagedCluster[];
+  importable: { id: number; name: string; type: string; status: string; note?: string | null }[];
+  spokes: AcmSpoke[];
+  spoke_machines: { name: string; memory: number; vcpu: number }[];
+  error?: string | null;
+}
 
 export interface AddonRequest {
   kind: AddonKind;
@@ -745,6 +796,18 @@ export interface MemberSpec {
   mac?: string | null;
   cloud_init?: GroupCloudInit | null;
   user_data?: string | null;
+  bmc?: boolean; // emulated BMC (Redfish): empty / iso members only
+}
+
+/** GET /groups/{id}/bmc */
+export interface BmcStatus {
+  enabled: boolean;
+  address?: string | null; // listen:port of the group's emulator
+  running: boolean;
+  username?: string | null;
+  members: { name: string; vm: string; uuid?: string | null; mac?: string | null; ip?: string | null; redfish_url?: string | null }[];
+  error?: string | null;
+  firewall?: string | null;
 }
 
 export interface RouterSpec {

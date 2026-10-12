@@ -51,6 +51,12 @@ async def lifespan(app: FastAPI):
             wireguard_service.reconcile(db)
         except Exception:
             logging.getLogger(__name__).exception("WireGuard relay")
+        # Redfish emulators of the groups with BMC members (DB only)
+        try:
+            from app.services import bmc_service
+            bmc_service.reconcile(db)
+        except Exception:
+            logging.getLogger(__name__).exception("BMC emulators")
 
     async def watch_libvirt():
         """No keepalive: libvirt is connected on demand by requests. This loop only
@@ -73,6 +79,8 @@ async def lifespan(app: FastAPI):
     yield
     watcher.cancel()
     relay.stop()
+    from app.services.bmc_service import supervisor as bmc_supervisor
+    bmc_supervisor.stop()
     libvirt_client.disconnect()
 
 

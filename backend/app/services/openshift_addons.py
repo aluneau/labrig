@@ -308,6 +308,13 @@ class AddonRunner(MetalLBClient):
                            "metadata": {"name": "metallb", "namespace": METALLB_NAMESPACE}}], "MetalLB")
         self.configure(pool, mode, bgp)
 
+    # ------------------------------------------------------------------ ACM
+
+    def acm(self, pull_secret: Optional[str], mce_source: Optional[str]) -> str:
+        """advanced-cluster-management + MultiClusterHub (Basic) until Running (acm.install_hub)"""
+        from app.services import acm
+        return acm.install_hub(self, pull_secret, mce_source)
+
     def metallb_demo(self, timeout: float = 10 * 60, pool: Optional[str] = None, mode: str = "l2") -> str:
         """hello Deployment (2 replicas) + LoadBalancer Service, returns its external IP"""
         return self.deploy_demo(pool, mode, DEMO_IMAGE, timeout)

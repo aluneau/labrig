@@ -46,6 +46,7 @@ type groupMemberModel struct {
 	IP        types.String          `tfsdk:"ip"`
 	CloudInit *memberCloudInitModel `tfsdk:"cloud_init"`
 	UserData  types.String          `tfsdk:"user_data"`
+	BMC       types.Bool            `tfsdk:"bmc"`
 }
 
 // Per-member login, replacing the group's cloud_init for that member (cloud_image members only)
@@ -241,6 +242,7 @@ type apiGroupMemberSpec struct {
 	IP        *string        `json:"ip,omitempty"`
 	CloudInit map[string]any `json:"cloud_init,omitempty"`
 	UserData  *string        `json:"user_data,omitempty"`
+	BMC       bool           `json:"bmc,omitempty"`
 }
 
 type apiDNSRecord struct {
@@ -481,6 +483,8 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"disk_size": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(10), Description: "GiB."},
 					"role":      schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("member")},
 					"ip":        schema.StringAttribute{Optional: true, Description: "Fixed IP (assigned by the app if unset: see member_ips)."},
+					"bmc": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+						Description: "Emulated BMC (Redfish, sushy-tools on the host) for an empty / iso member: an ACM hub's metal3 can power it and boot it from virtual media. Address: GET /groups/{id}/bmc."},
 				}},
 			},
 			"dhcp_host": schema.ListNestedBlock{
@@ -631,7 +635,7 @@ func (r *groupResource) spec(ctx context.Context, m groupModel, d diags) apiGrou
 		spec := apiGroupMemberSpec{
 			Name: mem.Name.ValueString(), Source: mem.Source.ValueString(), Memory: mem.Memory.ValueInt64(),
 			VCPU: mem.VCPU.ValueInt64(), DiskSize: mem.DiskSize.ValueInt64(), Role: mem.Role.ValueString(),
-			IP: strPtr(mem.IP), ISO: strPtr(mem.ISO), UserData: strPtr(mem.UserData),
+			IP: strPtr(mem.IP), ISO: strPtr(mem.ISO), UserData: strPtr(mem.UserData), BMC: mem.BMC.ValueBool(),
 		}
 		if spec.Source == "" || spec.Source == "cloud_image" {
 			spec.Image = strPtr(mem.Image) // the server clears image for iso / empty members
@@ -795,7 +799,7 @@ func (r *groupResource) readInto(ctx context.Context, m *groupModel, d diags) bo
 		mm := groupMemberModel{
 			Name: types.StringValue(s.Name), Memory: types.Int64Value(s.Memory),
 			VCPU: types.Int64Value(s.VCPU), DiskSize: types.Int64Value(s.DiskSize), Role: types.StringValue(s.Role),
-			IP: types.StringNull(), ISO: types.StringNull(), UserData: types.StringNull(),
+			IP: types.StringNull(), ISO: types.StringNull(), UserData: types.StringNull(), BMC: types.BoolValue(s.BMC),
 		}
 		mm.Source = types.StringValue("cloud_image")
 		if s.Source != "" {

@@ -105,6 +105,24 @@ login, kubeconfig or VPN. `args` is the command line after `oc` (shell quoting),
   with how to copy the image in (group Registry tab / `POST /groups/{id}/registry/images`) instead of a pod stuck in
   `ImagePullBackOff`.
 
+## ACM (Advanced Cluster Management)
+
+No dedicated tools: `api_request` drives the ACM endpoints (docs/openshift.md "ACM hub"), `oc` / `kubectl` look
+inside the hub and the managed clusters, and a spoke the hub provisioned is a cluster like the others. Prompts that
+work:
+
+- *"Enable ACM on cluster ocp1"* → `POST /clusters/{id}/openshift/addons {"kind": "acm"}` (refused in plain words when
+  the nodes are too small), then `wait_for_task`; `GET /clusters/{id}/acm` shows the MultiClusterHub phase.
+- *"Import cluster k8s1 into the ACM hub ocp1"* → `POST /clusters/{hub}/acm/managed {"cluster_id": …}`; `GET
+  /clusters/{id}` of k8s1 then has `acm: {role: managed, hub_name: ocp1}`. *"Detach it"* → `DELETE
+  /clusters/{hub}/acm/managed/k8s1`.
+- *"Why is spoke sp1 not installing?"* → `GET /clusters/{id}` (status message: BareMetalHost state, install %), then
+  `oc` on the **hub**: `get bmh,agent,agentclusterinstall -n sp1`, `get agentclusterinstall sp1 -n sp1 -o
+  jsonpath={.status.conditions}`, `logs deploy/assisted-service -n multicluster-engine --tail=200`; once installed,
+  `oc` on **sp1** itself.
+- *"Why is k8s1 Unknown in ACM?"* → `oc get managedcluster k8s1 -o yaml` on the hub, `kubectl get pods -n
+  open-cluster-management-agent` + `kubectl logs deploy/klusterlet-agent -n open-cluster-management-agent` on k8s1.
+
 ## Troubleshooting
 
 - `claude mcp list` says **Failed to connect — Dynamic Client Registration rejected (HTTP 404)**: the request had no

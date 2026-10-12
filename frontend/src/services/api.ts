@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -154,6 +154,10 @@ export const networkApi = {
 
 export const groupApi = {
   list: () => request<Group[]>('/groups'),
+  bmc: (id: number) => request<BmcStatus>(`/groups/${id}/bmc`),
+  bmcCredentials: (id: number) => request<{ username: string; password: string }>(`/groups/${id}/bmc/credentials`),
+  addSpokes: (id: number, data: { count: number; memory: number; vcpu: number; disk_size: number; prefix?: string }) =>
+    post<GroupDetail>(`/groups/${id}/bmc/spokes`, data),
   get: (id: number) => request<GroupDetail>(`/groups/${id}`),
   create: (spec: GroupSpec) => post<{ group: Group; task_id: number }>('/groups', spec),
   update: (id: number, spec: GroupSpec) =>
@@ -250,6 +254,14 @@ export const clusterApi = {
   metallb: (id: number) => request<MetalLBScenario>(`/clusters/${id}/metallb`),
   setMetallb: (id: number, data: MetalLBOptions) =>
     request<Task>(`/clusters/${id}/metallb`, { method: 'PUT', body: JSON.stringify(data) }),
+  // ACM hub (OpenShift add-on acm)
+  acm: (id: number) => request<AcmStatus>(`/clusters/${id}/acm`),
+  acmImport: (id: number, clusterId: number, method: 'auto' | 'secret' | 'manifests' = 'auto') =>
+    post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
+  acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
+  /** The hub provisions a spoke: returns the new cluster (its own page, kubeconfig, delete) */
+  acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
 };
 
 export const openshiftApi = {

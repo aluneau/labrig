@@ -1338,6 +1338,15 @@ class LibvirtClient:
         xml = self.group_metadata_xml(group, role, member, spec, qualified=False)
         dom.setMetadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, xml, "vmm", VMM_NS, flags)
 
+    def set_domain_metadata(self, name: str, xml: Optional[str], key: str, uri: str) -> None:
+        """Set (xml, an element without namespace prefix) or remove (None) a domain's metadata element of `uri`
+        (persistent config, and live if running)"""
+        dom = self.connect().lookupByName(name)
+        flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
+        if dom.isActive():
+            flags |= libvirt.VIR_DOMAIN_AFFECT_LIVE
+        dom.setMetadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, xml, key if xml else None, uri, flags)
+
     def all_macs(self) -> List[str]:
         """MAC addresses of every domain interface on this host"""
         macs = []

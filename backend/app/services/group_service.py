@@ -60,6 +60,15 @@ class LeaseInUse(Exception):
     """The lease belongs to a running VM"""
 
 
+def _bmc_reconcile(db: Session) -> None:
+    """BMC emulators follow the groups' `bmc` members (never fails a group operation)"""
+    try:
+        from app.services import bmc_service
+        bmc_service.reconcile(db)
+    except Exception:
+        logger.exception("BMC emulators")
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -246,6 +255,8 @@ class GroupService:
                 subnets = [n["cidr"] for n in libvirt_client.network_subnets()]
             bgps.assign(db, spec, existing.router.bgp if existing else None, group_id, subnets)
         ipv6_service.assign(db, spec, existing, group_id)
+        from app.services import bmc_service
+        bmc_service.assign(db, spec, existing, group_id)
 
         try:
             spec = GroupSpec.model_validate(spec.model_dump())  # re-run cross-field checks
@@ -350,6 +361,7 @@ class GroupService:
             self.pin_uplink(db, group)
             self._sync_wg_key(db, group)
             wgs.reconcile(db)
+            _bmc_reconcile(db)
             progress(60)
 
             for i, member in enumerate(spec.members):
@@ -648,6 +660,7 @@ class GroupService:
             vm_service.sync_vms(db)
             self._sync_member_rows(db, group, spec)
             wgs.reconcile(db)
+            _bmc_reconcile(db)
             self._publish(group, "updated")
         return group
 
@@ -681,6 +694,7 @@ class GroupService:
                              + [p for p in old.address_pools if p.owner])
         new.owner = old.owner
         new.template = old.template  # set at creation from a template, never by a spec PUT
+        new.bmc = old.bmc  # assigned (bmc_service.assign)
         new.router.uplink_ip = new.router.uplink_ip or old.router.uplink_ip
         # egress / registry blocks left out (older clients) keep the stored ones; the registry's
         # read-back fields are the app's
@@ -989,7 +1003,8 @@ class GroupService:
         task_service.update_progress(db, task.id, 60)
         self.pin_uplink(db, group)
         # members, then reserved hosts (cluster nodes: control planes sort before workers)
-        for name in ([member_vm_name(spec.name, m.name) for m in spec.members]
+        # (not BMC members: the hub driving their BMC powers them)
+        for name in ([member_vm_name(spec.name, m.name) for m in spec.members if not m.bmc]
                      + sorted((r.name for r in spec.reservations), key=lambda n: "-worker-" in n)):
             live = libvirt_client.get_vm(name)
             if live and live["state"] == "shutoff":
@@ -1082,6 +1097,7 @@ class GroupService:
             from app.services import registry_service
             registry_service.forget(name)  # registry credentials / mirror records (the disk went with the router)
         wgs.reconcile(db)  # stops the group's WireGuard relay
+        _bmc_reconcile(db)  # and its BMC emulator
         event_bus.publish({"kind": "group", "event": "deleted", "id": group_id, "name": name})
         return True
 
@@ -1324,7 +1340,10 @@ class GroupService:
         router = info("router", router_vm_name(spec.name), "router", spec.router.ip, spec.router.lan_mac, spec.router)
         router.update(memory=spec.router.effective_memory(), vcpu=spec.router.effective_vcpu())  # registry: more
         members = [info(m.name, member_vm_name(spec.name, m.name), m.role, m.ip, m.mac, m) for m in spec.members]
-        all_states = [router["state"]] + [m["state"] for m in members]
+        for m, spec_m in zip(members, spec.members):
+            m["bmc"] = spec_m.bmc
+        # BMC members are powered by whoever drives their BMC (an ACM hub): not part of the group's state
+        all_states = [router["state"]] + [m["state"] for m in members if not m["bmc"]]
         if all(s == "running" for s in all_states):
             state = "running"
         elif all(s in ("shutoff", "missing") for s in all_states):
