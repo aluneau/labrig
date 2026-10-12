@@ -198,6 +198,11 @@ const quickAddons = (cluster: Cluster): QuickAddon[] => {
       title: 'MetalLB', available: !os.metallb?.enabled, reason: os.metallb?.enabled ? 'enabled' : undefined,
       text: 'Installs MetalLB in L2 mode with a 16-address pool from the group network, plus the hello demo (MetalLB lab tab).',
     },
+    {
+      request: { kind: 'acm' }, title: 'ACM hub', available: !os.acm, reason: os.acm ? 'enabled' : undefined,
+      text: 'Installs Advanced Cluster Management (+ multicluster engine) and a MultiClusterHub: import the app\'s other '
+        + 'clusters from the ACM tab. Needs about 12 GiB and 4 vCPU free on the nodes (checked first).',
+    },
   ];
 };
 

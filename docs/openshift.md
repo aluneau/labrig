@@ -107,6 +107,127 @@ BGP mode: every node announces the service IP to the router, which routes it to 
 checks show each node's BGP session and the router's next hops; a stopped node's route disappears (≤ 30 s). The
 cluster's *Topology* tab follows a packet from the laptop to a pod in either mode.
 
+## ACM hub
+
+**Red Hat Advanced Cluster Management (ACM)** manages fleets of clusters from one OpenShift cluster, the
+**hub**. Each managed cluster runs an agent, the **klusterlet**, that connects *to the hub's API* (the hub never
+needs to reach it afterwards), registers the cluster and runs add-ons (policies, applications, search). In the
+console, ACM adds the **All Clusters** perspective (switcher at the top left). Many customers run their clusters
+this way, so support cases often start with "the cluster shows Unknown in ACM" or "the import hangs".
+
+### Create a hub
+
+- At creation: *Create cluster* → OpenShift → **Advanced Cluster Management hub** (OpenTofu `acm = true`, API
+  `openshift.acm: true`), or the built-in template **ACM hub** (docs/templates.md).
+- Day 2: cluster page → **ACM** tab → *Enable ACM* (or *Operators* → ACM hub, or
+  `POST /clusters/{id}/openshift/addons {"kind": "acm"}`).
+
+The app installs the `advanced-cluster-management` operator in `open-cluster-management` (its MultiClusterHub
+operator subscribes to `multicluster-engine` itself) and a `MultiClusterHub` with `availabilityConfig: Basic`
+(one replica per component: Red Hat's choice for single-node hubs), then waits for `status.phase: Running`
+(10–20 minutes). The user's pull secret becomes the hub's `imagePullSecret`: non-OpenShift managed clusters pull
+the klusterlet from registry.redhat.io with it.
+
+**Size.** Red Hat documents 6 vCPU / 12 GiB reserved for ACM (High availability). The app asks for 12 GiB and
+4 vCPU on top of OpenShift's minimum on the nodes that run it, and says what is missing before starting:
+SNO **32 GiB / 12 vCPU** (the default when ACM is ticked), compact 3 × (20 GiB, 8 vCPU), HA workers 16 GiB.
+Day 2, it also compares the nodes' unrequested CPU / memory with ACM's pod requests.
+
+### Import a cluster
+
+Hub page → **ACM** → *Import cluster* → pick a ready cluster of the app (kubeadm, k3s or OpenShift), or
+`POST /clusters/{hub}/acm/managed {"cluster_id": N}`. A task on the hub:
+
+1. **Path check**: the klusterlet must reach `api.<hub>.<domain>:6443`, i.e. the haproxy of the hub's router on
+   its uplink address. The app tests it with curl from the managed side (its group router, or its k3s node) and
+   refuses in plain words when it can't (see the table).
+2. **DNS** on the managed side: owned records `api.<hub zone>` and `*.apps.<hub zone>` → the hub router's uplink
+   address in the managed cluster's group (owner `acm:<hub>`), or for k3s a CoreDNS server block in the
+   `coredns-custom` configmap.
+3. On the hub: `Namespace` + `ManagedCluster` (`hubAcceptsClient: true`) + `KlusterletAddonConfig`.
+4. **auto-import-secret** with the cluster's kubeconfig when the hub reaches the cluster's API (curl from the
+   hub's router): the hub's import controller installs the klusterlet. Otherwise the app applies the hub's
+   `<name>-import` secret (`crds.yaml`, then `import.yaml`) on the cluster itself, as the docs' manual import.
+5. Waits for the `ManagedClusterJoined` and `ManagedClusterConditionAvailable` conditions (15 min); on a
+   timeout the error lists the klusterlet pods (e.g. ImagePullBackOff).
+
+| Managed cluster | Works | Why |
+|---|---|---|
+| kubeadm / OpenShift in another lab group | yes | routers share the uplink network (`default`); auto-import-secret (the hub reaches `<uplink>:6443`) |
+| k3s on the hub router's uplink network (`network: default`) | yes | same L2 as the routers; CoreDNS answers the hub zone |
+| k3s on its own NAT network (`vmm-k-<name>`, the default) | **no** (refused) | libvirt rejects connections from one NAT network to the guests of another |
+| managed group with egress `blocked` / `proxy` | after adding `<hub uplink>/32` to the group's egress allow list | refused with that hint |
+
+**Detach**: the row's *Detach* (or `DELETE /clusters/{hub}/acm/managed/{name}`) deletes the ManagedCluster: the hub
+removes the klusterlet from the cluster, then the app removes its DNS entries. Deleting a managed cluster removes
+its ManagedCluster from the hub; deleting the hub removes its DNS entries from the managed side.
+
+### What to look at
+
+- Console → **All Clusters** → Infrastructure → **Clusters**: `local-cluster` (the hub itself) and the imported
+  ones, with their status and add-ons.
+- `oc get mch -n open-cluster-management`, `oc get managedclusters` (JOINED / AVAILABLE),
+  `oc get managedclusteraddons -A`, `oc get klusterletaddonconfig -A`.
+- On the managed cluster: `kubectl get pods -n open-cluster-management-agent` (klusterlet registration / work
+  agents) and `-n open-cluster-management-agent-addon`; `kubectl get klusterlet -o yaml` (hub connection errors).
+- Things to break: stop the managed cluster (Unknown after ~5 min, back when started); remove the hub's DNS
+  record from the managed group (the klusterlet can't renew its lease); detach and re-import with the other
+  method (`"method": "secret"` / `"manifests"`).
+
+### Spoke machines (BMC) and provisioning a spoke
+
+At customers, the hub also **installs** clusters on bare-metal servers through their BMCs (iDRAC, iLO): metal3 /
+Ironic powers a server and boots it from a virtual-media ISO, the assisted installer does the rest (ZTP, GitOps
+`ClusterInstance` / `SiteConfig`, or the `ClusterDeployment` + `AgentClusterInstall` + `InfraEnv` +
+`BareMetalHost` objects underneath). The app emulates the BMCs:
+
+- **BMC members**: a lab group member with `bmc: true` (empty disk or ISO) gets a Redfish BMC from
+  **sushy-tools** running on the host (one process per group, started by the app), listening on the gateway of the
+  group's uplink network (e.g. `192.168.122.1`) on a port of `BMC_HOST_PORTS` (8180-8199), HTTP basic auth with
+  per-group credentials (`GET /groups/{id}/bmc/credentials`, never in the spec), and only the group's BMC members
+  visible (other VMs: 404). Group page → **BMC (Redfish)** tab: each machine's
+  `redfish-virtualmedia://192.168.122.1:8180/redfish/v1/Systems/<uuid>` address (copy it into a BareMetalHost's
+  `bmc.address`, with `disableCertificateVerification: true`), its boot MAC, and **Add spoke machines** (N empty
+  members `spoke-N`, 16 GiB / 8 vCPU / 120 GiB by default, created powered off: the hub powers them).
+  API: `GET /groups/{id}/bmc`, `POST /groups/{id}/bmc/spokes {count, memory, vcpu, disk_size}`; OpenTofu
+  `member { source = "empty", bmc = true }`.
+- The host firewall must let the group machines reach that port: `scripts/setup.sh` adds
+  `ufw allow in on virbr+ to any port 8180:8199 proto tcp` (firewalld: the ports in zone `libvirt`).
+- The emulator resolves the names under every lab cluster's zone (`api`, `*.apps`) to that cluster's router: it
+  downloads the hub's discovery ISO itself when metal3 inserts the virtual media.
+- sushy-tools is pip-installed in the app's venv by `setup.sh` (on Python 3.9 / RHEL 9 pip picks 2.1.0, same
+  emulator API). Without it the BMC tab says so and the rest of the app works.
+
+**Provision a spoke** (hub page → ACM → *Provision a spoke*, or `POST /clusters/{hub}/acm/spokes {name, machine}`):
+single-node OpenShift on a BMC member **of the hub's group** (it resolves and reaches the hub's routes through the
+same router). The task on the hub:
+
+1. **Central infrastructure management**, once: `Provisioning` (`provisioningNetwork: Disabled`,
+   `watchAllNamespaces: true`: metal3 on a hub installed with platform none) and `AgentServiceConfig` (assisted
+   service and image service; volumes on the hub's default StorageClass: LVMS).
+2. Records `api`, `api-int`, `*.apps.<spoke>.<domain>` → the machine's reserved IP on the group router.
+3. Namespace `<spoke>`: pull secret, BMC secret, `ClusterImageSet` (the hub's release by default),
+   `ClusterDeployment` + `AgentClusterInstall` (SNO, user-managed networking, machine network = group CIDR),
+   `InfraEnv`, `BareMetalHost` (`bootMode: legacy`, inspection disabled, `automatedCleaningMode: disabled`, label
+   `infraenvs.agent-install.openshift.io`), `ManagedCluster` + `KlusterletAddonConfig`.
+4. Waits: BareMetalHost registering → provisioned (the ISO inserted, the machine powered on), the agent
+   registering, the install (percentage), then the ManagedCluster Available.
+
+The spoke is a **cluster of the app** (Clusters page, label "spoke of <hub>"): `spec.openshift.provisioner = {kind:
+acm, hub_id, hub_name, machine}`, kubeconfig (the hub's `<spoke>-admin-kubeconfig`, pointed at a port the group
+router forwards to the spoke API, like the hub's own), kubeadmin password, logs and the MCP `oc` tool work as for any
+cluster. `DELETE /clusters/{id}` deletes it **through the hub** (ManagedCluster, ClusterDeployment, BareMetalHost) and
+powers the machine off; the machine stays for the next spoke. A hub with spokes can't be deleted (delete the spokes
+first). The machine VM carries the cluster metadata, so a lost DB adopts the spoke back. OpenTofu:
+`vmmanager_acm_spoke {hub_id, name, machine}` (exports `cluster_id`, `kubeconfig`). What to look at: `oc get bmh,infraenv,agent,agentclusterinstall -n <spoke>`,
+`oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
+`DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
+
+**Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
+(default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub
+subscribes MCE from the mirrored catalog (`installer.open-cluster-management.io/mce-subscription-spec`). Imports
+into a disconnected hub are not supported yet: the klusterlet images would have to come from the mirror too.
+
 ## Disconnected installs
 
 **Disconnected** in the create dialog (`openshift.disconnected: true`, OpenTofu `disconnected = true`): the group
@@ -140,6 +261,21 @@ resource "vmmanager_cluster" "ocp" {
     metallb_mode = "l2"      # bgp
     sriov     = false
   }
+}
+```
+
+ACM hub + an imported kubeadm cluster (`examples/opentofu/acm/`):
+
+```hcl
+resource "vmmanager_cluster" "hub" {
+  name = "tofu-acm-hub"
+  type = "openshift"
+  openshift = { topology = "sno", storage = "lvms", acm = true }   # SNO sized 32 GiB / 12 vCPU by default
+}
+resource "vmmanager_cluster" "kadm" { name = "tofu-acm-kadm", type = "kubeadm", ctlplanes = 1, workers = 1 }
+resource "vmmanager_acm_managed_cluster" "kadm" {
+  hub_id     = vmmanager_cluster.hub.id
+  cluster_id = vmmanager_cluster.kadm.id     # waits for Joined + Available; destroy = detach
 }
 ```
 

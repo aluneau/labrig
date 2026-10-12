@@ -41,7 +41,7 @@ from app.schemas.registry import MirrorRequest, OperatorCatalog, OperatorPackage
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
-from app.services import metallb
+from app.services import acm, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
 from app.services.openshift_service import CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
@@ -259,6 +259,10 @@ class OpenShiftInstaller:
             if not given and role in roles:
                 res["memory"] += ODF_EXTRA[opts.odf_profile]["memory"]
                 res["vcpu"] += ODF_EXTRA[opts.odf_profile]["vcpu"]
+            if not given and opts.acm and (role == "worker" or not counts["workers"]):
+                # ACM hub: the nodes that run it get its documented reservation on top
+                for k, v in acm.HUB_DEFAULTS[kind].items():
+                    res[k] = max(res[k], v)
             if role == "ctlplane" or counts["workers"]:
                 low = [f"{k} {res[k]} < {v}" for k, v in MINIMUMS[kind].items() if res[k] < v]
                 if low:
@@ -267,6 +271,10 @@ class OpenShiftInstaller:
                                      + ", ".join(f"{k} {res[k]} {unit[k]} (minimum {MINIMUMS[kind][k]})"
                                                  for k in MINIMUMS[kind] if res[k] < MINIMUMS[kind][k]))
             result[role] = res
+        if opts.acm:
+            problem = acm.sizing_problem(opts.topology, counts, result)
+            if problem:
+                raise ValueError(problem)
         return result
 
     @staticmethod
@@ -475,6 +483,8 @@ class OpenShiftInstaller:
             wanted.setdefault("redhat-operators", []).append("sriov-network-operator")
         if opts.metallb.enabled:
             wanted.setdefault("redhat-operators", []).append("metallb-operator")
+        if opts.acm:  # + multicluster-engine (operator_closure: RUNTIME_DEPENDENCIES)
+            wanted.setdefault("redhat-operators", []).append(acm.PACKAGE)
         mirrored = {name: source for source, name in self.catalog_sources(cluster).items()}
         for op in opts.operators:
             # picked from the cluster's (mirrored) catalog: cs-redhat-operator-index-v4-20 -> redhat-operators
@@ -764,7 +774,7 @@ class OpenShiftInstaller:
         """OpenShift on bare metal (docs/bmh.md). First step: single-node OpenShift on one physical host,
         standalone on its routable network (no lab group, no VPN)."""
         import secrets
-        from app.services.bmc_service import bmc_service
+        from app.services.baremetal_service import baremetal_service
 
         opts = data.openshift or OpenShiftOptions()
         openshift_service.pull_secret()  # raises when missing
@@ -792,7 +802,7 @@ class OpenShiftInstaller:
         if node_ip not in ipaddress.ip_network(machine_net):
             raise ValueError(f"The node IP {node.ip} is not in the machine network {machine_net}")
 
-        host = bmc_service.get_host(db, node.host_id)
+        host = baremetal_service.get_host(db, node.host_id)
         if host is None:
             raise ValueError(f"Bare-metal host {node.host_id} not found")
         if host.cluster_name:
@@ -948,8 +958,8 @@ class OpenShiftInstaller:
         app's port (the BMC fetches the ISO itself, so it must be a routable address, not 0.0.0.0)."""
         import socket
         from urllib.parse import urlparse
-        from app.services.bmc_service import bmc_service
-        host = bmc_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         bmc_host = urlparse(host.bmc_address).hostname if host else None
         ip = "127.0.0.1"
         if bmc_host:
@@ -982,12 +992,12 @@ class OpenShiftInstaller:
         return None
 
     def _boot_bmh(self, db: Session, cluster: Cluster, iso: str) -> None:
-        from app.services.bmc_service import bmc_service
-        host = bmc_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         if host is None:
             raise RuntimeError("The bare-metal host was deleted")
         url = self._iso_url(db, cluster)
-        bmc_service.client(db, host).boot_iso_once(url)
+        baremetal_service.client(db, host).boot_iso_once(url)
 
     def _host_curl(self, url: str, token: Optional[str]) -> Optional[Dict[str, Any]]:
         """GET `url` from the host (bare metal: the host reaches the node directly, no router guest-exec)"""
@@ -1003,12 +1013,12 @@ class OpenShiftInstaller:
             return None
 
     def _eject_bmh(self, db: Session, cluster: Cluster) -> None:
-        from app.services.bmc_service import bmc_service
+        from app.services.baremetal_service import baremetal_service
         bm = cluster.spec.get("bare_metal") or {}
-        host = bmc_service.get_host(db, bm.get("host_id"))
+        host = baremetal_service.get_host(db, bm.get("host_id"))
         if host is not None:
             try:
-                bmc = bmc_service.client(db, host)
+                bmc = baremetal_service.client(db, host)
                 bmc.eject_media()
                 bmc.clear_boot_override()
             except Exception as e:  # don't fail the install over an eject
@@ -1023,13 +1033,13 @@ class OpenShiftInstaller:
                 pass
 
     def start_bmh(self, db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
-        from app.services.bmc_service import bmc_service
+        from app.services.baremetal_service import baremetal_service
         svc = self.svc
         svc._set_status(db, cluster, "starting", "Powering on the bare-metal host")
-        host = bmc_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         if host is None:
             raise RuntimeError("The bare-metal host was deleted")
-        bmc_service.client(db, host).power_on()
+        baremetal_service.client(db, host).power_on()
         deadline = time.monotonic() + START_TIMEOUT
         while True:
             openshift_service.approve_csrs(cluster.name, cluster.version)
@@ -1042,23 +1052,23 @@ class OpenShiftInstaller:
             svc._sleep(task, 10)
 
     def stop_bmh(self, db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
-        from app.services.bmc_service import bmc_service
+        from app.services.baremetal_service import baremetal_service
         svc = self.svc
         svc._set_status(db, cluster, "stopping", "Powering off the bare-metal host")
-        host = bmc_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         if host is not None:
-            bmc_service.client(db, host).power_off(graceful=True)
+            baremetal_service.client(db, host).power_off(graceful=True)
         svc._set_status(db, cluster, "stopped", None)
         return {"stopped": 1}
 
     def delete_bmh(self, db: Session, cluster: Cluster) -> None:
         """Free the host (eject media, power off, release it) and remove the install files."""
-        from app.services.bmc_service import bmc_service
+        from app.services.baremetal_service import baremetal_service
         bm = cluster.spec.get("bare_metal") or {}
-        host = bmc_service.get_host(db, bm.get("host_id"))
+        host = baremetal_service.get_host(db, bm.get("host_id"))
         if host is not None:
             try:
-                bmc = bmc_service.client(db, host)
+                bmc = baremetal_service.client(db, host)
                 bmc.eject_media()
                 bmc.clear_boot_override()
                 bmc.power_off()
@@ -1307,7 +1317,10 @@ class OpenShiftInstaller:
             plan.append(("metallb", "metallb-operator"))
             if opts.metallb.demo:
                 plan.append(("metallb-demo", "hello"))
-        managed = {"lvms-operator", "odf-operator", "local-storage-operator", "sriov-network-operator", "metallb-operator"}
+        if opts.acm:
+            plan.append(("acm", acm.PACKAGE))
+        managed = {"lvms-operator", "odf-operator", "local-storage-operator", "sriov-network-operator", "metallb-operator",
+                   acm.PACKAGE, acm.MCE_PACKAGE}
         plan += [("operator", o.name) for o in opts.operators if o.name not in managed]
         for kind, name in plan:
             self._set_addon(db, cluster, kind, name, "pending")
@@ -1368,6 +1381,11 @@ class OpenShiftInstaller:
             self._update_spec(db, cluster, openshift={**os_spec, "metallb": {**os_spec.get("metallb", {}),
                                                                                "demo": True, "service_ip": ip,
                                                                                "hostname": hostname}})
+        elif kind == "acm":
+            # non-OpenShift managed clusters pull the klusterlet from registry.redhat.io with the hub's pull
+            # secret (MultiClusterHub imagePullSecret); a disconnected hub has only its mirror's credentials
+            runner.acm(None if opts.disconnected else openshift_service.pull_secret(),
+                       runner.sources.get("redhat-operators"))
         elif kind == "operator":
             req = next((o for o in opts.operators if o.name == name), None)
             ns = runner.install_operator(name, req.channel if req else None, req.source if req else None,
@@ -1432,6 +1450,17 @@ class OpenShiftInstaller:
             if not (os_spec.get("metallb") or {}).get("pool"):
                 raise ValueError("Enable MetalLB first")
             name = "hello"
+        elif kind == "acm":
+            spec = cluster.spec or {}
+            counts = {"masters": int(spec.get("ctlplanes") or 1), "workers": int(spec.get("workers") or 0)}
+            problem = acm.sizing_problem(os_spec.get("topology") or "sno", counts,
+                                         {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
+            problem = problem or acm.live_headroom_problem(AddonRunner(cluster.name, cluster.version, time.sleep,
+                                                                       lambda m: None))
+            if problem:
+                raise ValueError(problem)
+            os_spec["acm"] = True
+            name = acm.PACKAGE
         else:
             raise ValueError(f"Unknown add-on {kind}")
         self._update_spec(db, cluster, openshift=os_spec)

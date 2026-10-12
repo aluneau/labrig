@@ -47,6 +47,8 @@ import { ConsoleAccess, InstallPanel } from '../components/clusters/OpenShiftIns
 import { OperatorsTab } from '../components/clusters/OpenShiftOperators';
 import { LabTopology } from '../components/topology/LabTopology';
 import { MetalLBLab } from '../components/clusters/MetalLBLab';
+import { AcmHub } from '../components/clusters/AcmHub';
+import { AcmBanner, AcmLabel } from '../components/clusters/AcmRelation';
 import { MirroredImages } from '../components/clusters/MirroredImages';
 import { ClusterLogs } from '../components/logs/ClusterLogs';
 
@@ -247,6 +249,7 @@ export const ClusterDetailPage: React.FC = () => {
             <Title headingLevel="h1">{cluster.name}</Title>
             <div style={{ marginTop: 8 }}>
               <ClusterStatus cluster={cluster} />
+              <AcmLabel cluster={cluster} />
               {((isOpenShift && os.disconnected) || (!isOpenShift && cluster.spec?.disconnected)) && (
                 <Label id="cluster-disconnected" color="purple" isCompact style={{ marginLeft: 8 }}>disconnected</Label>
               )}
@@ -287,6 +290,7 @@ export const ClusterDetailPage: React.FC = () => {
             usePageInsets aria-label="Cluster sections">
             <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>} />
             {isOpenShift ? <Tab eventKey="operators" title={<TabTitleText>Operators</TabTitleText>} id="os-tab-operators" /> : null}
+            {isOpenShift ? <Tab eventKey="acm" title={<TabTitleText>ACM</TabTitleText>} id="os-tab-acm" /> : null}
             {labTabs ? <Tab eventKey="metallb" title={<TabTitleText>MetalLB lab</TabTitleText>} id="os-tab-metallb" /> : null}
             {cluster.group_id ? <Tab eventKey="topology" title={<TabTitleText>Topology</TabTitleText>} id="os-tab-topology" /> : null}
             <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} id="cluster-tab-logs" />
@@ -302,6 +306,7 @@ export const ClusterDetailPage: React.FC = () => {
         {isOpenShift && tab === 'operators' && (
           <OperatorsTab cluster={cluster} status={install.status} onChanged={() => { reload(); install.reload(); }} />
         )}
+        {isOpenShift && tab === 'acm' && <AcmHub cluster={cluster} onChanged={() => { reload(); install.reload(); }} />}
         {tab === 'logs' && <Card><CardBody><ClusterLogs clusterId={cluster.id} clusterName={cluster.name} /></CardBody></Card>}
         {labTabs && tab === 'metallb' && <MetalLBLab cluster={cluster} onChanged={reload} />}
         {tabbed && tab === 'topology' && cluster.group_id && (
@@ -317,6 +322,9 @@ export const ClusterDetailPage: React.FC = () => {
               <Alert variant="danger" isInline title={error || loadError}
                 actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
             </StackItem>
+          )}
+          {(cluster.acm?.role === 'managed' || cluster.acm?.role === 'spoke' || (!cluster.acm && cluster.status === 'ready')) && (
+            <StackItem><AcmBanner cluster={cluster} onChanged={reload} /></StackItem>
           )}
           {isOpenShift && install.status?.phase !== 'ready' && (
             <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>

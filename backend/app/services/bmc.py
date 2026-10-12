@@ -1,4 +1,9 @@
-"""Bare-metal hosts through their BMC (Redfish): power, one-time boot, virtual media, inventory.
+"""Redfish client for REAL, physical bare-metal hosts through their BMC: power, one-time boot, virtual
+media, inventory.
+
+NOTE: this is for real hardware. It is unrelated to `bmc_service.py` / `bmc_emulator.py`, which run
+*emulated* BMCs (sushy-tools) so an ACM hub can drive lab-group VMs like servers. Real hardware =
+this file + `baremetal_service.py` (the BareMetalHost resource); emulated = `bmc_service.py`.
 
 Generic Redfish (DMTF) so it works on Dell iDRAC 9+, HPE iLO 5+, Supermicro X11/X12+ and others:
 everything is discovered from the service root (`/redfish/v1`), never hardcoded to a vendor path.
@@ -6,11 +11,11 @@ BMCs ship self-signed certs, so TLS is not verified by default (a lab on a trust
 `verify=True` for a BMC with a real certificate.
 
 stdlib only (urllib), like openshift_service: this runs on the host, not in a guest, and must import on
-Python 3.9 (RHEL 9). Credentials are passed in by the caller (bmc_service stores them 0600, never in the
-API), never logged here.
+Python 3.9 (RHEL 9). Credentials are passed in by the caller (baremetal_service stores them 0600, never in
+the API), never logged here.
 
-Used by bmc_service (the BareMetalHost resource) and by the OpenShift installer's bare-metal node path
-(insert the agent ISO as virtual media, boot it once, power on; eject + boot from disk when installed).
+Used by baremetal_service (the BareMetalHost resource) and by the OpenShift installer's bare-metal node
+path (insert the agent ISO as virtual media, boot it once, power on; eject + boot from disk when installed).
 """
 import json
 import ssl

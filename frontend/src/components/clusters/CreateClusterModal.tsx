@@ -24,7 +24,7 @@ import { bareMetalApi, clusterApi, groupApi, networkApi, openshiftApi, storageAp
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 import {
-  DisconnectedSection, MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
+  AcmSection, DisconnectedSection, MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
   TopologySection, VersionSection, defaultOsDraft, osDraftErrors, osRequest, MetalLBFields,
 } from './OpenShiftFields';
 
@@ -466,14 +466,15 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               <StorageSection draft={os} patch={patchOs} />
               <SriovSection draft={os} patch={patchOs} />
               <MetalLBSection draft={os} patch={patchOs} />
+              <AcmSection draft={os} patch={patchOs} />
               <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />
               <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
               <ResourceSummary draft={os} autoGroup={autoGroup} />
             </>}
             {bareMetal && (
               <Alert variant="info" isInline isPlain title="Single-node OpenShift on bare metal">
-                Storage, SR-IOV, MetalLB and disconnected installs aren't supported on bare metal yet — this installs a
-                plain single node. You can add operators from the cluster page afterwards.
+                Storage, SR-IOV, MetalLB, ACM and disconnected installs aren't supported on bare metal yet — this
+                installs a plain single node. You can add operators from the cluster page afterwards.
               </Alert>
             )}
             {osErrors.map((e) => <Alert key={e} variant="danger" isInline isPlain title={e} />)}

@@ -21,6 +21,7 @@ created (then the cluster, if any) and its page opens on the **Case guide** tab.
 | `disconnected-registry` | egress blocked + mirror registry on the router | 9 GiB (heavy) |
 | `kubeadm-lb` | kubeadm cluster in the group, router haproxy in front of the API | 6.5 GiB |
 | `openshift-sno` | OpenShift SNO in the group (needs the pull secret) | 24.5 GiB (heavy) |
+| `acm-hub` | OpenShift SNO with the ACM add-on (hub); managed clusters are imported from its ACM tab | 32.5 GiB (heavy) |
 
 ## File format
 

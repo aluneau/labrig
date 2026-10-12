@@ -125,6 +125,14 @@ class ClusterService:
                     saved = openshift_installer.load_spec(name)
                     spec = saved or spec
                     message = None if saved else "Rebuilt from libvirt metadata (add-on settings unknown)"
+                    if entry["attrs"].get("provisioner") == "acm":
+                        # a spoke of an ACM hub: hub ids are per DB, the name is what the metadata keeps
+                        hub = db.query(Cluster).filter(Cluster.name == entry["attrs"].get("hub")).first()
+                        os_spec = dict(spec.get("openshift") or {})
+                        prov = dict(os_spec.get("provisioner") or {"kind": "acm", "machine": None})
+                        prov.update(hub_name=entry["attrs"].get("hub"), hub_id=hub.id if hub else None)
+                        os_spec["provisioner"] = prov
+                        spec = {**spec, "openshift": os_spec}
                 cluster = Cluster(
                     group_id=group.id if group else None,
                     group_owned=entry["attrs"].get("group_owned") == "yes" if group else None,
@@ -288,7 +296,17 @@ class ClusterService:
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
+            "acm": self._acm(db, cluster),
         }
+
+    @staticmethod
+    def _acm(db: Session, cluster: Cluster) -> Optional[Dict[str, Any]]:
+        from app.services.acm import acm_service
+        try:
+            return acm_service.relation(db, cluster)
+        except Exception:  # never break a cluster read
+            logger.exception(f"ACM relation of {cluster.name}")
+            return None
 
     def _publish(self, cluster: Cluster) -> None:
         event_bus.publish({"kind": "cluster", "id": cluster.id, "name": cluster.name, "status": cluster.status})
@@ -1197,12 +1215,18 @@ class ClusterService:
 
     def delete_cluster(self, db: Session, cluster: Cluster) -> None:
         """Delete node VMs + disks, their reservations / records and the cluster's own network"""
+        from app.services.acm_spokes import provisioner, spoke_service
+        spokes = spoke_service.spokes_of(db, cluster) if cluster.type == "openshift" else []
+        if spokes:
+            raise ValueError(f"{cluster.name} is the ACM hub of {', '.join(s.name for s in spokes)}: delete "
+                             f"{'that spoke' if len(spokes) == 1 else 'those spokes'} first (the hub manages them)")
         if task_service.is_running(cluster.task_id):
             task_service.cancel_task(db, cluster.task_id)
             if not task_service.wait(cluster.task_id, 60):
                 raise ValueError("The cluster task did not stop in time, try again")
             db.refresh(cluster)
         if (cluster.spec or {}).get("bare_metal"):
+            # Real bare-metal host: free it (eject media, power off, release) and drop the install files.
             from app.services.openshift_installer import openshift_installer
             openshift_installer.delete_bmh(db, cluster)
             name, cluster_id = cluster.name, cluster.id
@@ -1210,8 +1234,15 @@ class ClusterService:
             db.commit()
             event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
             return
+        from app.services.acm import acm_service
+        acm_service.forget(db, cluster)  # ACM: off its hub / a hub's DNS entries on its managed clusters
+        spoke = provisioner(cluster) is not None
+        if spoke:  # through its hub; the machine VM is the group's (a BMC member): it stays
+            spoke_service.release(db, cluster)
         network = network_for(cluster)
         for node in list(cluster.nodes):
+            if spoke:
+                continue
             if not network.owned and not network.fronts_api:
                 # existing libvirt network: remove the node's reservation / records one by one
                 self._delete_node_resources(cluster, node, network=network)

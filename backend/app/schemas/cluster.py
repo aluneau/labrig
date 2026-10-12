@@ -145,6 +145,8 @@ class Cluster(BaseModel):
     ctlplanes: int = 0
     workers: int = 0
     spec: Optional[Dict[str, Any]] = None
+    # ACM: {role: hub | managed | spoke, hub_id, hub_name, state} (GET /clusters/{hub_id}/acm for the details)
+    acm: Optional[Dict[str, Any]] = None
     nodes: List[ClusterNodeOut] = []
     created_at: datetime
     updated_at: datetime

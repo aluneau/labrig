@@ -7,6 +7,7 @@
 #   scripts/setup.sh --no-boot       # start libvirt and the service now, but don't enable them at boot
 #                                    # (e.g. a gaming PC: sudo systemctl start vm-manager when needed)
 #   scripts/setup.sh --wg-ports 51820-51869   # UDP ports opened for lab WireGuard (WG_HOST_PORTS), none = skip
+#   scripts/setup.sh --bmc-ports 8180-8199    # TCP ports opened on libvirt bridges for emulated BMCs (BMC_HOST_PORTS)
 #   scripts/setup.sh --no-auth       # no login (AUTH_ENABLED=false in backend/.env): trusted single-user host only
 #   scripts/setup.sh --auth          # turn the login back on (the default for new installs)
 # Release installs (/opt/vm-manager, docs/updates.md) run it through `vm-manager-update install|update`, which
@@ -23,6 +24,7 @@ INSTALL_SERVICE=1
 AT_BOOT=1
 SERVICE_NAME="vm-manager"
 WG_PORTS="51820-51869"
+BMC_PORTS="8180-8199"
 AUTH=""  # "" = keep the current setting (on by default), on, off
 RELEASE=0          # code in /opt/vm-manager/releases/<ver>, data /var/lib/vm-manager, config /etc/vm-manager
 RESTART=1
@@ -31,7 +33,7 @@ IMPORT_DATA=""
 CHANNEL="stable"
 REPO="aluneau/labrig"
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) LISTEN="$2"; shift 2 ;;
@@ -39,6 +41,7 @@ while [ $# -gt 0 ]; do
     --no-service) INSTALL_SERVICE=0; shift ;;
     --no-boot) AT_BOOT=0; shift ;;
     --wg-ports) WG_PORTS="$2"; shift 2 ;;
+    --bmc-ports) BMC_PORTS="$2"; shift 2 ;;
     --no-auth) AUTH=off; shift ;;
     --auth) AUTH=on; shift ;;
     --release) RELEASE=1; shift ;;
@@ -311,6 +314,11 @@ if $SUDO sh -c 'command -v ufw' >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null 
     $SUDO ufw allow "${WG_PORTS/-/:}/udp" comment 'vm-manager WireGuard (lab remote access)' >/dev/null
     ok "ufw: udp $WG_PORTS allowed (lab WireGuard)"
   fi
+  if [ "$BMC_PORTS" != none ]; then
+    # emulated BMCs (Redfish, sushy-tools): lab machines (an ACM hub's metal3) reach them on the bridge address
+    $SUDO ufw allow in on 'virbr+' to any port "${BMC_PORTS/-/:}" proto tcp comment 'vm-manager BMC (Redfish emulator)' >/dev/null
+    ok "ufw: tcp $BMC_PORTS allowed on libvirt bridges (emulated BMCs)"
+  fi
 elif systemctl is-active --quiet firewalld 2>/dev/null; then
   if $SUDO firewall-cmd --get-zones | tr ' ' '\n' | grep -qx libvirt; then
     ok "firewalld: libvirt manages its bridges in the 'libvirt' zone, nothing to do"
@@ -326,6 +334,16 @@ elif systemctl is-active --quiet firewalld 2>/dev/null; then
       $SUDO firewall-cmd --permanent --add-port="$WG_PORTS/udp" >/dev/null
     fi
     ok "firewalld: udp $WG_PORTS open in zone $($SUDO firewall-cmd --get-default-zone) (lab WireGuard)"
+  fi
+  if [ "$BMC_PORTS" != none ] && $SUDO firewall-cmd --get-zones | tr ' ' '\n' | grep -qx libvirt; then
+    # emulated BMCs: the libvirt zone (the bridges) only
+    if ! $SUDO firewall-cmd --zone=libvirt --query-port="$BMC_PORTS/tcp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --zone=libvirt --add-port="$BMC_PORTS/tcp" >/dev/null
+    fi
+    if ! $SUDO firewall-cmd --permanent --zone=libvirt --query-port="$BMC_PORTS/tcp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --permanent --zone=libvirt --add-port="$BMC_PORTS/tcp" >/dev/null
+    fi
+    ok "firewalld: tcp $BMC_PORTS open in zone libvirt (emulated BMCs)"
   fi
 else
   ok "no ufw/firewalld active, nothing to do"
@@ -350,6 +368,14 @@ fi
 grep -v '^libvirt-python' "$APP_DIR/backend/requirements.txt" | code_run tee "$APP_DIR/backend/.requirements-pip.txt" >/dev/null
 code_run "$VENV/bin/pip" install -q --disable-pip-version-check -r "$APP_DIR/backend/.requirements-pip.txt"
 code_run rm -f "$APP_DIR/backend/.requirements-pip.txt"
+# Emulated BMCs (Redfish) for lab machines: optional, the rest of the app works without it. sushy-tools 2.x needs
+# Python >= 3.10: pip picks the newest release the venv's Python supports (Python 3.9 / RHEL 9: 2.1.0)
+if code_run "$VENV/bin/pip" install -q --disable-pip-version-check sushy-tools \
+    && code_run "$VENV/bin/python" -c 'import sushy_tools.emulator.main' 2>/dev/null; then
+  ok "sushy-tools installed (emulated BMCs)"
+else
+  warn "sushy-tools could not be installed: lab groups won't offer emulated BMCs (Redfish)"
+fi
 if [ "$RELEASE" = 1 ]; then
   code_run "$VENV/bin/python" -m compileall -q "$APP_DIR/backend/app" >/dev/null || true
   (cd "$APP_DIR/backend" && as_user env PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -c 'import app.main') \
@@ -401,7 +427,7 @@ EOF
   fi
   if [ "$RELEASE" = 1 ]; then
     # settings of later updates (vm-manager-update reads them back)
-    args="--listen $LISTEN --port $PORT --wg-ports $WG_PORTS"; [ "$AT_BOOT" = 1 ] || args="$args --no-boot"
+    args="--listen $LISTEN --port $PORT --wg-ports $WG_PORTS --bmc-ports $BMC_PORTS"; [ "$AT_BOOT" = 1 ] || args="$args --no-boot"
     printf 'REPO=%s\nCHANNEL=%s\nSERVICE=%s\nUSER=%s\nHOST=%s\nPORT=%s\nSETUP_ARGS=%s\n' \
       "$REPO" "$CHANNEL" "$SERVICE_NAME" "$TARGET_USER" "$LISTEN" "$PORT" "$args" | $SUDO tee /etc/vm-manager/update.conf >/dev/null
     $SUDO chmod 0644 /etc/vm-manager/update.conf

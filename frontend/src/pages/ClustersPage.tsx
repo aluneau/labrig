@@ -15,6 +15,7 @@ import {
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { Cluster } from '../types';
 import { clusterApi } from '../services/api';
+import { AcmLabel } from '../components/clusters/AcmRelation';
 import { usePolling } from '../hooks/usePolling';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText } from '../utils/format';
@@ -96,7 +97,7 @@ export const ClustersPage: React.FC = () => {
             <Tbody>
               {clusters.map((c) => (
                 <Tr key={c.id}>
-                  <Td dataLabel="Name"><Link to={`/clusters/${c.id}`}><strong>{c.name}</strong></Link></Td>
+                  <Td dataLabel="Name"><Link to={`/clusters/${c.id}`}><strong>{c.name}</strong></Link><AcmLabel cluster={c} /></Td>
                   <Td dataLabel="Type">
                     {c.type === 'openshift' ? 'OpenShift' : c.type}{c.version ? ` ${c.version}` : ''}
                     {c.type === 'openshift' && c.spec?.openshift?.topology && (
