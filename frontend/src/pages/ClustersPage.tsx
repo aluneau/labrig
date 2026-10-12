@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Alert,
   AlertActionCloseButton,
@@ -47,8 +47,20 @@ export const ClustersPage: React.FC = () => {
   useLiveEvents(['task'], (e) => { if (e.target_type === 'cluster') reload(); });
   const [error, setError] = useState<string | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [createBmhId, setCreateBmhId] = useState<number | null>(null);
   const [toDelete, setToDelete] = useState<Cluster | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Opened from the Bare-metal hosts page ("Install OpenShift"): open the create dialog on that host
+  useEffect(() => {
+    const id = (location.state as { createBmhId?: number } | null)?.createBmhId;
+    if (id) {
+      setCreateBmhId(id);
+      setIsCreateOpen(true);
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location, navigate]);
 
   const run = async (fn: () => Promise<unknown>) => {
     try {
@@ -127,7 +139,8 @@ export const ClustersPage: React.FC = () => {
         )}
       </PageSection>
 
-      <CreateClusterModal isOpen={isCreateOpen} onClose={() => setIsCreateOpen(false)}
+      <CreateClusterModal isOpen={isCreateOpen} initialBmhId={createBmhId}
+        onClose={() => { setIsCreateOpen(false); setCreateBmhId(null); }}
         onCreated={(id) => navigate(`/clusters/${id}`)} />
       <ConfirmModal title={`Delete cluster ${toDelete?.name}?`} isOpen={!!toDelete} confirmLabel="Delete"
         onConfirm={() => run(() => clusterApi.delete(toDelete!.id))} onClose={() => setToDelete(null)}>

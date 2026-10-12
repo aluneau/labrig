@@ -358,6 +358,22 @@ export interface ClusterCreate {
   kubeadm?: KubeadmOptions | null; // type 'kubeadm': MetalLB
   disconnected?: boolean; // kubeadm, create only: mirror registry on the router, egress blocked
   mirror_images?: string[]; // disconnected: extra images mirrored at create
+  bare_metal?: BareMetalDeploy | null; // type 'openshift' on bare metal (physical hosts via BMC)
+}
+
+export interface BareMetalNode {
+  host_id: number;
+  ip: string; // static IPv4 on the machine network
+}
+
+export interface BareMetalDeploy {
+  hosts: BareMetalNode[];
+  prefix: number;
+  gateway: string;
+  dns: string[];
+  machine_network?: string | null;
+  root_device?: string | null;
+  ntp?: string[]; // empty = the host's own NTP servers
 }
 
 export interface MirroredImage {
@@ -1565,4 +1581,56 @@ export interface UpdateStatus {
   updating: boolean;
   command: string; // how to update by hand
   log: string;
+}
+
+// Bare-metal hosts (physical servers driven through their BMC / Redfish)
+export interface BareMetalHostNicInfo {
+  id?: string;
+  mac: string;
+  link?: string | null;
+  speed_mbps?: number | null;
+  ipv4: string[];
+}
+
+export interface BareMetalInventory {
+  manufacturer?: string | null;
+  model?: string | null;
+  serial?: string | null;
+  power_state?: string | null;
+  health?: string | null;
+  bios_version?: string | null;
+  memory_gib?: number | null;
+  cpu_count?: number | null;
+  cpu_model?: string | null;
+  boot_override?: string | null;
+  nics?: BareMetalHostNicInfo[];
+}
+
+export interface BareMetalHost {
+  id: number;
+  name: string;
+  bmc_address: string;
+  bmc_username: string;
+  boot_mac?: string | null;
+  inventory?: BareMetalInventory | null;
+  status: string; // available | provisioning | provisioned | error
+  status_message?: string | null;
+  cluster_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BareMetalHostCreate {
+  name: string;
+  bmc_address: string;
+  bmc_username: string;
+  bmc_password: string;
+  boot_mac?: string | null;
+}
+
+export interface BareMetalHostUpdate {
+  bmc_address?: string;
+  bmc_username?: string;
+  bmc_password?: string;
+  boot_mac?: string | null;
 }

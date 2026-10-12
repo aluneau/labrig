@@ -12,6 +12,7 @@ import {
   TopologyIcon,
   CatalogIcon,
   AutomationIcon,
+  ServerGroupIcon,
 } from '@patternfly/react-icons';
 
 const NAV_ITEMS = [
@@ -22,6 +23,7 @@ const NAV_ITEMS = [
   { path: '/storage', label: 'Storage', icon: StorageDomainIcon },
   { path: '/networks', label: 'Networks', icon: NetworkIcon },
   { path: '/clusters', label: 'Clusters', icon: ClusterIcon },
+  { path: '/bare-metal-hosts', label: 'Bare-metal hosts', icon: ServerGroupIcon },
   { path: '/hosts', label: 'Host', icon: ServerIcon },
   { path: '/tasks', label: 'Tasks', icon: TaskIcon },
   { path: '/mcp', label: 'AI assistants (MCP)', icon: AutomationIcon },

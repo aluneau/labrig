@@ -22,6 +22,29 @@ class KubeadmOptions(BaseModel):
     metallb: MetalLBOptions = MetalLBOptions()
 
 
+class BareMetalNode(BaseModel):
+    """A physical host (a BareMetalHost id) to provision as an OpenShift node, with its static address
+    on the machine network. Role follows the topology (SNO: the single master)."""
+    host_id: int
+    ip: str = Field(..., min_length=7, max_length=15)  # static IPv4 on the machine network
+
+
+class BareMetalDeploy(BaseModel):
+    """type "openshift" on bare metal (driven through the hosts' BMC, not libvirt VMs): the nodes are
+    physical hosts on a routable network. No lab group / router: the host reaches the API directly.
+    First step: single-node OpenShift (one host)."""
+    hosts: List[BareMetalNode] = Field(..., min_length=1, max_length=5)
+    prefix: int = Field(24, ge=1, le=32)       # machine network prefix length
+    gateway: str = Field(..., min_length=7, max_length=15)
+    dns: List[str] = Field(..., min_length=1, max_length=3)  # upstream DNS servers (static networkConfig)
+    # Machine network CIDR; derived from the first host's ip/prefix when omitted
+    machine_network: Optional[str] = None
+    # rootDeviceHints deviceName (e.g. /dev/sda); None lets the installer pick the first eligible disk
+    root_device: Optional[str] = None
+    # NTP servers for the node (the installer validates the clock); empty = the host's own NTP servers
+    ntp: List[str] = Field([], max_length=4)
+
+
 class ClusterCreate(BaseModel):
     # A DNS label: also the prefix of node names and of the api.<name>.<domain> record
     name: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
@@ -67,6 +90,9 @@ class ClusterCreate(BaseModel):
     openshift: Optional[OpenShiftOptions] = None
     # type "kubeadm": MetalLB (docs/bgp.md)
     kubeadm: Optional[KubeadmOptions] = None
+    # type "openshift" on bare metal: physical hosts (via BMC) instead of VMs, standalone (no lab group).
+    # First step: single-node OpenShift. Mutually exclusive with group_id / network.
+    bare_metal: Optional[BareMetalDeploy] = None
 
 
 class ClusterScale(BaseModel):

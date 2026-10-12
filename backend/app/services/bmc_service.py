@@ -1,5 +1,6 @@
 """Emulated BMCs (Redfish) for lab group members, so an ACM hub's metal3 / Ironic can power them and boot them from
-virtual media like real servers (docs/openshift.md "Spoke machines (BMC)").
+virtual media like real servers (docs/openshift.md "Spoke machines (BMC)"). This is an EMULATOR; for REAL
+physical servers (the BareMetalHost resource) see baremetal_service.py / bmc.py, which are unrelated.
 
 One sushy-tools process per group with `bmc` members (app/services/bmc_emulator.py, libvirt driver): it listens on
 the group's uplink network gateway (e.g. 192.168.122.1, where group machines reach the host through their router's

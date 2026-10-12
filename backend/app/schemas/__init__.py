@@ -20,6 +20,9 @@ from app.schemas.host import (
     SriovNumVfs,
 )
 from app.schemas.cluster import Cluster, ClusterCreate, ClusterScale, ClusterNodeOut, ClusterCommandOutput
+from app.schemas.bmh import (
+    BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalPower, BareMetalHostNic,
+)
 
 __all__ = [
     "VM", "VMCreate", "VMUpdate", "VMDetail", "VMConsole", "VMDisk", "VMInterface",
@@ -34,4 +37,5 @@ __all__ = [
     "HostInfo", "HostResources", "LibvirtStatus", "LibvirtUnit", "LibvirtStop", "LibvirtAction",
     "SriovStatus", "SriovPF", "SriovNumVfs",
     "Cluster", "ClusterCreate", "ClusterScale", "ClusterNodeOut", "ClusterCommandOutput",
+    "BareMetalHost", "BareMetalHostCreate", "BareMetalHostUpdate", "BareMetalPower", "BareMetalHostNic",
 ]

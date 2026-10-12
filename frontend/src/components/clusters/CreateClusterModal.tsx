@@ -19,8 +19,8 @@ import {
   TextInput,
   Title,
 } from '@patternfly/react-core';
-import { CatalogOperator, CloudImage, ClusterCreate, Group, MetalLBOptions, Network } from '../../types';
-import { clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
+import { BareMetalHost, CatalogOperator, CloudImage, ClusterCreate, Group, MetalLBOptions, Network } from '../../types';
+import { bareMetalApi, clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 import {
@@ -32,6 +32,8 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (id: number) => void;
+  // Opened from the Bare-metal hosts page: preselect OpenShift on this host
+  initialBmhId?: number | null;
 }
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
@@ -84,11 +86,20 @@ const toResources = (r: Role) => ({
   memory: Math.round(Number(r.memory) * 1024), vcpu: Number(r.vcpu), disk_size: Number(r.disk),
 });
 
-export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated }) => {
+export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated, initialBmhId }) => {
   const [images, setImages] = useState<CloudImage[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupId, setGroupId] = useState(AUTO_GROUP);
+  // OpenShift placement: VMs in a lab group, or a physical host via its BMC
+  const [placement, setPlacement] = useState<'vm' | 'bmh'>('vm');
+  const [hosts, setHosts] = useState<BareMetalHost[]>([]);
+  const [bmhId, setBmhId] = useState('');
+  const [bmhIp, setBmhIp] = useState('');
+  const [bmhPrefix, setBmhPrefix] = useState('24');
+  const [bmhGateway, setBmhGateway] = useState('');
+  const [bmhDns, setBmhDns] = useState('');
+  const [bmhNtp, setBmhNtp] = useState('');
   const [name, setName] = useState('');
   const [type, setType] = useState('k3s');
   const [version, setVersion] = useState('');
@@ -121,12 +132,13 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
-    Promise.all([storageApi.listCloudImages(), networkApi.list(), groupApi.list()])
-      .then(([imgs, nets, grps]) => {
+    Promise.all([storageApi.listCloudImages(), networkApi.list(), groupApi.list(), bareMetalApi.list().catch(() => [])])
+      .then(([imgs, nets, grps, bmhs]) => {
         const ready = imgs.filter((i) => i.status === 'ready');
         setImages(ready);
         setNetworks(nets);
         setGroups(grps.filter((g) => g.status === 'ready' && g.uplink));
+        setHosts(bmhs as BareMetalHost[]);
         // Same preference as the backend: Debian 13, then AlmaLinux 9
         const preferred = ready.find((i) => i.distribution === 'debian' && i.version === '13')
           || ready.find((i) => i.distribution === 'almalinux' && i.version === '9') || ready[0];
@@ -135,6 +147,16 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       .catch((err) => setError(errorText(err)));
   }, [isOpen]);
 
+  // Deep link from the Bare-metal hosts page: open on OpenShift + this host
+  useEffect(() => {
+    if (isOpen && initialBmhId) {
+      setType('openshift');
+      setPlacement('bmh');
+      setBmhId(String(initialBmhId));
+      patchOs({ topology: 'sno' });
+    }
+  }, [isOpen, initialBmhId, patchOs]);
+
   const isOpenShift = type === 'openshift';
   useEffect(() => {
     if (!isOpen || !isOpenShift || catalog.length) return;
@@ -142,24 +164,37 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       .catch((err) => setCatalogError(errorText(err)));
   }, [isOpen, isOpenShift, catalog.length]);
 
-  const inGroup = type === 'kubeadm' || isOpenShift;
+  // OpenShift on a physical host (BMC), standalone — no lab group
+  const bareMetal = isOpenShift && placement === 'bmh';
+  const inGroup = (type === 'kubeadm' || isOpenShift) && !bareMetal;
   const autoGroup = inGroup && groupId === AUTO_GROUP;
   const nameValid = NAME_RE.test(name) && name.length <= (autoGroup ? 32 : 40);
   const pickedGroup = groups.find((g) => String(g.id) === groupId);
   const osErrors = isOpenShift ? osDraftErrors(os) : [];
-  const groupTaken = isOpenShift && !!pickedGroup && hasOpenShift(pickedGroup);
+  const groupTaken = inGroup && !!pickedGroup && hasOpenShift(pickedGroup);
+  const bmhValid = !!bmhId && !!bmhIp.trim() && !!bmhGateway.trim() && !!bmhDns.trim()
+    && Number(bmhPrefix) >= 1 && Number(bmhPrefix) <= 32;
   const canSubmit = isOpenShift
-    ? nameValid && pullSecretOk && !osErrors.length && !groupTaken
+    ? nameValid && pullSecretOk && !osErrors.length && !groupTaken && (!bareMetal || bmhValid)
     : nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
 
   const openshiftData = (): ClusterCreate => ({
     name,
     type: 'openshift',
     domain: pickedGroup ? pickedGroup.domain : domain,
-    group_id: groupId ? Number(groupId) : null,
-    cidr: autoGroup ? cidr.trim() || null : null,
+    group_id: bareMetal ? null : (groupId ? Number(groupId) : null),
+    cidr: !bareMetal && autoGroup ? cidr.trim() || null : null,
     ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
     ...osRequest(os, catalog),
+    ...(bareMetal ? {
+      bare_metal: {
+        hosts: [{ host_id: Number(bmhId), ip: bmhIp.trim() }],
+        prefix: Number(bmhPrefix),
+        gateway: bmhGateway.trim(),
+        dns: bmhDns.split(',').map((s) => s.trim()).filter(Boolean),
+        ...(bmhNtp.trim() ? { ntp: bmhNtp.split(',').map((s) => s.trim()).filter(Boolean) } : {}),
+      },
+    } : {}),
   });
 
   const submit = async () => {
@@ -234,6 +269,23 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               </HelperTextItem></HelperText></FormHelperText>
             </FormGroup>
           </GridItem>
+          {isOpenShift && (
+            <GridItem>
+              <FormGroup label="Runs on" fieldId="cl-placement">
+                <FormSelect id="cl-placement" value={placement}
+                  onChange={(_e, v) => { setPlacement(v as 'vm' | 'bmh'); if (v === 'bmh') patchOs({ topology: 'sno' }); }}>
+                  <FormSelectOption value="vm" label="Virtual machines (in a lab group)" />
+                  <FormSelectOption value="bmh" label="Bare-metal host (physical server via BMC)" />
+                </FormSelect>
+                <FormHelperText><HelperText><HelperTextItem>
+                  {bareMetal
+                    ? 'Single-node OpenShift on a physical host, driven through its BMC (Redfish). Standalone on its '
+                      + 'own network — no lab group or router.'
+                    : 'Nodes are VMs in a lab group whose router serves DNS and load-balances the API.'}
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            </GridItem>
+          )}
           {!isOpenShift && <>
           <GridItem>
             <FormGroup label="Control planes" fieldId="cl-ctlplanes">
@@ -273,7 +325,21 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
         <Grid hasGutter md={6}>
           <GridItem>
-            {inGroup ? (
+            {bareMetal ? (
+              <FormGroup label="Bare-metal host" isRequired fieldId="cl-bmh">
+                <FormSelect id="cl-bmh" value={bmhId} onChange={(_e, v) => setBmhId(v)}>
+                  <FormSelectOption value="" label={hosts.length ? 'Select a host…' : 'No bare-metal hosts (add one first)'} />
+                  {hosts.map((h) => (
+                    <FormSelectOption key={h.id} value={String(h.id)} isDisabled={!!h.cluster_name}
+                      label={`${h.name}${h.cluster_name ? ` (in use by ${h.cluster_name})` : ''}`} />
+                  ))}
+                </FormSelect>
+                <FormHelperText><HelperText><HelperTextItem>
+                  Registered on the Bare-metal hosts page. The host's boot disk is wiped and the agent ISO booted via
+                  its BMC.
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            ) : inGroup ? (
               <FormGroup label="Lab group" fieldId="cl-group">
                 <FormSelect id="cl-group" value={groupId} onChange={(_e, v) => setGroupId(v)}>
                   <FormSelectOption value={AUTO_GROUP} label={`New lab group ${name || '<name>'} (deleted with the cluster)`} />
@@ -327,6 +393,41 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
           </>}
         </Grid>
 
+        {bareMetal && (
+          <Grid hasGutter md={6}>
+            <GridItem span={8}>
+              <FormGroup label="Node IP" isRequired fieldId="cl-bmh-ip">
+                <TextInput id="cl-bmh-ip" value={bmhIp} placeholder="10.6.117.10"
+                  onChange={(_e, v) => { setBmhIp(v); const m = v.match(/^(\d+\.\d+\.\d+)\.\d+$/); if (m && !bmhGateway) setBmhGateway(`${m[1]}.254`); }} />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={4}>
+              <FormGroup label="Prefix" fieldId="cl-bmh-prefix">
+                <TextInput id="cl-bmh-prefix" type="number" min={1} max={32} value={bmhPrefix} onChange={(_e, v) => setBmhPrefix(v)} />
+              </FormGroup>
+            </GridItem>
+            <GridItem>
+              <FormGroup label="Gateway" isRequired fieldId="cl-bmh-gw">
+                <TextInput id="cl-bmh-gw" value={bmhGateway} placeholder="10.6.117.254" onChange={(_e, v) => setBmhGateway(v)} />
+              </FormGroup>
+            </GridItem>
+            <GridItem>
+              <FormGroup label="DNS (comma-separated)" isRequired fieldId="cl-bmh-dns">
+                <TextInput id="cl-bmh-dns" value={bmhDns} placeholder="10.6.73.2" onChange={(_e, v) => setBmhDns(v)} />
+              </FormGroup>
+            </GridItem>
+            <GridItem span={12}>
+              <FormGroup label="NTP servers (optional, comma-separated)" fieldId="cl-bmh-ntp">
+                <TextInput id="cl-bmh-ntp" value={bmhNtp} placeholder="blank = the host's own NTP servers" onChange={(_e, v) => setBmhNtp(v)} />
+                <FormHelperText><HelperText><HelperTextItem>
+                  The node gets a static address on its data network (the host's boot NIC). The installer validates the
+                  clock, so it needs a reachable NTP server.
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            </GridItem>
+          </Grid>
+        )}
+
         {type === 'kubeadm' && <MetalLBFields prefix="k8s" value={k8sMetallb} onChange={setK8sMetallb} />}
         {type === 'kubeadm' && (
           <FormGroup label="Air gap" fieldId="cl-disconnected">
@@ -360,14 +461,22 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
         {isOpenShift && (
           <>
             <VersionSection draft={os} patch={patchOs} />
-            <TopologySection draft={os} patch={patchOs} />
-            <StorageSection draft={os} patch={patchOs} />
-            <SriovSection draft={os} patch={patchOs} />
-            <MetalLBSection draft={os} patch={patchOs} />
-            <AcmSection draft={os} patch={patchOs} />
-            <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />
-            <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
-            <ResourceSummary draft={os} autoGroup={autoGroup} />
+            {!bareMetal && <>
+              <TopologySection draft={os} patch={patchOs} />
+              <StorageSection draft={os} patch={patchOs} />
+              <SriovSection draft={os} patch={patchOs} />
+              <MetalLBSection draft={os} patch={patchOs} />
+              <AcmSection draft={os} patch={patchOs} />
+              <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />
+              <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
+              <ResourceSummary draft={os} autoGroup={autoGroup} />
+            </>}
+            {bareMetal && (
+              <Alert variant="info" isInline isPlain title="Single-node OpenShift on bare metal">
+                Storage, SR-IOV, MetalLB, ACM and disconnected installs aren't supported on bare metal yet — this
+                installs a plain single node. You can add operators from the cluster page afterwards.
+              </Alert>
+            )}
             {osErrors.map((e) => <Alert key={e} variant="danger" isInline isPlain title={e} />)}
             {!pullSecretOk && <Alert variant="warning" isInline isPlain title="Save a pull secret first (top of this form)." />}
           </>
@@ -375,7 +484,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
         <ExpandableSection toggleText="Advanced">
           <Grid hasGutter md={6}>
-            {(inGroup ? autoGroup : !network) && (
+            {!bareMetal && (inGroup ? autoGroup : !network) && (
               <GridItem>
                 <FormGroup label="Node subnet" fieldId="cl-cidr">
                   <TextInput id="cl-cidr" value={cidr} placeholder="first free /24 (e.g. 10.43.1.0/24)"
@@ -389,7 +498,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                   label="Don't offer updates" description="Clears the ClusterVersion channel: a lab stays on the version it was installed with." />
               </GridItem>
             )}
-            {!inGroup && (
+            {!inGroup && !isOpenShift && (
               <GridItem span={12}>
                 <FormGroup label="Extra k3s server flags" fieldId="cl-extra">
                   <TextInput id="cl-extra" value={extraArgs} placeholder="--disable traefik"

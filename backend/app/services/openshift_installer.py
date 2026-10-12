@@ -361,7 +361,10 @@ class OpenShiftInstaller:
         self._wait_install(db, task, cluster, nodes)
 
         svc._check(task, cluster, db, 93, "Ejecting the agent ISO")
-        self._eject(cluster, iso)
+        if self._is_bmh(cluster):
+            self._eject_bmh(db, cluster)
+        else:
+            self._eject(cluster, iso)
         if opts.disconnected:
             svc._check(task, cluster, db, 93, "Switching to the mirror: IDMS / ITMS, mirrored catalog, default sources off")
             self._apply_mirror_resources(db, task, cluster)
@@ -377,7 +380,11 @@ class OpenShiftInstaller:
     def resumable(self, cluster: Cluster) -> bool:
         """An install interrupted by a server restart once its node VMs were created and booted from the
         agent ISO: the install goes on in the nodes by itself, only the follow-up has to run again"""
-        return cluster.status == "provisioning" and bool((cluster.spec or {}).get("iso_path")) and bool(cluster.nodes)
+        if cluster.status != "provisioning" or not cluster.nodes:
+            return False
+        if self._is_bmh(cluster):
+            return True  # the install carries on in the physical node by itself
+        return bool((cluster.spec or {}).get("iso_path"))
 
     def resume(self, db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
         svc = self.svc
@@ -385,6 +392,9 @@ class OpenShiftInstaller:
         def body(cluster: Cluster) -> Dict[str, Any]:
             self._set_live(cluster.id, phase="booting", assisted_status=None, progress=None, hosts=[],
                            cluster_operators=[])
+            if self._is_bmh(cluster):
+                svc._check(task, cluster, db, 45, "Resuming after a server restart: following the install")
+                return self._finish(db, task, cluster, list(cluster.nodes), (cluster.spec or {}).get("iso_path"))
             missing = [n.name for n in cluster.nodes if libvirt_client.get_vm(n.name) is None]
             if missing:
                 raise RuntimeError(f"Node VMs are gone: {', '.join(missing)}: delete the cluster and create it again")
@@ -701,6 +711,31 @@ class OpenShiftInstaller:
             for name, data in manifests.items():
                 (workdir / "openshift" / name).write_text(yaml.safe_dump(data, sort_keys=False))
 
+        self._run_agent_create_image(db, task, cluster, workdir)
+
+        kubeconfig = (workdir / "auth" / "kubeconfig").read_text()
+        host_config = openshift_service.kubeconfig_for_host(
+            kubeconfig, cluster.name, f"https://{cluster.api_ip}:{LB_PORTS['api']}", f"api.{self.zone(cluster)}")
+        fd = os.open(workdir / "host-kubeconfig", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(host_config)
+        cluster.kubeconfig = host_config
+        db.commit()
+
+        svc._check(task, cluster, db, 36, "Uploading the agent ISO to the default pool")
+        iso_file = workdir / "agent.x86_64.iso"
+        pool_name = libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
+        name = f"{cluster.name}-agent.iso"
+        libvirt_client.delete_volume(pool_name, name)
+        with open(iso_file, "rb") as f:
+            path = libvirt_client.upload_volume(pool_name, name, iso_file.stat().st_size, f)
+        iso_file.unlink()  # the copy in the pool is the one the VMs use
+        self._update_spec(db, cluster, iso_path=path)
+        return path
+
+    def _run_agent_create_image(self, db: Session, task: Task, cluster: Cluster, workdir) -> None:
+        """Run `openshift-install agent create image` in workdir (shared by the VM and bare-metal paths)"""
+        svc = self.svc
         binary = openshift_service.bin_dir(cluster.version) / "openshift-install"
         cache = openshift_service.root / "cache"
         cache.mkdir(exist_ok=True)
@@ -727,25 +762,325 @@ class OpenShiftInstaller:
             tail = log_path.read_text()[-1500:]
             raise RuntimeError(f"openshift-install agent create image failed:\n{tail}")
 
+    # ---------------------------------------------------------- bare metal (BMC)
+
+    @staticmethod
+    def _is_bmh(cluster: Cluster) -> bool:
+        """A bare-metal OpenShift cluster: the nodes are physical hosts driven through their BMC, not
+        libvirt VMs, and there is no lab group / router (the host reaches the node directly)."""
+        return bool((cluster.spec or {}).get("bare_metal"))
+
+    def create_bmh(self, db: Session, data: ClusterCreate) -> Cluster:
+        """OpenShift on bare metal (docs/bmh.md). First step: single-node OpenShift on one physical host,
+        standalone on its routable network (no lab group, no VPN)."""
+        import secrets
+        from app.services.baremetal_service import baremetal_service
+
+        opts = data.openshift or OpenShiftOptions()
+        openshift_service.pull_secret()  # raises when missing
+        bm = data.bare_metal
+        if opts.topology != "sno":
+            raise ValueError("Bare-metal OpenShift currently supports single-node (sno) only")
+        if len(bm.hosts) != 1:
+            raise ValueError("Single-node OpenShift uses exactly one bare-metal host")
+        if opts.disconnected:
+            raise ValueError("Disconnected installs are not supported on bare metal yet")
+        if opts.storage != "none" or opts.sriov.enabled or opts.metallb.enabled:
+            raise ValueError("Storage / SR-IOV / MetalLB add-ons are not supported on bare metal yet")
+        if db.query(Cluster).filter(Cluster.name == data.name).first():
+            raise ValueError(f"Cluster '{data.name}' already exists")
+        node = bm.hosts[0]
+        try:
+            node_ip = ipaddress.ip_address(node.ip)
+            ipaddress.ip_address(bm.gateway)
+            for d in bm.dns:
+                ipaddress.ip_address(d)
+        except ValueError as e:
+            raise ValueError(f"Bare-metal networking: {e}")
+        machine_net = bm.machine_network or str(ipaddress.ip_network(f"{node.ip}/{bm.prefix}", strict=False))
+        openshift_service.check_cidr(machine_net)
+        if node_ip not in ipaddress.ip_network(machine_net):
+            raise ValueError(f"The node IP {node.ip} is not in the machine network {machine_net}")
+
+        host = baremetal_service.get_host(db, node.host_id)
+        if host is None:
+            raise ValueError(f"Bare-metal host {node.host_id} not found")
+        if host.cluster_name:
+            raise ValueError(f"Host '{host.name}' already backs cluster '{host.cluster_name}'")
+        if not host.boot_mac:
+            raise ValueError(f"Host '{host.name}' has no known boot MAC: refresh its inventory or set boot_mac")
+
+        version = openshift_service.resolve_version(opts.channel, opts.version)
+        counts = {"masters": 1, "workers": 0}
+        sizes = self._sizes(data, opts, counts)
+        spec = data.model_dump()
+        spec.pop("network", None)
+        spec.pop("bare_metal", None)
+        spec["openshift"] = {**opts.model_dump(), "version": version}
+        spec.update(ctlplanes=1, workers=0, ctlplane=sizes["ctlplane"], worker=sizes["worker"],
+                    cidr=machine_net, pod_cidr=POD_CIDR, service_cidr=SERVICE_CIDR, api_port=LB_PORTS["api"],
+                    addons=[], image=f"OpenShift {version}",
+                    bare_metal={"host_id": host.id, "host_name": host.name, "ip": node.ip, "prefix": bm.prefix,
+                                "gateway": bm.gateway, "dns": list(bm.dns), "machine_network": machine_net,
+                                "mac": host.boot_mac, "root_device": bm.root_device,
+                                "ntp": list(bm.ntp) or self._host_ntp_servers()})
+        cluster = Cluster(
+            name=data.name, type="openshift", version=version, network="bare-metal", network_owned=False,
+            group_id=None, group_owned=False, domain=data.domain, spec=spec, api_ip=node.ip,
+            status="provisioning", status_message="Queued",
+        )
+        db.add(cluster)
+        db.commit()
+        db.refresh(cluster)
+        host.cluster_name = cluster.name
+        host.status = "provisioning"
+        host.status_message = None
+        db.commit()
+        self.save_spec(cluster)
+        self.svc._publish(cluster)
+        task = task_service.start(db, TaskCreate(
+            name=f"Create OpenShift cluster {data.name}", type="cluster_create", target_type="cluster",
+            target_id=cluster.id, target_name=data.name,
+            description=f"OpenShift {version}, single node on bare-metal host {host.name}",
+        ), self.provision_bmh, cluster.id)
+        cluster.task_id = task.id
+        db.commit()
+        return cluster
+
+    def provision_bmh(self, db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
+        svc = self.svc
+
+        def body(cluster: Cluster) -> Dict[str, Any]:
+            opts = self.options(cluster)
+            version = cluster.version
+            self._set_live(cluster.id, phase="preparing", assisted_status=None, progress=None, hosts=[],
+                           cluster_operators=[])
+
+            def bin_progress(message: str, pct: int) -> None:
+                svc._check(task, cluster, db, 5 + pct * 20 // 100, message)
+            openshift_service.ensure_binaries(version, bin_progress, lambda: task_service.is_cancelled(task.id))
+
+            svc._check(task, cluster, db, 26, "Preparing the node")
+            nodes = self._allocate_bmh(db, cluster)
+            svc._check(task, cluster, db, 28, "Building the agent ISO (openshift-install agent create image)")
+            iso = self._create_image_bmh(db, task, cluster, nodes, opts)
+            svc._check(task, cluster, db, 40, "Booting the bare-metal host from the agent ISO (virtual media)")
+            self._boot_bmh(db, cluster, iso)
+            self._set_live(cluster.id, phase="booting")
+            return self._finish(db, task, cluster, nodes, iso)
+
+        try:
+            return svc._guarded(db, task, cluster_id, body)
+        except Exception:
+            self._set_live(cluster_id, phase="error")
+            raise
+
+    def _allocate_bmh(self, db: Session, cluster: Cluster) -> List[ClusterNode]:
+        bm = cluster.spec["bare_metal"]
+        if not cluster.nodes:
+            cluster.nodes.append(ClusterNode(name=f"{cluster.name}-ctlplane-0", role="ctlplane",
+                                             ip=bm["ip"], mac=bm["mac"]))
+        cluster.api_ip = bm["ip"]
+        db.commit()
+        return list(cluster.nodes)
+
+    def _create_image_bmh(self, db: Session, task: Task, cluster: Cluster, nodes: List[ClusterNode],
+                          opts: OpenShiftOptions) -> str:
+        import secrets
+        spec = cluster.spec
+        bm = spec["bare_metal"]
+        workdir = openshift_service.cluster_dir(cluster.name)
+        for entry in workdir.iterdir():
+            if entry.name.startswith("id_ed25519") or entry.name == "spec.json":
+                continue
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        ssh_key = "\n".join([openshift_service.ssh_keypair(workdir)]
+                            + [k.strip() for k in spec.get("ssh_keys") or [] if k.strip()])
+        first = next(n for n in nodes if n.role == "ctlplane")
+        install = openshift_service.install_config(
+            cluster.name, cluster.domain, spec["cidr"], 1, 0, openshift_service.pull_secret(), ssh_key)
+        agent = openshift_service.agent_config_bmh(cluster.name, first.ip, [{
+            "name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac,
+            "ip": bm["ip"], "prefix": bm["prefix"], "gateway": bm["gateway"], "dns": bm["dns"],
+            "root_device": bm.get("root_device"),
+        } for n in nodes], ntp=bm.get("ntp") or None)
+        for name, data in {"install-config.yaml": install, "agent-config.yaml": agent}.items():
+            text = yaml.dump(data, Dumper=_BlockDumper, sort_keys=False)
+            for path in (workdir / name, workdir / f"{name}.orig"):
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+
+        self._run_agent_create_image(db, task, cluster, workdir)
+
         kubeconfig = (workdir / "auth" / "kubeconfig").read_text()
         host_config = openshift_service.kubeconfig_for_host(
-            kubeconfig, cluster.name, f"https://{cluster.api_ip}:{LB_PORTS['api']}", f"api.{self.zone(cluster)}")
+            kubeconfig, cluster.name, f"https://{first.ip}:{LB_PORTS['api']}", f"api.{self.zone(cluster)}")
         fd = os.open(workdir / "host-kubeconfig", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(host_config)
         cluster.kubeconfig = host_config
-        db.commit()
-
-        svc._check(task, cluster, db, 36, "Uploading the agent ISO to the default pool")
+        # One-time, unguessable token for the BMC to fetch the ISO (it embeds the pull secret + ignition)
+        token_file = workdir / ".iso-token"
+        fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_urlsafe(32))
         iso_file = workdir / "agent.x86_64.iso"
-        pool_name = libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
-        name = f"{cluster.name}-agent.iso"
-        libvirt_client.delete_volume(pool_name, name)
-        with open(iso_file, "rb") as f:
-            path = libvirt_client.upload_volume(pool_name, name, iso_file.stat().st_size, f)
-        iso_file.unlink()  # the copy in the pool is the one the VMs use
-        self._update_spec(db, cluster, iso_path=path)
-        return path
+        if not iso_file.exists():
+            raise RuntimeError("agent create image produced no agent.x86_64.iso")
+        self._update_spec(db, cluster, iso_path=str(iso_file))
+        return str(iso_file)
+
+    @staticmethod
+    def _host_ntp_servers() -> List[str]:
+        """The host's own NTP servers (chrony.conf): a bare-metal node has no router to serve NTP, and the
+        installer validates the clock. The host's NTP is reachable from the same lab network."""
+        servers: List[str] = []
+        for path in ("/etc/chrony.conf", "/etc/chrony/chrony.conf"):
+            try:
+                for line in open(path):
+                    parts = line.split()
+                    if parts and parts[0] in ("server", "pool") and len(parts) >= 2:
+                        servers.append(parts[1])
+            except OSError:
+                continue
+        return servers[:4]
+
+    def _iso_token(self, cluster: Cluster) -> Optional[str]:
+        try:
+            return (openshift_service.cluster_dir(cluster.name) / ".iso-token").read_text().strip()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _host_address(db: Session, cluster: Cluster) -> str:
+        """host:port the BMC can reach the app on: the source IP the host uses to reach the BMC + the
+        app's port (the BMC fetches the ISO itself, so it must be a routable address, not 0.0.0.0)."""
+        import socket
+        from urllib.parse import urlparse
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        bmc_host = urlparse(host.bmc_address).hostname if host else None
+        ip = "127.0.0.1"
+        if bmc_host:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((bmc_host, 443))
+                ip = s.getsockname()[0]
+            except OSError:
+                pass
+            finally:
+                s.close()
+        return f"{ip}:{settings.PORT}"
+
+    def _iso_url(self, db: Session, cluster: Cluster) -> str:
+        token = self._iso_token(cluster)
+        # The path ends in .iso: Dell iDRAC picks the virtual-media type from the URL extension
+        return f"http://{self._host_address(db, cluster)}/iso/{token}/agent.iso"
+
+    def iso_for_token(self, db: Session, token: str):
+        """The agent ISO a /iso/<token> request maps to (public download for the BMC). Only while the
+        file is there (deleted after install)."""
+        if not token:
+            return None
+        for cluster in db.query(Cluster).all():
+            if not self._is_bmh(cluster):
+                continue
+            if self._iso_token(cluster) == token:
+                iso = openshift_service.cluster_dir(cluster.name) / "agent.x86_64.iso"
+                return iso if iso.exists() else None
+        return None
+
+    def _boot_bmh(self, db: Session, cluster: Cluster, iso: str) -> None:
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        if host is None:
+            raise RuntimeError("The bare-metal host was deleted")
+        url = self._iso_url(db, cluster)
+        baremetal_service.client(db, host).boot_iso_once(url)
+
+    def _host_curl(self, url: str, token: Optional[str]) -> Optional[Dict[str, Any]]:
+        """GET `url` from the host (bare metal: the host reaches the node directly, no router guest-exec)"""
+        import urllib.error
+        import urllib.request
+        headers = {"User-Agent": "vm-manager"}
+        if token:
+            headers["Watcher-Authorization"] = token
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=8) as resp:
+                return {"exitcode": 0, "stdout": resp.read().decode("utf-8", "replace")}
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    def _eject_bmh(self, db: Session, cluster: Cluster) -> None:
+        from app.services.baremetal_service import baremetal_service
+        bm = cluster.spec.get("bare_metal") or {}
+        host = baremetal_service.get_host(db, bm.get("host_id"))
+        if host is not None:
+            try:
+                bmc = baremetal_service.client(db, host)
+                bmc.eject_media()
+                bmc.clear_boot_override()
+            except Exception as e:  # don't fail the install over an eject
+                logger.warning(f"Could not eject the agent ISO from {host.name}: {e}")
+            host.status = "provisioned"
+            db.commit()
+        iso = (cluster.spec or {}).get("iso_path")
+        if iso:
+            try:
+                os.unlink(iso)  # the ISO embeds the pull secret: don't leave it downloadable
+            except OSError:
+                pass
+
+    def start_bmh(self, db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
+        from app.services.baremetal_service import baremetal_service
+        svc = self.svc
+        svc._set_status(db, cluster, "starting", "Powering on the bare-metal host")
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        if host is None:
+            raise RuntimeError("The bare-metal host was deleted")
+        baremetal_service.client(db, host).power_on()
+        deadline = time.monotonic() + START_TIMEOUT
+        while True:
+            openshift_service.approve_csrs(cluster.name, cluster.version)
+            cv = self.clusterversion(cluster)
+            if cv is not None and cv.get("available"):
+                return {"nodes_ready": 1}
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"The API was not reachable {START_TIMEOUT // 60} min after power on")
+            svc._check(task, cluster, db, 50, "Waiting for the node to come back")
+            svc._sleep(task, 10)
+
+    def stop_bmh(self, db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
+        from app.services.baremetal_service import baremetal_service
+        svc = self.svc
+        svc._set_status(db, cluster, "stopping", "Powering off the bare-metal host")
+        host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+        if host is not None:
+            baremetal_service.client(db, host).power_off(graceful=True)
+        svc._set_status(db, cluster, "stopped", None)
+        return {"stopped": 1}
+
+    def delete_bmh(self, db: Session, cluster: Cluster) -> None:
+        """Free the host (eject media, power off, release it) and remove the install files."""
+        from app.services.baremetal_service import baremetal_service
+        bm = cluster.spec.get("bare_metal") or {}
+        host = baremetal_service.get_host(db, bm.get("host_id"))
+        if host is not None:
+            try:
+                bmc = baremetal_service.client(db, host)
+                bmc.eject_media()
+                bmc.clear_boot_override()
+                bmc.power_off()
+            except Exception as e:
+                logger.warning(f"Could not reset the BMC of {host.name} on delete: {e}")
+            host.cluster_name = None
+            host.status = "available"
+            host.status_message = None
+            db.commit()
+        shutil.rmtree(openshift_service.root / "clusters" / cluster.name, ignore_errors=True)
+        with self._lock:
+            self._status.pop(cluster.id, None)
 
     @staticmethod
     def _last_log_line(path) -> str:
@@ -846,14 +1181,20 @@ class OpenShiftInstaller:
         if first is None:
             return None
         token = self._watcher_token(cluster)
-        header = f"-H {shlex.quote('Watcher-Authorization: ' + token)} " if token else ""
         url = f"http://{first.ip}:{ASSISTED_PORT}/api/assisted-install/v2/clusters?with_hosts=true"
-        try:
-            out = self._router_exec(cluster, f"curl -sf -m 8 {header}{shlex.quote(url)}", 20)
-        except (libvirt.libvirtError, TimeoutError, ValueError):
-            return None
-        if out["exitcode"] != 0:
-            return None
+        if self._is_bmh(cluster):
+            # bare metal: the host reaches the node directly (no router to curl from)
+            out = self._host_curl(url, token)
+            if out is None:
+                return None
+        else:
+            header = f"-H {shlex.quote('Watcher-Authorization: ' + token)} " if token else ""
+            try:
+                out = self._router_exec(cluster, f"curl -sf -m 8 {header}{shlex.quote(url)}", 20)
+            except (libvirt.libvirtError, TimeoutError, ValueError):
+                return None
+            if out["exitcode"] != 0:
+                return None
         try:
             clusters = json.loads(out["stdout"])
         except ValueError:

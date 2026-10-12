@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import libvirt
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -143,6 +143,24 @@ app.add_route("/api/mcp", MCPEndpoint(), methods=["GET", "POST", "DELETE"], incl
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "version": settings.APP_VERSION}
+
+
+@app.api_route("/iso/{token}/agent.iso", methods=["GET", "HEAD"], include_in_schema=False)
+def serve_agent_iso(token: str, request: Request):
+    """Public, unguessable-token download of a bare-metal cluster's agent ISO, for the host's BMC to
+    fetch as virtual media (the BMC can't send our auth header). The URL ends in .iso because Dell iDRAC
+    picks the media type from the extension, and HEAD is handled because the BMC probes with HEAD before
+    GET. Deleted after the install, so the URL stops working then. Outside /api, so AuthMiddleware leaves
+    it public."""
+    from app.services.openshift_installer import openshift_installer
+    with SessionLocal() as db:
+        iso = openshift_installer.iso_for_token(db, token)
+    if iso is None:
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    if request.method == "HEAD":
+        return Response(headers={"Content-Length": str(iso.stat().st_size),
+                                 "Content-Type": "application/octet-stream", "Accept-Ranges": "bytes"})
+    return FileResponse(str(iso), media_type="application/octet-stream", filename="agent.iso")
 
 
 # Serve the built frontend (npm run build) from the same origin, if present

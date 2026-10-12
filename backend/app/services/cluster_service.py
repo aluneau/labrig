@@ -227,14 +227,18 @@ class ClusterService:
         names = [n.name for n in cluster.nodes]
         vm_ids = {vm.name: vm.id for vm in db.query(VM).filter(VM.name.in_(names)).all()} if names else {}
         zone = f"{cluster.name}.{cluster.domain}"
+        bmh = bool((cluster.spec or {}).get("bare_metal"))
+        # Bare-metal nodes are physical hosts (no libvirt VM): derive their state from the cluster status
+        bmh_state = {"ready": "running", "starting": "running", "stopping": "running",
+                     "stopped": "shutoff"}.get(cluster.status, "missing")
         nodes = [{
             "name": n.name, "role": n.role, "ip": n.ip, "mac": n.mac, "vm_id": vm_ids.get(n.name),
-            "state": states.get(n.name, "missing"), "fqdn": f"{n.name}.{zone}",
+            "state": bmh_state if bmh else states.get(n.name, "missing"), "fqdn": f"{n.name}.{zone}",
         } for n in cluster.nodes]
 
         status = cluster.status
         busy = task_service.is_running(cluster.task_id)
-        if not busy and status in ("ready", "stopped", "starting", "stopping") and nodes:
+        if not bmh and not busy and status in ("ready", "stopped", "starting", "stopping") and nodes:
             node_states = {n["state"] for n in nodes}
             if node_states <= {"shutoff", "missing"}:
                 status = "stopped"
@@ -350,12 +354,18 @@ class ClusterService:
         raise ValueError("No cloud image is ready: download Debian 13 or AlmaLinux 9 on the Storage page")
 
     def create_cluster(self, db: Session, data: ClusterCreate) -> Cluster:
+        if data.bare_metal is not None and data.type != "openshift":
+            raise ValueError("bare_metal is for OpenShift clusters")
         if data.type == "openshift":
+            from app.services.openshift_installer import openshift_installer
+            if data.bare_metal is not None:
+                if data.network or data.group_id is not None:
+                    raise ValueError("Bare-metal OpenShift is standalone: no lab group or network")
+                return openshift_installer.create_bmh(db, data)
             if data.network:
                 raise ValueError("OpenShift clusters live in a lab group: pick a group_id or let the app create one")
             if db.query(Cluster).filter(Cluster.name == data.name).first():
                 raise ValueError(f"Cluster '{data.name}' already exists")
-            from app.services.openshift_installer import openshift_installer
             return openshift_installer.create(db, data)
         if data.openshift is not None:
             raise ValueError("'openshift' options are for type openshift")
@@ -1049,7 +1059,10 @@ class ClusterService:
             def body(cluster: Cluster) -> Dict[str, Any]:
                 if cluster.type == "openshift":
                     from app.services.openshift_installer import openshift_installer
-                    result = openshift_installer.start(db, task, cluster)
+                    if (cluster.spec or {}).get("bare_metal"):
+                        result = openshift_installer.start_bmh(db, task, cluster)
+                    else:
+                        result = openshift_installer.start(db, task, cluster)
                     self._set_status(db, cluster, "ready", None)
                     return result
                 self._set_status(db, cluster, "starting",
@@ -1073,6 +1086,9 @@ class ClusterService:
     def stop_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
+                if (cluster.spec or {}).get("bare_metal"):
+                    from app.services.openshift_installer import openshift_installer
+                    return openshift_installer.stop_bmh(db, task, cluster)
                 self._set_status(db, cluster, "stopping", "Shutting down nodes")
                 # workers first, then control planes
                 for role in ("worker", "ctlplane"):
@@ -1209,6 +1225,15 @@ class ClusterService:
             if not task_service.wait(cluster.task_id, 60):
                 raise ValueError("The cluster task did not stop in time, try again")
             db.refresh(cluster)
+        if (cluster.spec or {}).get("bare_metal"):
+            # Real bare-metal host: free it (eject media, power off, release) and drop the install files.
+            from app.services.openshift_installer import openshift_installer
+            openshift_installer.delete_bmh(db, cluster)
+            name, cluster_id = cluster.name, cluster.id
+            db.delete(cluster)
+            db.commit()
+            event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
+            return
         from app.services.acm import acm_service
         acm_service.forget(db, cluster)  # ACM: off its hub / a hub's DNS entries on its managed clusters
         spoke = provisioner(cluster) is not None
