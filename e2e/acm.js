@@ -25,7 +25,8 @@ async function mcp(name, args) {
   });
   const res = await r.json();
   if (res.error) throw new Error(`${name}: ${res.error.message}`);
-  return res.result.content[0].text;
+  const text = res.result.content[0].text;
+  try { const j = JSON.parse(text); return j.stdout !== undefined ? j.stdout + (j.stderr || '') : text; } catch (e) { return text; }
 }
 
 async function create(body, label) {
@@ -120,18 +121,23 @@ async function waitManaged(hubId, name, want) {
     await page.locator('#acm-managed').waitFor({ timeout: 60000 });
     await page.waitForTimeout(800);
     await page.screenshot({ path: 'acm-hub.png', fullPage: true });
-    await page.locator('#acm-import-select').selectOption(String(ids.kadm));
-    await page.locator('#acm-import').click();
-    await page.locator(`#acm-mc-${NAMES.kadm}`).waitFor({ timeout: 60000 });
-    await page.waitForTimeout(1500);
-    await page.screenshot({ path: 'acm-importing.png', fullPage: true });
+    const already = (await acmState(ids.hub)).managed.map((x) => x.name);  // REUSE after an interrupted run
+    if (!already.includes(NAMES.kadm)) {
+      await page.locator('#acm-import-select').selectOption(String(ids.kadm));
+      await page.locator('#acm-import').click();
+      await page.locator(`#acm-mc-${NAMES.kadm}`).waitFor({ timeout: 60000 });
+      await page.waitForTimeout(1500);
+      await page.screenshot({ path: 'acm-importing.png', fullPage: true });
+    }
     let m = await waitManaged(ids.hub, NAMES.kadm, 'available');
     log(`${NAMES.kadm}: available via ${m.method}, Kubernetes ${m.kubernetes_version}`);
 
     // 5. k3s (default network) through the API
-    if (ids.k3s) {
+    if (ids.k3s && !already.includes(NAMES.k3s)) {
       // the other import path: the app applies the hub's import manifests itself
       await post(`/clusters/${ids.hub}/acm/managed`, { cluster_id: ids.k3s, method: 'manifests' });
+    }
+    if (ids.k3s) {
       m = await waitManaged(ids.hub, NAMES.k3s, 'available');
       log(`${NAMES.k3s}: available via ${m.method}, Kubernetes ${m.kubernetes_version}`);
     }
