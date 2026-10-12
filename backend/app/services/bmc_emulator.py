@@ -95,6 +95,11 @@ def main():
             api_utils.warning("Instance %s access denied", identity)
         return deny
     api_utils.instance_denied = instance_denied
+    # api_utils' logging helper `error()` shadows the error module its access check raises error.NotFound from
+    # (a denied system gave a 500): make that lookup work (404)
+    from sushy_tools import error as sushy_error
+    if not hasattr(api_utils.error, "NotFound"):
+        api_utils.error.NotFound = sushy_error.NotFound
 
     app = emulator.app
     app.config.update({

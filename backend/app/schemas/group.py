@@ -951,6 +951,7 @@ class GroupMemberInfo(BaseModel):
     image: Optional[str] = None
     memory: Optional[int] = None
     vcpu: Optional[int] = None
+    bmc: bool = False  # emulated BMC (powered by its BMC's user, e.g. an ACM hub)
 
 
 class GroupLease(BaseModel):

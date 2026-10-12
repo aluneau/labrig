@@ -1003,7 +1003,8 @@ class GroupService:
         task_service.update_progress(db, task.id, 60)
         self.pin_uplink(db, group)
         # members, then reserved hosts (cluster nodes: control planes sort before workers)
-        for name in ([member_vm_name(spec.name, m.name) for m in spec.members]
+        # (not BMC members: the hub driving their BMC powers them)
+        for name in ([member_vm_name(spec.name, m.name) for m in spec.members if not m.bmc]
                      + sorted((r.name for r in spec.reservations), key=lambda n: "-worker-" in n)):
             live = libvirt_client.get_vm(name)
             if live and live["state"] == "shutoff":
@@ -1339,7 +1340,10 @@ class GroupService:
         router = info("router", router_vm_name(spec.name), "router", spec.router.ip, spec.router.lan_mac, spec.router)
         router.update(memory=spec.router.effective_memory(), vcpu=spec.router.effective_vcpu())  # registry: more
         members = [info(m.name, member_vm_name(spec.name, m.name), m.role, m.ip, m.mac, m) for m in spec.members]
-        all_states = [router["state"]] + [m["state"] for m in members]
+        for m, spec_m in zip(members, spec.members):
+            m["bmc"] = spec_m.bmc
+        # BMC members are powered by whoever drives their BMC (an ACM hub): not part of the group's state
+        all_states = [router["state"]] + [m["state"] for m in members if not m["bmc"]]
         if all(s == "running" for s in all_states):
             state = "running"
         elif all(s in ("shutoff", "missing") for s in all_states):
