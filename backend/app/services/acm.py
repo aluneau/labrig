@@ -52,9 +52,9 @@ HUB_RESERVED = {"memory": 12288, "vcpu": 4}
 # Node defaults when ACM is chosen at creation and no size is given (sno / master: control planes, worker)
 HUB_DEFAULTS = {"sno": {"memory": 32768, "vcpu": 12}, "master": {"memory": 20480, "vcpu": 8},
                 "worker": {"memory": 16384, "vcpu": 4}}
-# Requests of ACM + MCE pods measured on a Basic hub (4.20, ACM 2.17): what must still be schedulable before
-# installing it on a running cluster
-LIVE_REQUESTS = {"cpu_m": 2500, "memory_mi": 6144}
+# Pod requests of ACM + MCE measured on a Basic hub (OCP 4.20.40 SNO, ACM 2.17.3: 2.8 vCPU, 8.9 GiB; OpenShift itself
+# 2.7 vCPU, 12.8 GiB): what must still be schedulable before installing it on a running cluster
+LIVE_REQUESTS = {"cpu_m": 2900, "memory_mi": 9216}
 
 
 def owner(hub_name: str) -> str:
@@ -377,7 +377,7 @@ class AcmService:
         db = SessionLocal()
         try:
             spec = self._group_spec(db, hub.group_id) if hub.group_id else None
-            return spec.router.uplink if spec is not None else None
+            return spec.uplink if spec is not None else None
         finally:
             db.close()
 
