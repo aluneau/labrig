@@ -22,18 +22,22 @@ Earlier handoffs are in git history (`git log -p HANDOFF.md`).
 | Spoke provisioning (`/clusters/{hub}/acm/spokes`, spokes = cluster rows with `spec.openshift.provisioner`) | **NOT verified**: no spoke ever installed. Code + `SPOKE=1` e2e path exist, shipped in 0.1.3 untested. |
 | OpenTofu `vmmanager_acm_managed_cluster`, `vmmanager_acm_spoke`, member `bmc` | Builds, example validates (`tofu fmt`/validate); not applied for real. |
 
-### Why the spoke part is blocked
-The host's ufw drops VM -> host TCP (only DNS/DHCP/WireGuard UDP are open). The hub's metal3/Ironic must reach the
-emulator on the uplink gateway `192.168.122.1:<BMC_HOST_PORTS 8180-8199>`. setup.sh now adds the rule
-(`--bmc-ports`), but this rig was never re-run with it. **The owner must run once:**
+### The firewall blocker is resolved
+The hub's metal3/Ironic must reach the emulator on the uplink gateway `192.168.122.1:<BMC_HOST_PORTS 8180-8199>`, and
+ufw dropped VM -> host TCP. **Done on this rig on 2026-10-12** (`ufw status` shows it):
 
 ```
 sudo ufw allow in on virbr+ to any port 8180:8199 proto tcp comment 'vm-manager BMC (Redfish emulator)'
 ```
 
+The session has **passwordless sudo** on this rig: host-side fixes like this can be applied directly (say so to the
+owner) instead of waiting. New hosts get the rule from `scripts/setup.sh` (default `--bmc-ports 8180-8199`, ufw or
+firewalld zone `libvirt`, `--bmc-ports none` to skip); release installs get it on their next update (the updater
+re-runs setup.sh with the same `--bmc-ports`).
+
 ## Next session (owner said: do it tomorrow; needs ~2–3 h and ~50–60 GiB free RAM)
 
-1. Owner adds the ufw rule above. Check from a group router: `curl -sk -o /dev/null -w '%{http_code}' http://192.168.122.1:8180/redfish/v1/Systems` -> 401
+1. Check from a group router (rule already added): `curl -sk -o /dev/null -w '%{http_code}' http://192.168.122.1:8180/redfish/v1/Systems` -> 401
    (plain http unless the emulator got a cert; the group's port is in `GET /groups/{id}/bmc`).
 2. Run with a fresh token: `cd e2e && VMM_TOKEN=… SPOKE=1 KEEP=1 node acm.js` (hub SNO + BMC machine + spoke;
    `REUSE=1` reuses an existing hub). Watch: BareMetalHost `provisioned`/agent registered via virtual media, assisted
