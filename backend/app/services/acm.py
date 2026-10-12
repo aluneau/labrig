@@ -555,12 +555,16 @@ class AcmService:
 
         step(15, f"DNS: {self.hub_api_host(hub)} -> {hub_ip} on its side")
         self._publish_dns(db, hub, target, hub_ip)
-        if target.group_id and target.group_id != hub.group_id:
-            # what the klusterlet will do: resolve the hub API name through the group's router
-            code = self._probe(self._target_exec(target), self.hub_api_host(hub), port)
+        node = self.svc._api_node(target) if target.type == "kubeadm" else None
+        if target.group_id and target.group_id != hub.group_id and node is not None:
+            # what the klusterlet will do: resolve the hub API name with the group router's DNS (a node uses it;
+            # the router itself resolves through its uplink)
+            run = lambda script, timeout: libvirt_client.agent_exec(node.name, "/bin/sh", ["-c", script],  # noqa: E731
+                                                                     timeout=timeout)
+            code = self._probe(run, self.hub_api_host(hub), port)
             if code == "000":
-                raise ValueError(f"{self.hub_api_host(hub)} doesn't answer from {target.name}'s group router "
-                                 "after adding its DNS record (router DNS not updated?)")
+                raise ValueError(f"{self.hub_api_host(hub)} doesn't answer from {node.name} after adding its DNS "
+                                 "record to the group router (router DNS not updated?)")
 
         runner = self._runner(hub, task, db)
         step(25, "creating the ManagedCluster and KlusterletAddonConfig on the hub")

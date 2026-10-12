@@ -37,13 +37,15 @@ async function create(body, label) {
 async function acmState(hubId) { return api(`/clusters/${hubId}/acm`); }
 
 async function waitManaged(hubId, name, want) {
-  return waitFor(async () => {
+  const r = await waitFor(async () => {
     const s = await acmState(hubId);
     const m = s.managed.find((x) => x.name === name);
     if (want === 'gone') return !m;
-    if (m && m.state === 'error') throw new Error(`${name}: ${m.message}`);
+    if (m && m.state === 'error') return { failed: m.message };  // waitFor retries on throw: fail fast instead
     return m && m.state === want ? m : null;
   }, 25 * 60000, `${name} ${want}`);
+  if (r && r.failed) throw new Error(`${name}: ${r.failed}`);
+  return r;
 }
 
 (async () => {
