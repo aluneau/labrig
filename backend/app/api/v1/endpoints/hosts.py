@@ -6,6 +6,7 @@ from app.database import get_db
 from app.schemas import (
     HostInfo, HostResources, LibvirtStatus, LibvirtStop, LibvirtAction, TaskCreate, SriovStatus, SriovPF, SriovNumVfs,
 )
+from app.schemas.dns import HostDnsRecordCreate, HostDnsRecordInfo
 from app.services.daemon_service import daemon_service
 from app.services.host_service import host_service
 from app.services.sriov_service import sriov_service
@@ -69,10 +70,38 @@ def get_host_resources():
 
 @router.get("/dns")
 def get_host_dns(db: Session = Depends(get_db)):
-    """Host DNS resolver status: the host address to use, upstreams and the cluster zones it answers
-    (api / *.apps of groupless / bare-metal OpenShift clusters -> their node IP)."""
+    """Host DNS resolver status: the host address to use, upstreams, the cluster zones it answers
+    (api / *.apps of groupless / bare-metal OpenShift clusters -> their node IP) and user-managed
+    custom records."""
     from app.services.dns_service import dns_service
     return dns_service.status(db)
+
+
+@router.get("/dns/records", response_model=list)
+def list_host_dns_records(db: Session = Depends(get_db)):
+    """Custom records served by the host DNS resolver (user-managed), alongside the cluster zones."""
+    from app.services.dns_service import dns_service
+    return dns_service.custom_records(db)
+
+
+@router.post("/dns/records", response_model=HostDnsRecordInfo)
+def add_host_dns_record(data: HostDnsRecordCreate, db: Session = Depends(get_db)):
+    """Add a custom record to the host DNS resolver: an A record ({name, ip}) or an alias ({name, cname}).
+    Rejects a name that collides with a cluster zone the resolver already owns, or one that exists."""
+    from app.services.dns_service import dns_service
+    try:
+        return dns_service.add_record(db, data.name, ip=data.ip, cname=data.cname)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/dns/records/{name}")
+def delete_host_dns_record(name: str, db: Session = Depends(get_db)):
+    """Remove a custom record from the host DNS resolver by name."""
+    from app.services.dns_service import dns_service
+    if not dns_service.delete_record(db, name):
+        raise HTTPException(status_code=404, detail=f"No custom record for '{name}'")
+    return {"deleted": name}
 
 
 @router.get("/capabilities")

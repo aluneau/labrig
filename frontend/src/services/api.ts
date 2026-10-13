@@ -3,6 +3,7 @@ import {
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources, HostDnsStatus,
+  HostDnsRecord, HostDnsRecordCreate,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
@@ -303,6 +304,9 @@ export const hostApi = {
   info: () => request<HostInfo>('/hosts/info'),
   resources: () => request<HostResources>('/hosts/resources'),
   dns: () => request<HostDnsStatus>('/hosts/dns'),
+  dnsRecords: () => request<HostDnsRecord[]>('/hosts/dns/records'),
+  addDnsRecord: (record: HostDnsRecordCreate) => post<HostDnsRecord>('/hosts/dns/records', record),
+  deleteDnsRecord: (name: string) => del(`/hosts/dns/records/${encodeURIComponent(name)}`),
   sriov: () => request<SriovStatus>('/hosts/sriov'),
   setNumVfs: (pf: string, numVfs: number) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),

@@ -52,6 +52,14 @@ vm-manager host and the console at `https://console-openshift-console.apps.<clus
 new bare-metal nodes are also pointed at it (handy for ACM later). `GET /api/v1/hosts/dns` shows its status
 and the zones it serves.
 
+You can also add your own **custom records** to this resolver from the Host page (the "DNS resolver" card),
+like managing records on a lab group's router: a name → IPv4 is an A record, a name → another name is an
+alias (CNAME). They are stored in the DB (`host_dns_records`) and rendered into the dnsmasq config alongside
+the cluster zones (`host-record=` / `cname=`), applied live. A name that would shadow a cluster zone the
+resolver already owns (`api`/`api-int`/`*.apps` of a bare-metal cluster) is rejected. API:
+`GET/POST /api/v1/hosts/dns/records` (`{name, ip}` or `{name, cname}`) and
+`DELETE /api/v1/hosts/dns/records/{name}`. These resolve for anyone pointing their DNS at the host.
+
 If you don't know the data network, boot the host with DHCP once and read the address from the BMC console
 (Dell: `DellLCService.ExportServerScreenShot`), then install with that static address.
 

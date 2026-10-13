@@ -1705,6 +1705,20 @@ export interface HostDnsZone {
   ip: string | null;
 }
 
+// A user-managed custom record on the host resolver: an A record (name -> ip) or an alias (name -> cname)
+export interface HostDnsRecord {
+  name: string;
+  ip: string | null;
+  cname: string | null;
+  type: 'A' | 'CNAME';
+}
+
+export interface HostDnsRecordCreate {
+  name: string;
+  ip?: string;
+  cname?: string;
+}
+
 export interface HostDnsStatus {
   enabled: boolean;
   installed: boolean;
@@ -1712,4 +1726,5 @@ export interface HostDnsStatus {
   host_ip: string | null;
   upstreams: string[];
   zones: HostDnsZone[];
+  records: HostDnsRecord[];
 }
