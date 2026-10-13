@@ -533,11 +533,14 @@ class OpenShiftService:
 
     @classmethod
     def nmstate_static(cls, mac: str, ip: str, prefix: int, gateway: str,
-                       dns: List[str]) -> Dict[str, Any]:
+                       dns: List[str], search: Optional[List[str]] = None) -> Dict[str, Any]:
         """A static-IP nmstate config for one NIC matched by MAC (identifier: mac-address, so the kernel's
         name for it doesn't matter). Shared by the bare-metal agent-config and the ACM spoke's
-        NMStateConfig CR."""
+        NMStateConfig CR (field shapes mirror a customer's SiteConfig ClusterInstance nodeNetwork)."""
         iface = cls.BMH_IFACE
+        dns_config: Dict[str, Any] = {"server": list(dns)}
+        if search:
+            dns_config["search"] = list(search)
         return {
             "interfaces": [{
                 "name": iface, "type": "ethernet", "state": "up",
@@ -546,9 +549,9 @@ class OpenShiftService:
                          "address": [{"ip": ip, "prefix-length": int(prefix)}]},
                 "ipv6": {"enabled": False},
             }],
-            "dns-resolver": {"config": {"server": list(dns)}},
+            "dns-resolver": {"config": dns_config},
             "routes": {"config": [{"destination": "0.0.0.0/0", "next-hop-address": gateway,
-                                   "next-hop-interface": iface}]},
+                                   "next-hop-interface": iface, "table-id": 254}]},
         }
 
     @classmethod

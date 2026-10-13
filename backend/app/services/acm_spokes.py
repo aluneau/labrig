@@ -506,9 +506,17 @@ class SpokeService:
         # (apps.<hub>.<domain>) when it fetches the discovery ISO as virtual media.
         step(12, f"Pointing {host.name}'s BMC DNS at the hub image service")
         self._ensure_bmc_dns(db, cluster, host)
+        # Hub CoreDNS: resolve the spoke's zone via the host resolver, so the hub's import-controller can reach
+        # the spoke API (api.<spoke>) to install the klusterlet (the hub's on-node dnsmasq only knows its own zone).
+        if settings.HOST_DNS_ENABLED and not hub.group_id:
+            from app.services.dns_service import dns_service
+            hub_host_ip = dns_service.host_ip()
+            if hub_host_ip:
+                self._ensure_hub_spoke_dns(runner, f"{name}.{cluster.domain}", hub_host_ip)
 
         ip = snet["ip"]
         node_dns = list(snet["dns"])
+        host_ip = None
         if settings.HOST_DNS_ENABLED:
             from app.services.dns_service import dns_service
             host_ip = dns_service.host_ip()
@@ -519,10 +527,11 @@ class SpokeService:
         key_dir = openshift_service.cluster_dir(name)
         ssh_pub = openshift_service.ssh_keypair(key_dir)
         creds = baremetal_service.credentials(host)
-        bmc_address = baremetal_service.redfish_virtualmedia_address(db, host)
+        bmc_address = baremetal_service.virtualmedia_address(db, host)
         bmc_secret = f"{host.name}-bmc"
         imageset = f"img{version}-x86-64"
-        nmstate = openshift_service.nmstate_static(snet["mac"], ip, snet["prefix"], snet["gateway"], node_dns)
+        nmstate = openshift_service.nmstate_static(snet["mac"], ip, snet["prefix"], snet["gateway"], node_dns,
+                                                   search=[f"{name}.{cluster.domain}"])
         runner.apply_retry([{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}}], "Namespace")
         for secret in (
             {"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
@@ -538,27 +547,39 @@ class SpokeService:
                 raise RuntimeError(f"Secret {secret['metadata']['name']}: {(out['stderr'] or '').strip()[-300:]}")
         bmh_spec: Dict[str, Any] = {
             "online": True, "bootMACAddress": snet["mac"], "bootMode": "UEFI",
-            "automatedCleaningMode": "disabled",
+            "automatedCleaningMode": "metadata",  # quick metadata wipe, like the customers' ClusterInstance
+            "rootDeviceHints": ({"deviceName": snet["root_device"]} if snet.get("root_device")
+                                else {"minSizeGigabytes": 400}),  # robust vs guessing a disk path
             "bmc": {"address": bmc_address, "credentialsName": bmc_secret,
                     "disableCertificateVerification": True}}
-        if snet.get("root_device"):
-            bmh_spec["rootDeviceHints"] = {"deviceName": snet["root_device"]}
         infraenv_spec: Dict[str, Any] = {
             "clusterRef": {"name": name, "namespace": name}, "pullSecretRef": {"name": "pull-secret"},
             "sshAuthorizedKey": ssh_pub, "agentLabels": {"vmm-spoke": name}, "cpuArchitecture": "x86_64",
             "nmStateConfigLabelSelector": {"matchLabels": {"infraenvs.agent-install.openshift.io": name}}}
         if snet.get("ntp"):
             infraenv_spec["additionalNTPSources"] = list(snet["ntp"])
-        runner.apply_retry([
+        aci_spec: Dict[str, Any] = {
+            "clusterDeploymentRef": {"name": name}, "imageSetRef": {"name": imageset},
+            "networking": {"machineNetwork": [{"cidr": snet["machine_network"]}],
+                           "clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
+                           "serviceNetwork": ["172.30.0.0/16"], "networkType": "OVNKubernetes"},
+            "provisionRequirements": {"controlPlaneAgents": 1}, "sshPublicKey": ssh_pub}
+        # Groupless hub: the spoke's on-node dnsmasq only knows its own cluster zone. Install a day-0
+        # MachineConfig that forwards the hub's zone to the host DNS resolver, so the spoke's klusterlet and
+        # the assisted-installer-controller can reach the hub by name (api / assisted-service route).
+        extra_manifests: List[Dict[str, Any]] = []
+        if host_ip and not hub.group_id:
+            extra_manifests.append({
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": f"{name}-manifests", "namespace": name},
+                "data": {"50-vmm-hub-dns.yaml": json.dumps(
+                    self._hub_dns_machineconfig(f"{hub.name}.{hub.domain}", host_ip))}})
+            aci_spec["manifestsConfigMapRefs"] = [{"name": f"{name}-manifests"}]
+        runner.apply_retry(extra_manifests + [
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterImageSet", "metadata": {"name": imageset},
              "spec": {"releaseImage": f"quay.io/openshift-release-dev/ocp-release:{version}-x86_64"}},
             {"apiVersion": "extensions.hive.openshift.io/v1beta1", "kind": "AgentClusterInstall",
-             "metadata": {"name": name, "namespace": name},
-             "spec": {"clusterDeploymentRef": {"name": name}, "imageSetRef": {"name": imageset},
-                      "networking": {"machineNetwork": [{"cidr": snet["machine_network"]}],
-                                     "clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
-                                     "serviceNetwork": ["172.30.0.0/16"], "networkType": "OVNKubernetes"},
-                      "provisionRequirements": {"controlPlaneAgents": 1}, "sshPublicKey": ssh_pub}},
+             "metadata": {"name": name, "namespace": name}, "spec": aci_spec},
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterDeployment",
              "metadata": {"name": name, "namespace": name},
              "spec": {"baseDomain": cluster.domain, "clusterName": name,
@@ -663,6 +684,45 @@ class SpokeService:
             logger.warning(f"Spoke {cluster.name}: could not point {host.name}'s BMC DNS at the host resolver "
                            f"(the ISO fetch may fail if it can't resolve the image service): {e}")
 
+    @staticmethod
+    def _hub_dns_machineconfig(zone: str, host_ip: str) -> Dict[str, Any]:
+        """A day-0 MachineConfig (applied during install via AgentClusterInstall.manifestsConfigMapRefs) that
+        drops /etc/dnsmasq.d/vmm-hub-forward.conf on the spoke node: forward the hub's zone to the host DNS
+        resolver. The spoke's own on-node dnsmasq answers its cluster zone and otherwise returns NXDOMAIN for
+        the hub's names, which shadows the resolver in resolv.conf — this explicit forward fixes it."""
+        content = f"server=/{zone}/{host_ip}\n"
+        data_url = "data:text/plain;base64," + base64.b64encode(content.encode()).decode()
+        return {"apiVersion": "machineconfiguration.openshift.io/v1", "kind": "MachineConfig",
+                "metadata": {"name": "50-vmm-hub-dns-forward",
+                             "labels": {"machineconfiguration.openshift.io/role": "master"}},
+                "spec": {"config": {"ignition": {"version": "3.2.0"},
+                                    "storage": {"files": [{"path": "/etc/dnsmasq.d/vmm-hub-forward.conf",
+                                                           "mode": 420, "overwrite": True,
+                                                           "contents": {"source": data_url}}]}}}}
+
+    def _ensure_hub_spoke_dns(self, runner: Any, spoke_zone: str, host_ip: str) -> None:
+        """Add a forward on the hub's CoreDNS (dns.operator/default) for the spoke's zone -> host resolver
+        (read-modify-write, keeping other spokes' entries). Non-fatal."""
+        name = "vmm-spoke-" + spoke_zone.replace(".", "-")
+        current = (self._get(runner, ["get", "dns.operator/default", "-o", "json"]).get("spec") or {}).get("servers") or []
+        servers = [s for s in current if s.get("name") != name]
+        servers.append({"name": name, "zones": [spoke_zone], "forwardPlugin": {"upstreams": [host_ip]}})
+        out = runner.oc(["patch", "dns.operator/default", "--type=merge", "-p",
+                         json.dumps({"spec": {"servers": servers}})], 60)
+        if out["exitcode"] != 0:
+            logger.warning(f"Hub DNS forward for {spoke_zone}: {(out['stderr'] or '').strip()[-200:]}")
+
+    def _remove_hub_spoke_dns(self, runner: Any, spoke_zone: str) -> None:
+        name = "vmm-spoke-" + spoke_zone.replace(".", "-")
+        current = (self._get(runner, ["get", "dns.operator/default", "-o", "json"]).get("spec") or {}).get("servers") or []
+        servers = [s for s in current if s.get("name") != name]
+        if len(servers) != len(current):
+            try:
+                runner.oc(["patch", "dns.operator/default", "--type=merge", "-p",
+                           json.dumps({"spec": {"servers": servers}})], 60)
+            except (RuntimeError, ValueError) as e:
+                logger.warning(f"Removing hub DNS forward for {spoke_zone}: {e}")
+
     def _restore_bmc_dns(self, db: Session, cluster: Cluster, host: Any) -> None:
         orig = (cluster.spec or {}).get("bmc_dns_orig")
         if not orig:
@@ -758,6 +818,8 @@ class SpokeService:
                     runner.oc(args + ["--ignore-not-found", "--wait=false"], 60)
                 except (RuntimeError, ValueError) as e:
                     logger.warning(f"Spoke {cluster.name}: oc {' '.join(args[:2])} on {hub.name}: {e}")
+            if host is not None:  # drop the hub CoreDNS forward for this spoke's zone
+                self._remove_hub_spoke_dns(runner, f"{cluster.name}.{cluster.domain}")
         elif hub is not None:
             logger.warning(f"Spoke {cluster.name}: hub {hub.name} not ready, its objects stay on the hub")
         if host is not None:  # real server: free it (power/eject only, not wiped), restore its BMC DNS

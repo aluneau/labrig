@@ -230,19 +230,29 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
 - The hub may be **bare-metal / groupless** (no lab-group router). The spoke's `api` / `*.apps.<spoke>.<domain>`
   resolve through the **host DNS resolver** (`services/dns_service.py`, served automatically for any groupless
   OpenShift cluster with an `api_ip`); the host reaches the spoke API by the node IP with
-  `tls-server-name api.<spoke>.<domain>` (no router-forwarded port). The spoke node's resolver is the host
-  resolver first, so it resolves the hub API (`api.<hub>.<domain>`) for its klusterlet.
-- The `BareMetalHost` uses the real `redfish-virtualmedia://<bmc>/redfish/v1/Systems/...` address, **UEFI** boot
-  mode, inspection disabled, the host's boot-NIC MAC, and a BMC secret built from the iDRAC credentials
-  (`baremetal_service`, stored 0600). A **NMStateConfig** carries the node's static network (IP/prefix/gateway/DNS),
-  matched to the boot NIC by MAC.
+  `tls-server-name api.<spoke>.<domain>` (no router-forwarded port).
+- The `BareMetalHost` mirrors a customer's SiteConfig `ClusterInstance` node: a Dell-optimised
+  `idrac-virtualmedia://<bmc>/redfish/v1/Systems/...` address (generic `redfish-virtualmedia://` on non-Dell BMCs),
+  **UEFI** boot, `automatedCleaningMode: metadata`, `rootDeviceHints: {minSizeGigabytes: 400}` (robust vs guessing a
+  disk path), the host's boot-NIC MAC and a BMC secret from the iDRAC credentials (`baremetal_service`, 0600). A
+  **NMStateConfig** carries the node's static network (nmstate: static IPv4 by MAC, default route table-id 254,
+  dns-resolver search + servers). If the hub had the SiteConfig operator + its `ai-cluster/node-templates`, a single
+  `ClusterInstance` would be preferred (it expands into these CRs); the app applies the low-level CRs directly
+  because this hub ships only the CRD, not the controller/templates.
 - metal3/Ironic downloads the discovery ISO from the assisted-image-service and **re-serves it to the BMC by IP**
   (`https://<hub-node-ip>:6183/...`), so the real BMC fetches it without needing DNS for the apps route. As a
   belt-and-braces step the app also points the BMC's own resolver at the host DNS (`IPv4.1.DNS1`, Dell iDRAC;
-  the originals are restored on delete) so a name-based image URL would also resolve.
-- `DELETE /clusters/{id}` deletes the hub objects and **releases** the host (eject media, clear boot override,
-  power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored. Start / stop power the
-  physical host through its BMC. The spoke carries `provisioner = {kind: acm, hub_id, host_id, host_name}`.
+  restored on delete).
+- **Bidirectional DNS** (both are groupless SNOs whose on-node dnsmasq only knows its own zone and otherwise
+  returns NXDOMAIN, shadowing the resolver in `resolv.conf`): the spoke gets a **day-0 MachineConfig** (via
+  `AgentClusterInstall.manifestsConfigMapRefs`) forwarding the hub's zone to the host resolver (so its klusterlet /
+  assisted-installer-controller reach the hub by name), and the hub gets a **CoreDNS forward**
+  (`dns.operator/default`) for the spoke's zone to the host resolver (so ACM's push-import reaches the spoke API).
+  The single host resolver already serves every groupless cluster's zone.
+- `DELETE /clusters/{id}` deletes the hub objects and the hub's CoreDNS forward, and **releases** the host (eject
+  media, clear boot override, power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored.
+  Start / stop power the physical host through its BMC. The spoke carries
+  `provisioner = {kind: acm, hub_id, host_id, host_name}`.
 
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub
