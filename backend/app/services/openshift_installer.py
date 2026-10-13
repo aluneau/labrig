@@ -1453,8 +1453,11 @@ class OpenShiftInstaller:
         elif kind == "acm":
             spec = cluster.spec or {}
             counts = {"masters": int(spec.get("ctlplanes") or 1), "workers": int(spec.get("workers") or 0)}
-            problem = acm.sizing_problem(os_spec.get("topology") or "sno", counts,
-                                         {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
+            # Bare-metal nodes: the spec sizes are nominal (the physical host is much bigger), so the static
+            # size check doesn't apply — the live headroom check reads the node's real allocatable capacity.
+            problem = None if spec.get("bare_metal") else acm.sizing_problem(
+                os_spec.get("topology") or "sno", counts,
+                {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
             problem = problem or acm.live_headroom_problem(AddonRunner(cluster.name, cluster.version, time.sleep,
                                                                        lambda m: None))
             if problem:
