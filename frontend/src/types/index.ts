@@ -604,10 +604,23 @@ export interface AcmGitServer {
   enabled: boolean;
   running: boolean;
   version: string;
-  clone_url?: string | null;
+  clone_url?: string | null; // anonymous HTTP clone URL (what Argo CD uses)
+  web_url?: string | null; // Gitea web UI base (open in a browser)
+  repo_web_url?: string | null; // the spokes repo's page in the Gitea UI
+  admin_user?: string | null; // the admin login (password: separate secret read)
+  bootstrapped?: boolean;
   repo_path: string;
   error?: string | null;
   firewall?: string | null;
+}
+
+/** The in-lab Gitea admin login (secret read) */
+export interface AcmGitCredentials {
+  username: string;
+  password: string;
+  web_url?: string | null;
+  repo_web_url?: string | null;
+  running?: boolean;
 }
 
 /** The Argo CD Application that syncs the spokes onto the hub */
@@ -617,6 +630,7 @@ export interface AcmArgoApplication {
   health?: string | null; // Healthy | Progressing | Degraded
   revision?: string | null;
   repo_url?: string | null;
+  url?: string | null; // deep-link into the Argo CD web console for this Application
 }
 
 /** The GitOps repo of spoke manifests (the source of truth for deploying clusters from git) */
@@ -628,6 +642,7 @@ export interface AcmGitops {
   spokes: string[];
   commits: { commit: string; date: string; message: string }[];
   argocd_installed: boolean;
+  argocd_url?: string | null; // the Argo CD web console (openshift-gitops-server Route on the hub)
   git_server: AcmGitServer;
   application?: AcmArgoApplication | null;
   application_manifest: string;

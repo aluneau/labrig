@@ -852,7 +852,6 @@ class SpokeService:
         app applies the low-level CRs directly (this hub has only the CRD, not the operator/templates), but this
         is the same spoke expressed the way their fleet is defined. The BMC password is NOT embedded (the Secret
         stub carries the username and a placeholder; fill it in git / sealed-secrets)."""
-        import yaml
         from app.services.baremetal_service import baremetal_service
         from app.services.openshift_service import openshift_service
         host_id = real_bmh_id(cluster)
@@ -863,18 +862,62 @@ class SpokeService:
             raise ValueError("The spoke's bare-metal host was deleted")
         snet = (cluster.spec or {}).get("spoke_net") or {}
         name = cluster.name
-        version = cluster.version
         ssh_pub = openshift_service.ssh_keypair(openshift_service.cluster_dir(name))
+        node_name = cluster.nodes[0].name if cluster.nodes else f"{name}-ctlplane-0"
+        return self._render_siteconfig(db, host, name, cluster.domain, cluster.version, snet, node_name, ssh_pub)
+
+    def siteconfig_preview(self, db: Session, hub: Cluster, host_id: int, net: Dict[str, Any],
+                           name: Optional[str] = None, version: Optional[str] = None) -> str:
+        """The SiteConfig `ClusterInstance` that WOULD be generated for a spoke on `host_id` with `net` params —
+        a reference view for the spoke-create form, rendered from the real host + the parameters the user is
+        typing (not a static blob), without creating anything. Missing fields are shown as placeholders; the SSH
+        key is a placeholder (the real per-cluster key is made at provision time)."""
+        import ipaddress
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, host_id)
+        if host is None:
+            raise ValueError(f"Bare-metal host {host_id} not found")
+        name = (name or "").strip() or "spoke1"
+        version = version or hub.version
+        ip = (net.get("ip") or "").strip()
+        gateway = (net.get("gateway") or "").strip()
+        prefix = int(net.get("prefix") or 24)
+        dns = [d.strip() for d in (net.get("dns") or []) if d.strip()]
+        try:
+            machine_net = str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False)) if ip else f"<node network>/{prefix}"
+        except ValueError:
+            machine_net = f"<node network>/{prefix}"
+        snet = {"mac": host.boot_mac or "<host boot MAC: set it on the Bare-metal hosts page>",
+                "ip": ip or "<node IP>", "prefix": prefix, "gateway": gateway or "<gateway>",
+                "dns": dns or ["<dns>"], "machine_network": machine_net,
+                "root_device": net.get("root_device"),
+                "ntp": list(net.get("ntp") or []) or self.installer._host_ntp_servers()}
+        node_name = f"{name}-ctlplane-0"
+        ssh_pub = "ssh-ed25519 AAAA...  # the per-cluster key is generated when the spoke is provisioned"
+        return self._render_siteconfig(db, host, name, hub.domain, version, snet, node_name, ssh_pub, preview=True)
+
+    def _render_siteconfig(self, db: Session, host: Any, name: str, domain: str, version: str,
+                           snet: Dict[str, Any], node_name: str, ssh_pub: str, preview: bool = False) -> str:
+        """Build the SiteConfig `ClusterInstance` (+ BMC Secret stub) YAML for a real-BMH spoke, from the host
+        record + the static-network params. One place for both the live export (siteconfig_manifest) and the
+        create-form reference view (siteconfig_preview)."""
+        import yaml
+        from app.services.baremetal_service import baremetal_service
+        from app.services.openshift_service import openshift_service
         nmstate = openshift_service.nmstate_static(snet["mac"], snet["ip"], snet["prefix"], snet["gateway"],
                                                    list(snet.get("dns") or []),
-                                                   search=[f"{name}.{cluster.domain}"])
+                                                   search=[f"{name}.{domain}"])
         bmc_secret = f"{host.name}-bmc"
+        try:
+            bmc_address = baremetal_service.virtualmedia_address(db, host)
+        except Exception:
+            bmc_address = f"idrac-virtualmedia://<bmc>/redfish/v1/Systems/System.Embedded.1"
         cluster_instance = {
             "apiVersion": "siteconfig.open-cluster-management.io/v1alpha1", "kind": "ClusterInstance",
             "metadata": {"name": name, "namespace": name,
                          "annotations": {"siteconfig.open-cluster-management.io/sync-wave": "1"}},
             "spec": {
-                "clusterName": name, "baseDomain": cluster.domain,
+                "clusterName": name, "baseDomain": domain,
                 "clusterImageSetNameRef": f"img{version}-x86-64",
                 "pullSecretRef": {"name": "pull-secret"}, "sshPublicKey": ssh_pub,
                 "holdInstallation": False,
@@ -888,9 +931,9 @@ class SpokeService:
                     {"capabilities": {"baselineCapabilitySet": "None",
                                       "additionalEnabledCapabilities": ["OperatorLifecycleManager", "Ingress"]}}),
                 "nodes": [{
-                    "hostName": cluster.nodes[0].name if cluster.nodes else f"{name}-ctlplane-0",
+                    "hostName": node_name,
                     "role": "master",
-                    "bmcAddress": baremetal_service.virtualmedia_address(db, host),
+                    "bmcAddress": bmc_address,
                     "bmcCredentialsName": {"name": bmc_secret},
                     "bootMACAddress": snet.get("mac"), "bootMode": "UEFI",
                     "automatedCleaningMode": "metadata",
@@ -907,10 +950,15 @@ class SpokeService:
             "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
             "metadata": {"name": bmc_secret, "namespace": name},
             "stringData": {"username": host.bmc_username, "password": "<BMC_PASSWORD>"}}
-        header = ("# ACM SiteConfig ClusterInstance for spoke "
-                  f"'{name}' (commit to git for Argo CD / the SiteConfig operator).\n"
-                  "# The vm-manager app applies the expanded CRs directly; this is the GitOps form.\n"
-                  "# Create the pull-secret Secret and fill the BMC password before applying.\n")
+        header = (("# REFERENCE — the ACM SiteConfig ClusterInstance that would define spoke "
+                   f"'{name}' on host '{host.name}'.\n"
+                   "# This is how a real ZTP fleet describes a cluster; the SSH key / some fields are filled in\n"
+                   "# when you provision. The vm-manager app applies the expanded low-level CRs directly.\n"
+                   if preview else
+                   "# ACM SiteConfig ClusterInstance for spoke "
+                   f"'{name}' (commit to git for Argo CD / the SiteConfig operator).\n"
+                   "# The vm-manager app applies the expanded CRs directly; this is the GitOps form.\n"
+                   "# Create the pull-secret Secret and fill the BMC password before applying.\n"))
         return header + "---\n".join(yaml.safe_dump(doc, sort_keys=False) for doc in (cluster_instance, bmc_stub))
 
     def write_kubeconfig(self, db: Session, hub: Cluster, cluster: Cluster) -> str:

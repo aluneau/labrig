@@ -211,6 +211,18 @@ class GitOpsService:
     def argocd_installed(self, runner: Any) -> bool:
         return runner.oc(["get", "crd", "applications.argoproj.io"], 30)["exitcode"] == 0
 
+    def argocd_url(self, runner: Any) -> Optional[str]:
+        """The Argo CD web console URL = the openshift-gitops-server Route on the hub (apps.<hub>, which the host
+        DNS resolver now serves). None until the Route exists."""
+        out = runner.oc(["get", "route", "openshift-gitops-server", "-n", ARGOCD_NS,
+                         "-o", "jsonpath={.spec.host}"], 30)
+        host = (out.get("stdout") or "").strip() if out["exitcode"] == 0 else ""
+        return f"https://{host}" if host else None
+
+    def application_url(self, console: Optional[str], hub: Cluster) -> Optional[str]:
+        """Deep-link into the Argo CD console for this hub's spokes Application."""
+        return f"{console}/applications/{ARGOCD_NS}/{hub.name}-spokes" if console else None
+
     def deploy_application(self, db: Session, hub: Cluster) -> Dict[str, Any]:
         """Push the repo to the in-lab git server and apply the Argo CD Application that syncs the spokes.
         Returns the GitOps status (incl. the Application sync / health)."""
@@ -239,7 +251,8 @@ class GitOpsService:
             raise RuntimeError(f"Could not apply the Argo CD Application: {(out['stderr'] or '').strip()[-300:]}")
         return self.status(db, hub)
 
-    def _application_state(self, runner: Any, hub: Cluster) -> Optional[Dict[str, Any]]:
+    def _application_state(self, runner: Any, hub: Cluster,
+                           console: Optional[str] = None) -> Optional[Dict[str, Any]]:
         # Fully qualify: ACM/MCE also registers applications.app.k8s.io, which shadows the "application" short name.
         app = runner.oc(["get", "applications.argoproj.io", f"{hub.name}-spokes", "-n", ARGOCD_NS, "-o", "json"], 30)
         if app["exitcode"] != 0:
@@ -253,7 +266,8 @@ class GitOpsService:
                 "sync": (status.get("sync") or {}).get("status"),
                 "health": (status.get("health") or {}).get("status"),
                 "revision": (status.get("sync") or {}).get("revision", "")[:7],
-                "repo_url": self.repo_url()}
+                "repo_url": self.repo_url(),
+                "url": self.application_url(console, hub)}
 
     # ------------------------------------------------------------------ views
 
@@ -282,6 +296,7 @@ class GitOpsService:
         spokes = sorted(p.name for p in (self.repo / "clusters").glob("*")
                         if (p / "kustomization.yaml").is_file()) if (self.repo / "clusters").is_dir() else []
         argocd_installed = False
+        argocd_url: Optional[str] = None
         application: Optional[Dict[str, Any]] = None
         try:
             from app.services.acm import acm_service
@@ -289,13 +304,15 @@ class GitOpsService:
                 runner = acm_service._runner(hub)
                 argocd_installed = self.argocd_installed(runner)
                 if argocd_installed:
-                    application = self._application_state(runner, hub)
+                    argocd_url = self.argocd_url(runner)
+                    application = self._application_state(runner, hub, argocd_url)
         except Exception:
             pass
         return {
             "enabled": enabled, "initialized": exists, "repo_path": str(self.repo),
             "clone_url": self.repo_url(), "spokes": spokes, "commits": self.log(10),
             "argocd_installed": argocd_installed,
+            "argocd_url": argocd_url,
             "git_server": git_server_service.status(),
             "application": application,
             "application_manifest": self.application_manifest(hub),

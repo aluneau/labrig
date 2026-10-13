@@ -273,19 +273,33 @@ hub syncs them onto the cluster to provision it — instead of the app applying 
   emulator — data under `DATA_DIR/git`, binary downloaded on first use at the pinned `GITEA_VERSION`, listening on a
   free port of `GIT_HOST_PORTS`, opened in the host firewall by `scripts/setup.sh --git-ports`). The repo is mirrored
   into it (`vmmanager/spokes`, public / anonymous clone) so the hub's Argo CD clones it over the LAN at the host's
-  routed address — no repository credentials.
+  routed address — no repository credentials. The GitOps card exposes its **web UI** (`web_url`, *Open Gitea*), the
+  spokes repo page (`repo_web_url`) and the **admin login** (`admin_user` = `vmmanager`; the password is a secret read
+  `GET /clusters/{id}/acm/gitops/git-credentials`, stored 0600 in `DATA_DIR/git/state.json`, never logged — `POST` the
+  same path rotates it). Browse / push manually from Gitea with those credentials.
 - **Argo CD on the hub**: the `gitops` day-2 add-on (ACM tab → *Install OpenShift GitOps*, or `POST
   /openshift/addons {kind: gitops}`) installs the OpenShift GitOps operator with `install_operator`, waits for the
   default `openshift-gitops` Argo CD instance, and grants its application-controller a ClusterRole over the ACM
   provisioning CRs (`hive`, `extensions.hive`, `agent-install`, `metal3`, `cluster`/`agent.open-cluster-management`,
   `siteconfig`). *Deploy (apply Application)* (`POST /clusters/{id}/acm/gitops/deploy`) pushes the repo and applies an
   Argo CD `Application` syncing `clusters/` (auto-sync, prune, self-heal); the card shows its Synced / Healthy state.
+  The **Argo CD web console** is the `openshift-gitops-server` Route on the hub (`apps.<hub>`, served by the host DNS
+  resolver): `gitops.status` returns it as `argocd_url` (*Open Argo CD*) and a deep-link to the `<hub>-spokes`
+  Application as `application.url` (*View in Argo CD*). The links are disabled with a reason until the Route exists.
 
 Then provision a spoke with **Deploy via GitOps** ticked (`acm/spokes` `gitops: true`, real BareMetalHost only): the
 app creates the Namespace + the pull-secret / BMC Secret (never committed to git), commits the manifests, waits for
 Argo CD to sync them onto the hub, and follows the install to Ready — metal3 + the assisted service do the rest
 exactly as in the direct path. The direct-apply path stays the default. The SiteConfig `ClusterInstance` form would
 instead need the SiteConfig operator + `ai-*-templates` on the hub to expand into these CRs.
+
+**Understanding a spoke before you build it**: the spoke-create form prefills sensible defaults as you type — the
+gateway becomes `.254` of the node's IP, prefix `24`, and the node is built UEFI / `OVNKubernetes` /
+`rootDeviceHints minSizeGigabytes 400` with NTP from the host. *Preview the SiteConfig ClusterInstance*
+(`GET /clusters/{id}/acm/siteconfig/preview?host_id=…&ip=…&prefix=…&gateway=…&dns=…&name=…`) renders the real
+`ClusterInstance` for the chosen host + the params being typed (reusing `acm_spokes.siteconfig_preview`, nothing is
+created; empty fields show as placeholders) so a user sees exactly how the spoke is defined. The spoke row's
+*SiteConfig (GitOps)* action renders the same for a provisioned spoke (`GET /clusters/{id}/acm/siteconfig`).
 
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub

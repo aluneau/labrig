@@ -205,6 +205,19 @@ def acm_gitops_deploy(cluster_id: int, db: Session = Depends(get_db)):
     return _bad_request(gitops_service.deploy_application, db, _get(db, cluster_id))
 
 
+@router.get("/{cluster_id}/acm/siteconfig/preview")
+def acm_siteconfig_preview(cluster_id: int, host_id: int, ip: str = "", prefix: int = 24, gateway: str = "",
+                           dns: str = "", name: str = "", version: str = "", db: Session = Depends(get_db)):
+    """A reference view for the spoke-create form: the ACM SiteConfig `ClusterInstance` that WOULD be generated
+    for a spoke on `host_id` with these static-network params (rendered from the real host + the params, not a
+    static blob). Nothing is created; empty fields show as placeholders."""
+    from app.services.acm_spokes import spoke_service
+    net = {"ip": ip, "prefix": prefix, "gateway": gateway, "dns": [d for d in dns.split(",") if d.strip()]}
+    manifest = _bad_request(spoke_service.siteconfig_preview, db, _get(db, cluster_id), host_id, net,
+                            name or None, version or None)
+    return {"manifest": manifest}
+
+
 @router.get("/{cluster_id}/acm/siteconfig")
 def acm_siteconfig(cluster_id: int, db: Session = Depends(get_db)):
     """The GitOps artifact for a real bare-metal spoke: an ACM SiteConfig `ClusterInstance` manifest (+ the BMC
@@ -213,6 +226,24 @@ def acm_siteconfig(cluster_id: int, db: Session = Depends(get_db)):
     from app.services.acm_spokes import spoke_service
     manifest = _bad_request(spoke_service.siteconfig_manifest, db, _get(db, cluster_id))
     return {"manifest": manifest}
+
+
+@router.get("/{cluster_id}/acm/gitops/git-credentials")
+def acm_gitops_git_credentials(cluster_id: int, db: Session = Depends(get_db)):
+    """The in-lab Gitea admin login (username + password) and web URLs, to open the git server UI. A SECRET read
+    (the password): guarded like kubeconfig / BMC credentials (no viewers). The password lives in
+    DATA_DIR/git/state.json (0600) and is never logged."""
+    _get(db, cluster_id)
+    from app.services import git_server_service
+    return _bad_request(git_server_service.admin_credentials)
+
+
+@router.post("/{cluster_id}/acm/gitops/git-credentials")
+def acm_gitops_reset_git_credentials(cluster_id: int, db: Session = Depends(get_db)):
+    """Rotate the in-lab Gitea admin password (applied on a running server) and return the new credentials."""
+    _get(db, cluster_id)
+    from app.services import git_server_service
+    return _bad_request(git_server_service.admin_credentials, True)
 
 
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers
