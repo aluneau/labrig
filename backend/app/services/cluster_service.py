@@ -1042,13 +1042,17 @@ class ClusterService:
                 continue
             task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
             note = f" ({cluster.status_message})" if cluster.status_message else ""
-            if task is not None and task.type != "cluster_create":
+            # An interrupted install is the create task or a prior resume of it: resume again so the final
+            # steps (eject, add-ons, status) run — not just the create, or a bare-metal host stays
+            # "provisioning" with its ISO mounted after the cluster is already up.
+            install = task is None or task.type in ("cluster_create", "cluster_resume")
+            if cluster.type == "openshift" and install and openshift_installer.resumable(cluster):
+                logger.info(f"Resuming the interrupted install of cluster {cluster.name}")
+                self._run_task(db, cluster, "resume", "Resume install of", openshift_installer.resume)
+            elif task is not None and task.type != "cluster_create":
                 # adding / removing a node of a working cluster: the cluster itself is still there
                 logger.warning(f"{task.name} was interrupted by a server restart")
                 self._set_status(db, cluster, "ready", f"{task.name} was interrupted by a server restart{note}")
-            elif cluster.type == "openshift" and openshift_installer.resumable(cluster):
-                logger.info(f"Resuming the interrupted install of cluster {cluster.name}")
-                self._run_task(db, cluster, "resume", "Resume install of", openshift_installer.resume)
             else:
                 logger.warning(f"Cluster {cluster.name} was interrupted by a server restart")
                 self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "

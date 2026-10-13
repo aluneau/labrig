@@ -201,7 +201,8 @@ export const BareMetalHostsPage: React.FC = () => {
       <AddHostModal isOpen={isAddOpen} onClose={() => setIsAddOpen(false)} onDone={reload} />
       <ConfirmModal title={`Remove bare-metal host ${toDelete?.name}?`} isOpen={!!toDelete} confirmLabel="Remove"
         onConfirm={() => run(() => bareMetalApi.delete(toDelete!.id))} onClose={() => setToDelete(null)}>
-        This only removes it from VM Manager (the BMC credentials are deleted). The physical machine is not changed.
+        Removes it from VM Manager (the BMC credentials are deleted) and powers the machine off (its disks are
+        left intact — use Reset on the host page to wipe them).
       </ConfirmModal>
     </>
   );

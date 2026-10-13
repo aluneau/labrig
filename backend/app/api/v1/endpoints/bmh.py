@@ -83,10 +83,12 @@ def console_screenshot(bmh_id: int, db: Session = Depends(get_db)):
     the UI can fall back to the BMC web console."""
     host = _host(db, bmh_id)
     try:
-        png = baremetal_service.screenshot(db, host)
+        img = baremetal_service.screenshot(db, host)
     except BMCError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
+    # Sniff the real format (Dell returns JPEG): JPEG starts FF D8, PNG starts 89 50 4E 47.
+    media = "image/jpeg" if img[:2] == b"\xff\xd8" else "image/png"
+    return Response(content=img, media_type=media, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/{bmh_id}/power")
@@ -100,3 +102,18 @@ def power_host(bmh_id: int, data: BareMetalPower, db: Session = Depends(get_db))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"power_state": state}
+
+
+@router.post("/{bmh_id}/reset", response_model=BareMetalHost)
+def reset_host(bmh_id: int, wipe: bool = True, db: Session = Depends(get_db)):
+    """Decommission a host: eject media, optionally wipe its disks (wipe=true, Dell iDRAC only) and power it
+    off. 409 while the host backs a cluster; 502 if the BMC can't do it (e.g. wipe on a non-Dell BMC)."""
+    try:
+        host = baremetal_service.reset(db, bmh_id, wipe=wipe)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except BMCError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not host:
+        raise HTTPException(status_code=404, detail="Bare-metal host not found")
+    return host

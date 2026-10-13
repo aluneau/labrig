@@ -327,6 +327,25 @@ class RedfishBMC:
         self.set_boot_once("Cd")
         self.power_cycle()
 
+    def erase_disks(self) -> None:
+        """Wipe the host's physical disks (decommission). Dell iDRAC only, via the OEM SystemErase action
+        (cryptographic erase for self-encrypting drives, overwrite otherwise); other BMCs raise BMCError.
+        The host reboots into the Lifecycle Controller to run it — slow, and it powers off afterwards."""
+        self._discover()
+        base = f"{self._manager_path}/Oem/Dell/DellLCService"
+        try:
+            svc = self._request("GET", base)
+        except BMCError:
+            raise BMCError("disk erase is only supported on Dell iDRAC for now")
+        action = (svc.get("Actions") or {}).get("#DellLCService.SystemErase") or {}
+        target = action.get("target") or f"{base}/Actions/DellLCService.SystemErase"
+        allowed = action.get("Component@Redfish.AllowableValues") or []
+        # Prefer a cryptographic erase of the physical disks, else overwrite them.
+        comp = next((c for c in ("CryptographicErasePD", "OverwritePD") if not allowed or c in allowed), None)
+        if comp is None:
+            raise BMCError(f"this BMC's SystemErase can't erase disks (components: {allowed})")
+        self._request("POST", target, {"Component": [comp]})
+
     def check(self) -> Dict[str, Any]:
         """Reachability + credential probe for the UI: returns system_info, raises BMCError otherwise."""
         return self.system_info()
