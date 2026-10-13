@@ -181,8 +181,29 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     through the app's BMC emulator), then the ManagedCluster. Kubeconfig, logs, oc: the usual cluster endpoints;
     DELETE /clusters/{id} deletes it through the hub (the machine stays)."""
     from app.services.acm_spokes import spoke_service
-    cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version)
+    net = data.net.model_dump() if data.net is not None else None
+    cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version,
+                           data.host_id, net)
     return cluster_service.get_cluster_dict(db, cluster.id)
+
+
+@router.get("/{cluster_id}/acm/gitops")
+def acm_gitops(cluster_id: int, db: Session = Depends(get_db)):
+    """The GitOps repo of this hub's spoke manifests (the source of truth for deploying clusters from git):
+    repo path, recent commits, the spokes it tracks, whether Argo CD is installed, and the Argo CD Application
+    to sync them. The app also applies the CRs directly; git is the fleet-definition / Argo CD path."""
+    from app.services.gitops_service import gitops_service
+    return _bad_request(gitops_service.status, db, _get(db, cluster_id))
+
+
+@router.get("/{cluster_id}/acm/siteconfig")
+def acm_siteconfig(cluster_id: int, db: Session = Depends(get_db)):
+    """The GitOps artifact for a real bare-metal spoke: an ACM SiteConfig `ClusterInstance` manifest (+ the BMC
+    Secret stub, password not embedded) to commit to git for Argo CD / the SiteConfig operator. The app applies
+    the expanded low-level CRs directly; this is the same spoke expressed the way a fleet is defined."""
+    from app.services.acm_spokes import spoke_service
+    manifest = _bad_request(spoke_service.siteconfig_manifest, db, _get(db, cluster_id))
+    return {"manifest": manifest}
 
 
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers

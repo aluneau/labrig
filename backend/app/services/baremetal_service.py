@@ -140,6 +140,24 @@ class BareMetalService:
     def client(self, db: Session, host: BareMetalHost) -> RedfishBMC:
         return RedfishBMC(host.bmc_address, host.bmc_username, self._read_secret(host.id))
 
+    def credentials(self, host: BareMetalHost) -> dict:
+        """The BMC username + password, for a metal3 BareMetalHost secret (never returned by the API)."""
+        return {"username": host.bmc_username, "password": self._read_secret(host.id)}
+
+    def virtualmedia_address(self, db: Session, host: BareMetalHost) -> str:
+        """metal3 BareMetalHost `bmc.address` for this host: a virtual-media URL with the host's ComputerSystem
+        path (discovered from the BMC). Dell iDRAC uses the Dell-optimised `idrac-virtualmedia://` driver (what
+        customers run in their SiteConfig / ClusterInstance); other BMCs use the generic `redfish-virtualmedia://`."""
+        from urllib.parse import urlparse
+        netloc = urlparse(host.bmc_address).netloc or urlparse("//" + host.bmc_address).netloc
+        bmc = self.client(db, host)
+        try:
+            system = bmc._system()  # discovered ComputerSystem @odata.id
+            scheme = "idrac-virtualmedia" if bmc._dell_attributes() is not None else "redfish-virtualmedia"
+        except BMCError:
+            system, scheme = "/redfish/v1/Systems/System.Embedded.1", "redfish-virtualmedia"
+        return f"{scheme}://{netloc}{system}"
+
     def refresh(self, db: Session, bmh_id: int) -> Optional[BareMetalHost]:
         """Re-read inventory/power from the BMC; records BMCError as status=error."""
         host = self.get_host(db, bmh_id)

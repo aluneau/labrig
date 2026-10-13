@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, BmcStatus,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmGitops, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -260,9 +260,16 @@ export const clusterApi = {
   acmImport: (id: number, clusterId: number, method: 'auto' | 'secret' | 'manifests' = 'auto') =>
     post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
   acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
-  /** The hub provisions a spoke: returns the new cluster (its own page, kubeconfig, delete) */
+  /** The hub provisions a spoke on an emulated-BMC member: returns the new cluster (its own page, kubeconfig, delete) */
   acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
+  /** The hub provisions a spoke on a REAL BareMetalHost with its static network */
+  acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, version: version || null }),
+  /** The GitOps artifact for a real bare-metal spoke: its SiteConfig ClusterInstance manifest (for git / Argo CD) */
+  acmSiteconfig: (spokeId: number) => request<{ manifest: string }>(`/clusters/${spokeId}/acm/siteconfig`),
+  /** The hub's GitOps repo of spoke manifests (source of truth for deploying clusters from git) */
+  acmGitops: (hubId: number) => request<AcmGitops>(`/clusters/${hubId}/acm/gitops`),
 };
 
 export const openshiftApi = {

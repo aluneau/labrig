@@ -223,6 +223,49 @@ first). The machine VM carries the cluster metadata, so a lost DB adopts the spo
 `oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
 `DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
 
+**Real bare-metal spokes** (`POST /clusters/{hub}/acm/spokes {name, host_id, net}`, or hub page → ACM →
+*Provision a spoke* → pick a *Bare metal:* host): the same ZTP flow on a **physical server** registered as a
+BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Differences from the emulated path:
+
+- The hub may be **bare-metal / groupless** (no lab-group router). The spoke's `api` / `*.apps.<spoke>.<domain>`
+  resolve through the **host DNS resolver** (`services/dns_service.py`, served automatically for any groupless
+  OpenShift cluster with an `api_ip`); the host reaches the spoke API by the node IP with
+  `tls-server-name api.<spoke>.<domain>` (no router-forwarded port).
+- The `BareMetalHost` mirrors a customer's SiteConfig `ClusterInstance` node: a Dell-optimised
+  `idrac-virtualmedia://<bmc>/redfish/v1/Systems/...` address (generic `redfish-virtualmedia://` on non-Dell BMCs),
+  **UEFI** boot, `automatedCleaningMode: metadata`, `rootDeviceHints: {minSizeGigabytes: 400}` (robust vs guessing a
+  disk path), the host's boot-NIC MAC and a BMC secret from the iDRAC credentials (`baremetal_service`, 0600). A
+  **NMStateConfig** carries the node's static network (nmstate: static IPv4 by MAC, default route table-id 254,
+  dns-resolver search + servers). If the hub had the SiteConfig operator + its `ai-cluster/node-templates`, a single
+  `ClusterInstance` would be preferred (it expands into these CRs); the app applies the low-level CRs directly
+  because this hub ships only the CRD, not the controller/templates.
+- metal3/Ironic downloads the discovery ISO from the assisted-image-service and **re-serves it to the BMC by IP**
+  (`https://<hub-node-ip>:6183/...`), so the real BMC fetches it without needing DNS for the apps route. As a
+  belt-and-braces step the app also points the BMC's own resolver at the host DNS (`IPv4.1.DNS1`, Dell iDRAC;
+  restored on delete).
+- **Bidirectional DNS** (both are groupless SNOs whose on-node dnsmasq only knows its own zone and otherwise
+  returns NXDOMAIN, shadowing the resolver in `resolv.conf`): the spoke gets a **day-0 MachineConfig** (via
+  `AgentClusterInstall.manifestsConfigMapRefs`) forwarding the hub's zone to the host resolver (so its klusterlet /
+  assisted-installer-controller reach the hub by name), and the hub gets a **CoreDNS forward**
+  (`dns.operator/default`) for the spoke's zone to the host resolver (so ACM's push-import reaches the spoke API).
+  The single host resolver already serves every groupless cluster's zone.
+- `DELETE /clusters/{id}` deletes the hub objects and the hub's CoreDNS forward, and **releases** the host (eject
+  media, clear boot override, power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored.
+  Start / stop power the physical host through its BMC. The spoke carries
+  `provisioner = {kind: acm, hub_id, host_id, host_name}`.
+- **GitOps form**: `GET /clusters/{id}/acm/siteconfig` (spoke row → *SiteConfig (GitOps)*) renders the spoke as an
+  ACM SiteConfig `ClusterInstance` (+ a BMC Secret stub, password not embedded) with the `ai-cluster/node-templates`
+  templateRefs — the manifest a fleet commits to git for Argo CD / the SiteConfig operator. The app applies the
+  expanded CRs directly here; this is the same spoke expressed the way customers define theirs.
+- **Deploy from git** (`services/gitops_service.py`, hub ACM tab → *Deploy from git (GitOps)*,
+  `GET /clusters/{id}/acm/gitops`): every bare-metal spoke is also committed to a git repo of `ClusterInstance`
+  manifests under `DATA_DIR/gitops` (`clusters/<name>/`, one commit per provision / delete) — the GitOps source of
+  truth. Push it to a git remote your GitOps controller can reach and point **Argo CD** (the OpenShift GitOps
+  operator) at `clusters/` with the generated `Application`, or run `oc apply -k clusters/<name>` from a clone. The
+  app still applies the CRs directly (so a spoke deploys without any extra operator); the git repo is the
+  fleet-definition / Argo CD path. Installing the OpenShift GitOps operator on the hub is the one prerequisite to
+  close the git→deploy loop (the app detects it and does not install it for you).
+
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub
 subscribes MCE from the mirrored catalog (`installer.open-cluster-management.io/mce-subscription-spec`). Imports

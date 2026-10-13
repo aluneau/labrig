@@ -227,7 +227,8 @@ class ClusterService:
         names = [n.name for n in cluster.nodes]
         vm_ids = {vm.name: vm.id for vm in db.query(VM).filter(VM.name.in_(names)).all()} if names else {}
         zone = f"{cluster.name}.{cluster.domain}"
-        bmh = bool((cluster.spec or {}).get("bare_metal"))
+        from app.services.acm_spokes import real_bmh_id
+        bmh = bool((cluster.spec or {}).get("bare_metal")) or real_bmh_id(cluster) is not None
         # Bare-metal nodes are physical hosts (no libvirt VM): derive their state from the cluster status
         bmh_state = {"ready": "running", "starting": "running", "stopping": "running",
                      "stopped": "shutoff"}.get(cluster.status, "missing")
@@ -1036,12 +1037,21 @@ class ClusterService:
         previous process. An OpenShift install whose nodes already booted carries on in the nodes: follow it
         again in a new task. Anything else can't be resumed: report it instead of 'provisioning' forever.
         (starting / stopping are derived from the node states once no task runs.)"""
+        from app.services.acm_spokes import real_bmh_id, spoke_service
         from app.services.openshift_installer import openshift_installer
         for cluster in db.query(Cluster).filter(Cluster.status == "provisioning").all():
             if task_service.is_running(cluster.task_id):
                 continue
             task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
             note = f" ({cluster.status_message})" if cluster.status_message else ""
+            # ACM spoke on a real host: the hub keeps installing it; re-attach to follow it to Available.
+            if real_bmh_id(cluster) is not None:
+                if spoke_service.resume_real(db, cluster) is not None:
+                    logger.info(f"Resuming the interrupted spoke install of {cluster.name}")
+                else:
+                    self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "
+                                     "the hub is not ready; delete the spoke and create it again")
+                continue
             # An interrupted install is the create task or a prior resume of it: resume again so the final
             # steps (eject, add-ons, status) run — not just the create, or a bare-metal host stays
             # "provisioning" with its ISO mounted after the cluster is already up.
@@ -1062,7 +1072,10 @@ class ClusterService:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
                 if cluster.type == "openshift":
+                    from app.services.acm_spokes import real_bmh_id, spoke_service
                     from app.services.openshift_installer import openshift_installer
+                    if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it through its BMC
+                        return spoke_service.start_real(db, task, cluster)
                     if (cluster.spec or {}).get("bare_metal"):
                         result = openshift_installer.start_bmh(db, task, cluster)
                     else:
@@ -1090,6 +1103,9 @@ class ClusterService:
     def stop_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
+                from app.services.acm_spokes import real_bmh_id, spoke_service
+                if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it off through its BMC
+                    return spoke_service.stop_real(db, task, cluster)
                 if (cluster.spec or {}).get("bare_metal"):
                     from app.services.openshift_installer import openshift_installer
                     return openshift_installer.stop_bmh(db, task, cluster)
@@ -1219,7 +1235,7 @@ class ClusterService:
 
     def delete_cluster(self, db: Session, cluster: Cluster) -> None:
         """Delete node VMs + disks, their reservations / records and the cluster's own network"""
-        from app.services.acm_spokes import provisioner, spoke_service
+        from app.services.acm_spokes import provisioner, real_bmh_id, spoke_service
         spokes = spoke_service.spokes_of(db, cluster) if cluster.type == "openshift" else []
         if spokes:
             raise ValueError(f"{cluster.name} is the ACM hub of {', '.join(s.name for s in spokes)}: delete "
@@ -1237,6 +1253,18 @@ class ClusterService:
             db.delete(cluster)
             db.commit()
             openshift_installer._reconcile_dns(db)  # drop the cluster's host DNS records
+            event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
+            return
+        if real_bmh_id(cluster) is not None:
+            # ACM spoke on a real bare-metal host (groupless): delete its objects on the hub, free the host
+            # (power/eject, not wiped), drop its install files + host DNS records. No VM / lab network.
+            from app.services.openshift_installer import openshift_installer
+            spoke_service.release(db, cluster)
+            openshift_installer.delete_files(cluster)
+            name, cluster_id = cluster.name, cluster.id
+            db.delete(cluster)
+            db.commit()
+            openshift_installer._reconcile_dns(db)
             event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
             return
         from app.services.acm import acm_service

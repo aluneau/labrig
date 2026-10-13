@@ -17,6 +17,8 @@ import {
   FormSelectOption,
   Label,
   LabelProps,
+  Modal,
+  ModalVariant,
   Spinner,
   Stack,
   StackItem,
@@ -24,7 +26,7 @@ import {
 } from '@patternfly/react-core';
 import { ExternalLinkAltIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
+import { AcmGitops, AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
 import { clusterApi } from '../../services/api';
 import { useLiveEvents } from '../../hooks/useEvents';
 import { errorText } from '../../utils/format';
@@ -48,14 +50,34 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [busy, setBusy] = useState(false);
   const [detach, setDetach] = useState<AcmManagedCluster | null>(null);
   const [confirmEnable, setConfirmEnable] = useState(false);
-  const [spokeMachine, setSpokeMachine] = useState('');
+  const [spokeMachine, setSpokeMachine] = useState(''); // 'member:<name>' | 'host:<id>'
   const [spokeName, setSpokeName] = useState('');
+  const [spokeIp, setSpokeIp] = useState('');
+  const [spokePrefix, setSpokePrefix] = useState('24');
+  const [spokeGateway, setSpokeGateway] = useState('');
+  const [spokeDns, setSpokeDns] = useState('');
   const [deleteSpoke, setDeleteSpoke] = useState<AcmSpoke | null>(null);
+  const [siteConfig, setSiteConfig] = useState<{ name: string; manifest: string } | null>(null);
+
+  const openSiteConfig = async (s: AcmSpoke) => {
+    try {
+      const r = await clusterApi.acmSiteconfig(s.id);
+      setSiteConfig({ name: s.name, manifest: r.manifest });
+    } catch (err) {
+      setActionError(errorText(err));
+    }
+  };
+
+  const [gitops, setGitops] = useState<AcmGitops | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setAcm(await clusterApi.acm(cluster.id));
+      const status = await clusterApi.acm(cluster.id);
+      setAcm(status);
       setError(null);
+      if (status.enabled) {
+        clusterApi.acmGitops(cluster.id).then(setGitops).catch(() => setGitops(null));
+      }
     } catch (err) {
       setError(errorText(err));
     }
@@ -226,33 +248,77 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
             <CardHeader><CardTitle>Provision a spoke (bare metal, BMC)</CardTitle></CardHeader>
             <CardBody>
               <div style={{ ...muted, marginBottom: 12 }}>
-                The hub installs a single-node OpenShift on a <em>spoke machine</em> of its lab group (group page → BMC
-                tab → Add spoke machines): metal3 boots the machine from the discovery ISO through its emulated BMC
-                (Redfish virtual media), the assisted service installs it, ACM imports it. Same objects as a customer&apos;s
-                ZTP: ClusterDeployment, AgentClusterInstall, InfraEnv, BareMetalHost.
+                The hub installs a single-node OpenShift on a <em>spoke machine</em>: an emulated-BMC member of its lab
+                group (group page → BMC tab), or a registered <strong>real bare-metal host</strong> (Bare-metal hosts
+                page). metal3 boots it from the discovery ISO through its BMC (Redfish virtual media), the assisted
+                service installs it, ACM imports it. Same objects as a customer&apos;s ZTP: ClusterDeployment,
+                AgentClusterInstall, InfraEnv, NMStateConfig, BareMetalHost. A real host needs the node&apos;s static
+                network (no lab-group router).
               </div>
-              <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: 12 }}>
-                <FlexItem>
-                  <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 220 }}
-                    onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
-                    <FormSelectOption value="" label={acm.spoke_machines.length ? 'Spoke machine…' : 'No free spoke machine in the group'} isPlaceholder />
-                    {acm.spoke_machines.map((m) => (
-                      <FormSelectOption key={m.name} value={m.name} label={`${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
-                    ))}
-                  </FormSelect>
-                </FlexItem>
-                <FlexItem>
-                  <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
-                    value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
-                </FlexItem>
-                <FlexItem>
-                  <Button id="acm-spoke-create" isDisabled={!spokeMachine || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName)
-                    || !hubUp || !ready || busy}
-                    onClick={() => run(async () => { await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine); setSpokeName(''); setSpokeMachine(''); })}>
-                    Provision
-                  </Button>
-                </FlexItem>
-              </Flex>
+              {(() => {
+                const isHost = spokeMachine.startsWith('host:');
+                const validIp = (v: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(v.trim());
+                const netOk = !isHost || (validIp(spokeIp) && validIp(spokeGateway) && Number(spokePrefix) >= 1
+                  && Number(spokePrefix) <= 32 && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).every(validIp)
+                  && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).length > 0);
+                const nameOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName);
+                const nothing = !acm.spoke_machines.length && !acm.spoke_hosts.length;
+                const provision = () => run(async () => {
+                  if (isHost) {
+                    await clusterApi.acmSpokeHost(cluster.id, spokeName, Number(spokeMachine.slice(5)), {
+                      ip: spokeIp.trim(), prefix: Number(spokePrefix), gateway: spokeGateway.trim(),
+                      dns: spokeDns.split(',').map((d) => d.trim()).filter(Boolean),
+                    });
+                  } else {
+                    await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine.slice(7));
+                  }
+                  setSpokeName(''); setSpokeMachine(''); setSpokeIp(''); setSpokeGateway(''); setSpokeDns('');
+                });
+                return (
+                  <Stack hasGutter>
+                    <StackItem>
+                      <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                        <FlexItem>
+                          <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 260 }}
+                            onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
+                            <FormSelectOption value="" label={nothing ? 'No free spoke machine or host' : 'Spoke machine…'} isPlaceholder />
+                            {acm.spoke_machines.map((m) => (
+                              <FormSelectOption key={`member:${m.name}`} value={`member:${m.name}`}
+                                label={`VM ${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
+                            ))}
+                            {acm.spoke_hosts.map((h) => (
+                              <FormSelectOption key={`host:${h.id}`} value={`host:${h.id}`}
+                                label={`Bare metal: ${h.name}${h.memory_gib ? ` (${Math.round(h.memory_gib)} GiB, ${h.cpu_count} cores)` : ''}`} />
+                            ))}
+                          </FormSelect>
+                        </FlexItem>
+                        <FlexItem>
+                          <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
+                            value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
+                        </FlexItem>
+                        <FlexItem>
+                          <Button id="acm-spoke-create" isDisabled={!spokeMachine || !nameOk || !netOk || !hubUp || !ready || busy}
+                            onClick={provision}>Provision</Button>
+                        </FlexItem>
+                      </Flex>
+                    </StackItem>
+                    {isHost && (
+                      <StackItem>
+                        <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                          <FlexItem><TextInput id="acm-spoke-ip" aria-label="Node IP" placeholder="node IP, e.g. 10.6.117.11"
+                            value={spokeIp} onChange={(_e, v) => setSpokeIp(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
+                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
+                            value={spokeGateway} onChange={(_e, v) => setSpokeGateway(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
+                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 220 }} /></FlexItem>
+                        </Flex>
+                      </StackItem>
+                    )}
+                  </Stack>
+                );
+              })()}
               {!!acm.spokes.length && (
                 <Table aria-label="Spokes" variant="compact" id="acm-spokes-table">
                   <Thead><Tr><Th>Spoke</Th><Th>Machine</Th><Th>State</Th><Th>BareMetalHost</Th><Th>Install</Th><Th screenReaderText="Actions" /></Tr></Thead>
@@ -275,6 +341,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                         <Td dataLabel="Install">{s.install_state ? `${s.install_state}${s.progress != null ? ` ${s.progress}%` : ''}` : '—'}</Td>
                         <Td isActionCell>
                           <ActionsColumn isDisabled={busy || !ready} items={[
+                            ...(s.real_bmh ? [{ title: 'SiteConfig (GitOps)', onClick: () => openSiteConfig(s) }] : []),
                             { title: 'Delete spoke', onClick: () => setDeleteSpoke(s) },
                           ]} />
                         </Td>
@@ -288,6 +355,73 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
         </StackItem>
       )}
 
+      {acm.enabled && gitops && gitops.enabled && (
+        <StackItem>
+          <Card id="acm-gitops">
+            <CardHeader><CardTitle>Deploy from git (GitOps)</CardTitle></CardHeader>
+            <CardBody>
+              <div style={{ ...muted, marginBottom: 12 }}>
+                Every bare-metal spoke is also written to a git repo of SiteConfig <code>ClusterInstance</code>
+                manifests on the vm-manager host — the source of truth a fleet commits and deploys from. Push it to
+                a git remote your GitOps controller can reach and point <strong>Argo CD</strong> (OpenShift GitOps)
+                at <code>clusters/</code>, or run <code>oc apply -k clusters/&lt;name&gt;</code> from a clone.
+              </div>
+              <DescriptionList isHorizontal isCompact>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Repo</DescriptionListTerm>
+                  <DescriptionListDescription><code>{gitops.repo_path}</code></DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Tracked spokes</DescriptionListTerm>
+                  <DescriptionListDescription>{gitops.spokes.length ? gitops.spokes.join(', ') : '—'}</DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Argo CD</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    <Label isCompact color={gitops.argocd_installed ? 'green' : 'grey'}>
+                      {gitops.argocd_installed ? 'installed' : 'not installed (install OpenShift GitOps to sync)'}
+                    </Label>
+                    {' '}
+                    <Button variant="link" isInline onClick={() => setSiteConfig({ name: 'Argo CD Application', manifest: gitops.application })}>
+                      View Argo CD Application
+                    </Button>
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Recent commits</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    {gitops.commits.length ? (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {gitops.commits.slice(0, 5).map((c) => (
+                          <li key={c.commit}><code>{c.commit}</code> {c.message}</li>
+                        ))}
+                      </ul>
+                    ) : '—'}
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              </DescriptionList>
+            </CardBody>
+          </Card>
+        </StackItem>
+      )}
+
+      <Modal title={`SiteConfig ClusterInstance — ${siteConfig?.name || ''}`} isOpen={!!siteConfig}
+        variant={ModalVariant.large} onClose={() => setSiteConfig(null)}
+        actions={[
+          <Button key="copy" variant="secondary"
+            onClick={() => navigator.clipboard?.writeText(siteConfig?.manifest || '')}>Copy</Button>,
+          <Button key="close" variant="link" onClick={() => setSiteConfig(null)}>Close</Button>,
+        ]}>
+        <div style={{ ...muted, marginBottom: 8 }}>
+          The GitOps form of this spoke — commit it to your git repo for Argo CD / the SiteConfig operator. The
+          vm-manager app applies the expanded CRs directly; this is the same spoke as a <code>ClusterInstance</code>.
+          Create the pull-secret and fill the BMC password before applying.
+        </div>
+        <pre style={{ maxHeight: '60vh', overflow: 'auto', fontSize: 12, whiteSpace: 'pre',
+          background: 'var(--pf-v5-global--BackgroundColor--200)', padding: 12, borderRadius: 4 }}>
+          {siteConfig?.manifest}
+        </pre>
+      </Modal>
       <ConfirmModal title={`Delete spoke ${deleteSpoke?.name}?`} isOpen={!!deleteSpoke} danger confirmLabel="Delete"
         onConfirm={() => (deleteSpoke ? run(() => clusterApi.delete(deleteSpoke.id)) : undefined)}
         onClose={() => setDeleteSpoke(null)}>

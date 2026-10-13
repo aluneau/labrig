@@ -55,6 +55,14 @@ and the zones it serves.
 If you don't know the data network, boot the host with DHCP once and read the address from the BMC console
 (Dell: `DellLCService.ExportServerScreenShot`), then install with that static address.
 
+## As an ACM spoke (ZTP on real hardware)
+
+A registered bare-metal host can also be provisioned as an **ACM spoke** by an OpenShift hub that has the ACM
+add-on: hub page → ACM → *Provision a spoke* → pick a *Bare metal:* host and give the node's static network.
+The hub's central infrastructure management (metal3 + assisted service) drives the real BMC's virtual media and
+installs SNO through `BareMetalHost` / `InfraEnv` / `NMStateConfig` / `AgentClusterInstall` — true ZTP on a
+physical server, next to the emulated-BMC (VM) spokes. See `docs/openshift.md` → *Real bare-metal spokes*.
+
 ## Limitations (first step)
 
 - Single node only (no compact/HA yet); no LVMS/ODF storage, SR-IOV, MetalLB or disconnected installs on bare

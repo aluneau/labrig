@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # vm-manager-dns systemd unit (setup.sh); a no-op when it isn't installed.
     HOST_DNS_ENABLED: bool = True
 
+    # Keep a git repository of the ACM spoke manifests (DATA_DIR/gitops): the GitOps source of truth for
+    # "deploy a cluster from git" (Argo CD / oc apply -k). A no-op when git isn't installed.
+    GITOPS_ENABLED: bool = True
+
     # libvirt
     LIBVIRT_URI: str = "qemu:///system"
     # Close the libvirt connection after this many idle minutes when no browser is attached
