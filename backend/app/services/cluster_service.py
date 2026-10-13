@@ -1232,6 +1232,7 @@ class ClusterService:
             name, cluster_id = cluster.name, cluster.id
             db.delete(cluster)
             db.commit()
+            openshift_installer._reconcile_dns(db)  # drop the cluster's host DNS records
             event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
             return
         from app.services.acm import acm_service

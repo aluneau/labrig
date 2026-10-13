@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     UPDATE_CHANNEL: str = "stable"
     UPDATE_CHECK: bool = True
 
+    # Host DNS resolver (services/dns_service.py): a dnsmasq on the host that answers api / *.apps of
+    # groupless / bare-metal OpenShift clusters -> their node IP (no lab-group router needed). Needs the
+    # vm-manager-dns systemd unit (setup.sh); a no-op when it isn't installed.
+    HOST_DNS_ENABLED: bool = True
+
     # libvirt
     LIBVIRT_URI: str = "qemu:///system"
     # Close the libvirt connection after this many idle minutes when no browser is attached

@@ -319,6 +319,9 @@ if $SUDO sh -c 'command -v ufw' >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null 
     $SUDO ufw allow in on 'virbr+' to any port "${BMC_PORTS/-/:}" proto tcp comment 'vm-manager BMC (Redfish emulator)' >/dev/null
     ok "ufw: tcp $BMC_PORTS allowed on libvirt bridges (emulated BMCs)"
   fi
+  # Host DNS resolver (bare-metal OpenShift api / *.apps), reached by nodes / clients / BMCs over the LAN
+  $SUDO ufw allow 53 comment 'vm-manager DNS (bare-metal clusters)' >/dev/null
+  ok "ufw: port 53 allowed (vm-manager DNS)"
 elif systemctl is-active --quiet firewalld 2>/dev/null; then
   if $SUDO firewall-cmd --get-zones | tr ' ' '\n' | grep -qx libvirt; then
     ok "firewalld: libvirt manages its bridges in the 'libvirt' zone, nothing to do"
@@ -345,6 +348,12 @@ elif systemctl is-active --quiet firewalld 2>/dev/null; then
     fi
     ok "firewalld: tcp $BMC_PORTS open in zone libvirt (emulated BMCs)"
   fi
+  # Host DNS resolver (bare-metal OpenShift api / *.apps)
+  for proto in udp tcp; do
+    $SUDO firewall-cmd --query-port="53/$proto" >/dev/null 2>&1 || $SUDO firewall-cmd --add-port="53/$proto" >/dev/null
+    $SUDO firewall-cmd --permanent --query-port="53/$proto" >/dev/null 2>&1 || $SUDO firewall-cmd --permanent --add-port="53/$proto" >/dev/null
+  done
+  ok "firewalld: port 53 open (vm-manager DNS)"
 else
   ok "no ufw/firewalld active, nothing to do"
 fi
@@ -415,6 +424,37 @@ SupplementaryGroups=libvirt
 ExecStart=/bin/sh -c 'cd "$RUN_DIR/backend" && exec "$RUN_DIR/backend/venv/bin/python" -m uvicorn app.main:app --host $LISTEN --port $PORT --timeout-graceful-shutdown 3'
 Restart=on-failure
 RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  # Host DNS resolver (services/dns_service.py): a dnsmasq answering api / *.apps of groupless / bare-metal
+  # OpenShift clusters -> their node IP. The app writes $DATA/dns/dnsmasq.conf and restarts it (polkit rule);
+  # CAP_NET_BIND_SERVICE lets it bind :53 as the non-root service user.
+  [ -n "$DATA" ] || DATA="$APP_DIR/backend/data"
+  DNSMASQ="$(command -v dnsmasq 2>/dev/null || ls /usr/sbin/dnsmasq /usr/bin/dnsmasq 2>/dev/null | head -1)"
+  [ -n "$DNSMASQ" ] || DNSMASQ=/usr/sbin/dnsmasq
+  $SUDO install -d -o "$TARGET_USER" -g "$TARGET_GROUP" "$DATA/dns"
+  # SELinux: dnsmasq runs confined (dnsmasq_t) and can't read var_lib_t; label the DNS dir dnsmasq_etc_t so
+  # the app-written config is readable (new files inherit the dir's context).
+  if command -v semanage >/dev/null 2>&1; then
+    $SUDO semanage fcontext -a -t dnsmasq_etc_t "$DATA/dns(/.*)?" 2>/dev/null \
+      || $SUDO semanage fcontext -m -t dnsmasq_etc_t "$DATA/dns(/.*)?" 2>/dev/null || true
+  fi
+  command -v restorecon >/dev/null 2>&1 && $SUDO restorecon -R "$DATA/dns" 2>/dev/null || true
+  $SUDO tee /etc/systemd/system/vm-manager-dns.service >/dev/null <<EOF
+[Unit]
+Description=VM Manager DNS resolver (bare-metal OpenShift api / *.apps)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Runs as root to bind :53, then dnsmasq drops to the service user (like libvirt's own dnsmasq). The
+# config it reads is written by the app (DATA/dns, service-user-owned).
+ExecStartPre=/usr/bin/test -f $DATA/dns/dnsmasq.conf
+ExecStart=$DNSMASQ --keep-in-foreground --user=$TARGET_USER --conf-file=$DATA/dns/dnsmasq.conf
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

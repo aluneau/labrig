@@ -67,6 +67,14 @@ def get_host_resources():
     return resources
 
 
+@router.get("/dns")
+def get_host_dns(db: Session = Depends(get_db)):
+    """Host DNS resolver status: the host address to use, upstreams and the cluster zones it answers
+    (api / *.apps of groupless / bare-metal OpenShift clusters -> their node IP)."""
+    from app.services.dns_service import dns_service
+    return dns_service.status(db)
+
+
 @router.get("/capabilities")
 def get_host_capabilities():
     """Get host capabilities"""
