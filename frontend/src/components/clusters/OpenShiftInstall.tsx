@@ -126,14 +126,17 @@ export const InstallPanel: React.FC<{ cluster: Cluster; status: InstallStatus | 
 
   return (
     <Card id="os-install">
-      <CardTitle>{ready ? `Installed${status.version ? `: OpenShift ${status.version}` : ''}` : 'Installation'}</CardTitle>
+      <CardTitle>{status.day2 ? 'Installing add-on'
+        : ready ? `Installed${status.version ? `: OpenShift ${status.version}` : ''}` : 'Installation'}</CardTitle>
       <CardBody>
         <Stack hasGutter>
           {error && <StackItem><Alert variant="warning" isInline isPlain title={error} /></StackItem>}
           {status.phase === 'stopped' && (
             <StackItem><Alert variant="info" isInline isPlain title="The cluster is stopped." /></StackItem>
           )}
-          {!ready && status.phase !== 'stopped' && <StackItem><PhaseStepper status={status} errorAt={lastPhase.current} /></StackItem>}
+          {/* A day-2 add-on shows its own progress (the add-ons table below), not the cluster install stepper */}
+          {!ready && status.phase !== 'stopped' && !status.day2
+            && <StackItem><PhaseStepper status={status} errorAt={lastPhase.current} /></StackItem>}
           {status.phase === 'error' && cluster.status_message && (
             <StackItem><Alert variant="danger" isInline title={cluster.status_message} /></StackItem>
           )}

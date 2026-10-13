@@ -2,7 +2,7 @@ import {
   VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo, DeviceChange, VMBootUpdate, VMDiskCreate,
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
-  Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources,
+  Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources, HostDnsStatus,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
@@ -278,6 +278,7 @@ export const openshiftApi = {
 export const hostApi = {
   info: () => request<HostInfo>('/hosts/info'),
   resources: () => request<HostResources>('/hosts/resources'),
+  dns: () => request<HostDnsStatus>('/hosts/dns'),
   sriov: () => request<SriovStatus>('/hosts/sriov'),
   setNumVfs: (pf: string, numVfs: number) =>
     request<SriovPF>(`/hosts/sriov/${encodeURIComponent(pf)}`, { method: 'PUT', body: JSON.stringify({ num_vfs: numVfs }) }),

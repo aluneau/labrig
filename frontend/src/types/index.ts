@@ -673,6 +673,7 @@ export interface AddonState {
 
 export interface InstallStatus {
   phase: InstallPhase | string;
+  day2?: boolean; // a day-2 add-on install on a ready cluster: show add-on progress, not the cluster stepper
   assisted_status?: string | null;
   assisted_info?: string | null;
   progress?: number | null;
@@ -1633,4 +1634,20 @@ export interface BareMetalHostUpdate {
   bmc_username?: string;
   bmc_password?: string;
   boot_mac?: string | null;
+}
+
+// Host DNS resolver (dnsmasq) status — resolves api/*.apps of groupless/bare-metal OpenShift clusters
+export interface HostDnsZone {
+  cluster: string;
+  zone: string;
+  ip: string | null;
+}
+
+export interface HostDnsStatus {
+  enabled: boolean;
+  installed: boolean;
+  running: boolean;
+  host_ip: string | null;
+  upstreams: string[];
+  zones: HostDnsZone[];
 }

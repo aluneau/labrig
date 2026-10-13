@@ -21,6 +21,7 @@ import { PageHeader } from '../components/common/PageHeader';
 import { LibvirtCard } from '../components/host/LibvirtCard';
 import { SriovCard } from '../components/host/SriovCard';
 import { UpdateCard } from '../components/host/UpdateCard';
+import { DnsCard } from '../components/host/DnsCard';
 import { useLibvirt } from '../hooks/useLibvirt';
 
 const Item: React.FC<{ term: string; children: React.ReactNode }> = ({ term, children }) => (
@@ -41,6 +42,7 @@ export const HostsPage: React.FC = () => {
       <PageSection>
         <div style={{ marginBottom: 16 }}><LibvirtCard /></div>
         <div style={{ marginBottom: 16 }}><UpdateCard /></div>
+        <div style={{ marginBottom: 16 }}><DnsCard /></div>
       </PageSection>
       {running && <HostDetails />}
     </>
