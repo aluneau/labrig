@@ -8,6 +8,7 @@ The DB row (models/bmh.BareMetalHost) is the source of truth; the BMC password l
 under DATA_DIR/bmc (like the OpenShift pull secret) and is never returned by the API. Redfish calls go
 through services/bmc.RedfishBMC. The OpenShift bare-metal node path reuses client()/boot_iso_once here.
 """
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -18,6 +19,8 @@ from app.config import settings
 from app.models.bmh import BareMetalHost
 from app.schemas.bmh import BareMetalHostCreate, BareMetalHostUpdate
 from app.services.bmc import BMCError, RedfishBMC
+
+logger = logging.getLogger(__name__)
 
 
 class BareMetalService:
@@ -95,6 +98,14 @@ class BareMetalService:
             return False
         if host.cluster_name:
             raise ValueError(f"'{host.name}' is a node of cluster '{host.cluster_name}'; delete the cluster first")
+        # Leave the physical machine in a clean state: eject any media and power it off (best effort — an
+        # unreachable BMC must not block removing the host from the app).
+        try:
+            bmc = self.client(db, host)
+            bmc.eject_media()
+            bmc.power_off()
+        except BMCError as e:
+            logger.warning(f"Could not power off {host.name} before delete: {e}")
         db.delete(host)
         db.commit()
         try:
@@ -102,6 +113,27 @@ class BareMetalService:
         except FileNotFoundError:
             pass
         return True
+
+    def reset(self, db: Session, bmh_id: int, wipe: bool = True) -> Optional[BareMetalHost]:
+        """Decommission a host: eject media, optionally wipe its disks, and power it off. Refuses while the
+        host backs a cluster. `wipe` runs the BMC's disk erase (Dell iDRAC only)."""
+        host = self.get_host(db, bmh_id)
+        if not host:
+            return None
+        if host.cluster_name:
+            raise ValueError(f"'{host.name}' backs cluster '{host.cluster_name}'; delete the cluster first")
+        bmc = self.client(db, host)
+        bmc.eject_media()
+        bmc.clear_boot_override()
+        if wipe:
+            bmc.erase_disks()  # Dell: reboots into the LC, wipes, powers off; raises BMCError on others
+        else:
+            bmc.power_off()
+        host.status = "available"
+        host.status_message = "Disks erased" if wipe else None
+        db.commit()
+        db.refresh(host)
+        return host
 
     # --------------------------------------------------------------- BMC actions
 

@@ -358,5 +358,6 @@ export const bareMetalApi = {
   nics: (id: number) => request<BareMetalHostNicInfo[]>(`/bare-metal-hosts/${id}/nics`),
   power: (id: number, action: 'on' | 'off' | 'cycle', graceful = false) =>
     post<{ power_state: string }>(`/bare-metal-hosts/${id}/power`, { action, graceful }),
+  reset: (id: number, wipe = true) => post<BareMetalHost>(`/bare-metal-hosts/${id}/reset?wipe=${wipe}`),
   consoleScreenshotUrl: (id: number) => `${API_BASE}/api/v1/bare-metal-hosts/${id}/console-screenshot`,
 };

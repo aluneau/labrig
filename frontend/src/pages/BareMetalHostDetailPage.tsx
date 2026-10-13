@@ -26,6 +26,7 @@ import { usePolling } from '../hooks/usePolling';
 import { errorText } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
 import { StatusLabel } from '../components/common/StatusLabel';
+import { ConfirmModal } from '../components/common/ConfirmModal';
 
 const dash = (v: unknown) => (v === null || v === undefined || v === '' ? '—' : String(v));
 
@@ -39,6 +40,7 @@ export const BareMetalHostDetailPage: React.FC = () => {
   const [tick, setTick] = useState(Date.now());
   const [auto, setAuto] = useState(false);
   const [consoleError, setConsoleError] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => {
     if (!auto) return;
@@ -79,6 +81,9 @@ export const BareMetalHostDetailPage: React.FC = () => {
         <Button isDisabled={busy} onClick={() => navigate('/clusters', { state: { createBmhId: hostId } })}>
           Install OpenShift (SNO)
         </Button>
+      </FlexItem>
+      <FlexItem>
+        <Button variant="danger" isDisabled={busy} onClick={() => setConfirmReset(true)}>Reset</Button>
       </FlexItem>
     </Flex>
   );
@@ -182,6 +187,13 @@ export const BareMetalHostDetailPage: React.FC = () => {
           </GridItem>
         </Grid>
       </PageSection>
+
+      <ConfirmModal title={`Reset ${host.name}?`} isOpen={confirmReset} confirmLabel="Wipe and power off"
+        onConfirm={() => run(() => bareMetalApi.reset(hostId, true))} onClose={() => setConfirmReset(false)}>
+        This <strong>erases the host's disks</strong> (Dell iDRAC: cryptographic / overwrite erase, which reboots
+        into the Lifecycle Controller), ejects any virtual media and powers the machine off. The host stays
+        registered. This cannot be undone.
+      </ConfirmModal>
     </>
   );
 };
