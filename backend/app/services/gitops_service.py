@@ -177,6 +177,10 @@ class GitOpsService:
         rules = [{"apiGroups": [""], "resources": ["namespaces", "secrets", "configmaps", "serviceaccounts"],
                   "verbs": ["*"]}]
         rules += [{"apiGroups": [g], "resources": ["*"], "verbs": ["*"]} for g in groups]
+        # ACM's admission webhook requires `update` on the managedclusters/accept subresource to set
+        # HubAcceptsClient; without it Argo CD's sync of the ManagedCluster is forbidden -> OutOfSync.
+        rules.append({"apiGroups": ["register.open-cluster-management.io"],
+                      "resources": ["managedclusters/accept"], "verbs": ["update"]})
         return [
             {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
              "metadata": {"name": SPOKES_CLUSTERROLE}, "rules": rules},
@@ -249,6 +253,15 @@ class GitOpsService:
         out = runner.oc(["apply", "-f", "-"], 60, stdin=self.application_manifest(hub, url))
         if out["exitcode"] != 0:
             raise RuntimeError(f"Could not apply the Argo CD Application: {(out['stderr'] or '').strip()[-300:]}")
+        # Re-applying the (unchanged) Application CR does NOT re-run a failed / retry-exhausted Argo op: force a
+        # fresh sync operation so a re-sync always re-attempts against the latest commit.
+        import json
+        op = {"operation": {"initiatedBy": {"username": "vmm"},
+                            "sync": {"revision": "main", "syncStrategy": {"hook": {}}}}}
+        patch = runner.oc(["patch", "applications.argoproj.io", f"{hub.name}-spokes", "-n", ARGOCD_NS,
+                           "--type", "merge", "-p", json.dumps(op)], 60)
+        if patch["exitcode"] != 0:
+            raise RuntimeError(f"Could not trigger an Argo CD sync: {(patch['stderr'] or '').strip()[-300:]}")
         return self.status(db, hub)
 
     def _application_state(self, runner: Any, hub: Cluster,
