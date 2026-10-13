@@ -51,6 +51,12 @@ async def lifespan(app: FastAPI):
             wireguard_service.reconcile(db)
         except Exception:
             logging.getLogger(__name__).exception("WireGuard relay")
+        # Host DNS resolver for groupless / bare-metal OpenShift clusters (api / *.apps -> node IP)
+        try:
+            from app.services.dns_service import dns_service
+            dns_service.reconcile(db)
+        except Exception:
+            logging.getLogger(__name__).exception("Host DNS resolver")
         # Redfish emulators of the groups with BMC members (DB only)
         try:
             from app.services import bmc_service

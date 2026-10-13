@@ -862,6 +862,8 @@ class OpenShiftInstaller:
 
             svc._check(task, cluster, db, 26, "Preparing the node")
             nodes = self._allocate_bmh(db, cluster)
+            # Host DNS now answers api / *.apps.<cluster>.<domain> -> the node (no router on bare metal)
+            self._reconcile_dns(db)
             svc._check(task, cluster, db, 28, "Building the agent ISO (openshift-install agent create image)")
             iso = self._create_image_bmh(db, task, cluster, nodes, opts)
             svc._check(task, cluster, db, 40, "Booting the bare-metal host from the agent ISO (virtual media)")
@@ -899,9 +901,17 @@ class OpenShiftInstaller:
         first = next(n for n in nodes if n.role == "ctlplane")
         install = openshift_service.install_config(
             cluster.name, cluster.domain, spec["cidr"], 1, 0, openshift_service.pull_secret(), ssh_key)
+        # Prepend the host resolver so the node resolves cluster names (its own, and the hub's for a spoke);
+        # the user's DNS stays as a fallback. The resolver forwards everything else upstream.
+        node_dns = list(bm["dns"])
+        if settings.HOST_DNS_ENABLED:
+            from app.services.dns_service import dns_service
+            host_ip = dns_service.host_ip()
+            if host_ip and host_ip not in node_dns:
+                node_dns = [host_ip] + node_dns
         agent = openshift_service.agent_config_bmh(cluster.name, first.ip, [{
             "name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac,
-            "ip": bm["ip"], "prefix": bm["prefix"], "gateway": bm["gateway"], "dns": bm["dns"],
+            "ip": bm["ip"], "prefix": bm["prefix"], "gateway": bm["gateway"], "dns": node_dns,
             "root_device": bm.get("root_device"),
         } for n in nodes], ntp=bm.get("ntp") or None)
         for name, data in {"install-config.yaml": install, "agent-config.yaml": agent}.items():
@@ -1081,6 +1091,15 @@ class OpenShiftInstaller:
         shutil.rmtree(openshift_service.root / "clusters" / cluster.name, ignore_errors=True)
         with self._lock:
             self._status.pop(cluster.id, None)
+
+    @staticmethod
+    def _reconcile_dns(db: Session) -> None:
+        """Refresh the host DNS resolver (groupless / bare-metal cluster api / *.apps records)."""
+        try:
+            from app.services.dns_service import dns_service
+            dns_service.reconcile(db)
+        except Exception:
+            logger.warning("Host DNS reconcile failed", exc_info=True)
 
     @staticmethod
     def _last_log_line(path) -> str:

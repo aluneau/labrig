@@ -39,8 +39,18 @@ The install (`openshift_installer.create_bmh` → `provision_bmh`): build the ag
 inserts it as virtual media, one-time-boots from CD and powers on → the node registers with the on-ISO
 Assisted Service (polled directly from the host) → write-to-disk, reboot, bootstrap-in-place → the app
 approves CSRs and waits for the cluster operators → eject the media. `oc`/kubeconfig reach the API by the
-node's IP with `tls-server-name api.<cluster>.<domain>` (no external DNS needed); `*.apps` needs a DNS or
-`/etc/hosts` entry on whoever opens the console.
+node's IP with `tls-server-name api.<cluster>.<domain>` (no external DNS needed).
+
+## Reaching api / *.apps (host DNS resolver)
+
+A bare-metal cluster has no lab-group router, so nothing resolves its `api.<cluster>.<domain>` /
+`*.apps.<cluster>.<domain>` for the console or other clients. `setup.sh` installs a small resolver on the
+vm-manager host (`services/dns_service.py`, the `vm-manager-dns` dnsmasq unit, port 53) that answers those
+names → the cluster's node IP and forwards everything else upstream. The host address every lab network can
+reach is detected at run time (never hardcoded). Point your laptop's DNS (or one `/etc/hosts` line) at the
+vm-manager host and the console at `https://console-openshift-console.apps.<cluster>.<domain>` just works;
+new bare-metal nodes are also pointed at it (handy for ACM later). `GET /api/v1/hosts/dns` shows its status
+and the zones it serves.
 
 If you don't know the data network, boot the host with DHCP once and read the address from the BMC console
 (Dell: `DellLCService.ExportServerScreenShot`), then install with that static address.

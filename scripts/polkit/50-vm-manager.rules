@@ -16,6 +16,10 @@ polkit.addRule(function (action, subject) {
             /^(libvirtd|virt(qemu|network|storage|nodedev|secret|nwfilter|interface)d)(-ro|-admin)?\.(service|socket)$/.test(unit)) {
             return polkit.Result.YES;
         }
+        // The host DNS resolver (services/dns_service.py) is restarted by the app when records change
+        if ((verb == "start" || verb == "stop" || verb == "restart") && unit == "vm-manager-dns.service") {
+            return polkit.Result.YES;
+        }
     }
     return undefined;
 });
