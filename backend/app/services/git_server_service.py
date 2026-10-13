@@ -281,14 +281,20 @@ def _api(method: str, path: str, port: int, password: str, body: Optional[Dict[s
         return e.code, e.read().decode()[-300:]
 
 
+def _port_alive(port: int, timeout: float = 2) -> bool:
+    """True if a Gitea is already serving its HTTP API on the port. Used to detect a Gitea that
+    outlived a vm-manager restart (the in-memory Popen handle is gone but the process is still up)."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/version", timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError):
+        return False
+
+
 def _wait_up(port: int, deadline: float) -> bool:
     while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/version", timeout=5) as resp:
-                if resp.status == 200:
-                    return True
-        except (urllib.error.URLError, OSError):
-            pass
+        if _port_alive(port, timeout=5):
+            return True
         time.sleep(1)
     return False
 
@@ -315,6 +321,12 @@ class Supervisor:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return
+            if _port_alive(port):
+                # Gitea is already listening (it outlived a vm-manager restart: our Popen handle is
+                # gone but the process is up). Adopt it instead of spawning a second one that can't
+                # bind the port. running() reflects it through the same port probe.
+                logger.info(f"Adopting the Gitea git server already listening on :{port}")
+                return
             log = open(base_dir() / "gitea.out", "ab")
             env = {**os.environ, "GITEA_WORK_DIR": str(_work_dir())}
             self._proc = subprocess.Popen(
@@ -326,7 +338,13 @@ class Supervisor:
 
     def running(self) -> bool:
         with self._lock:
-            return self._proc is not None and self._proc.poll() is None
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+        # The Popen handle is gone (e.g. after a vm-manager restart) but Gitea may still be listening
+        # on its port: probe it so status reflects reality rather than the in-memory handle alone. The
+        # probe runs outside the lock (it does network I/O) and only when we have no live child.
+        port = _load_state().get("port")
+        return bool(port) and _port_alive(int(port), timeout=1)
 
     def stop(self) -> None:
         with self._lock:
