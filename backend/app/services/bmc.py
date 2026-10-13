@@ -346,6 +346,51 @@ class RedfishBMC:
             raise BMCError(f"this BMC's SystemErase can't erase disks (components: {allowed})")
         self._request("POST", target, {"Component": [comp]})
 
+    # ---------------------------------------------------------------- DNS (resolver the BMC itself uses)
+
+    def get_dns_servers(self) -> List[str]:
+        """The nameservers the BMC uses for its own lookups (for virtual media served at a DNS name).
+        Dell iDRAC via its Manager attributes (IPv4.1.DNS1/DNS2); other BMCs via the DMTF
+        EthernetInterface.StaticNameServers if present, else []."""
+        self._discover()
+        attrs = self._dell_attributes()
+        if attrs is not None:
+            return [attrs[k] for k in ("IPv4.1.DNS1", "IPv4.1.DNS2")
+                    if attrs.get(k) and attrs[k] not in ("0.0.0.0", "")]
+        # DMTF fallback: the manager's dedicated iDRAC-style NIC
+        for iface in self._manager_ethernet_ifaces():
+            d = self._request("GET", iface)
+            servers = [s for s in (d.get("StaticNameServers") or d.get("NameServers") or []) if s]
+            if servers:
+                return servers
+        return []
+
+    def set_dns_servers(self, servers: List[str]) -> None:
+        """Set the BMC's own nameservers (so it can resolve the image-service route to fetch virtual media).
+        Dell iDRAC only; other BMCs raise BMCError (the caller treats it as best effort)."""
+        servers = [s for s in servers if s][:2] or ["0.0.0.0"]
+        if self._dell_attributes() is None:
+            raise BMCError("setting the BMC's DNS is only supported on Dell iDRAC for now")
+        body = {"IPv4.1.DNSFromDHCP": "Disabled", "IPv4.1.DNS1": servers[0],
+                "IPv4.1.DNS2": servers[1] if len(servers) > 1 else "0.0.0.0"}
+        self._request("PATCH", f"{self._manager_path}/Attributes", {"Attributes": body})
+
+    def _dell_attributes(self) -> Optional[Dict[str, Any]]:
+        """The Dell iDRAC Manager attributes bag, or None on a non-Dell BMC."""
+        try:
+            data = self._request("GET", f"{self._manager_path}/Attributes")
+        except BMCError:
+            return None
+        attrs = data.get("Attributes")
+        return attrs if isinstance(attrs, dict) else None
+
+    def _manager_ethernet_ifaces(self) -> List[str]:
+        mgr = self._request("GET", self._manager_path)
+        coll = (mgr.get("EthernetInterfaces") or {}).get("@odata.id")
+        if not coll:
+            return []
+        return [m["@odata.id"] for m in self._request("GET", coll).get("Members") or []]
+
     def check(self) -> Dict[str, Any]:
         """Reachability + credential probe for the UI: returns system_info, raises BMCError otherwise."""
         return self.system_info()

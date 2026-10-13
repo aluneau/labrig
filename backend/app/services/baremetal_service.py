@@ -140,6 +140,21 @@ class BareMetalService:
     def client(self, db: Session, host: BareMetalHost) -> RedfishBMC:
         return RedfishBMC(host.bmc_address, host.bmc_username, self._read_secret(host.id))
 
+    def credentials(self, host: BareMetalHost) -> dict:
+        """The BMC username + password, for a metal3 BareMetalHost secret (never returned by the API)."""
+        return {"username": host.bmc_username, "password": self._read_secret(host.id)}
+
+    def redfish_virtualmedia_address(self, db: Session, host: BareMetalHost) -> str:
+        """metal3 BareMetalHost `bmc.address` for this host: a redfish-virtualmedia:// URL with the host's
+        ComputerSystem path (discovered from the BMC, e.g. /redfish/v1/Systems/System.Embedded.1 on Dell)."""
+        from urllib.parse import urlparse
+        netloc = urlparse(host.bmc_address).netloc or urlparse("//" + host.bmc_address).netloc
+        try:
+            system = self.client(db, host)._system()  # discovered ComputerSystem @odata.id
+        except BMCError:
+            system = "/redfish/v1/Systems/System.Embedded.1"
+        return f"redfish-virtualmedia://{netloc}{system}"
+
     def refresh(self, db: Session, bmh_id: int) -> Optional[BareMetalHost]:
         """Re-read inventory/power from the BMC; records BMCError as status=error."""
         host = self.get_host(db, bmh_id)

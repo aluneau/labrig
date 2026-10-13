@@ -223,6 +223,27 @@ first). The machine VM carries the cluster metadata, so a lost DB adopts the spo
 `oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
 `DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
 
+**Real bare-metal spokes** (`POST /clusters/{hub}/acm/spokes {name, host_id, net}`, or hub page → ACM →
+*Provision a spoke* → pick a *Bare metal:* host): the same ZTP flow on a **physical server** registered as a
+BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Differences from the emulated path:
+
+- The hub may be **bare-metal / groupless** (no lab-group router). The spoke's `api` / `*.apps.<spoke>.<domain>`
+  resolve through the **host DNS resolver** (`services/dns_service.py`, served automatically for any groupless
+  OpenShift cluster with an `api_ip`); the host reaches the spoke API by the node IP with
+  `tls-server-name api.<spoke>.<domain>` (no router-forwarded port). The spoke node's resolver is the host
+  resolver first, so it resolves the hub API (`api.<hub>.<domain>`) for its klusterlet.
+- The `BareMetalHost` uses the real `redfish-virtualmedia://<bmc>/redfish/v1/Systems/...` address, **UEFI** boot
+  mode, inspection disabled, the host's boot-NIC MAC, and a BMC secret built from the iDRAC credentials
+  (`baremetal_service`, stored 0600). A **NMStateConfig** carries the node's static network (IP/prefix/gateway/DNS),
+  matched to the boot NIC by MAC.
+- metal3/Ironic downloads the discovery ISO from the assisted-image-service and **re-serves it to the BMC by IP**
+  (`https://<hub-node-ip>:6183/...`), so the real BMC fetches it without needing DNS for the apps route. As a
+  belt-and-braces step the app also points the BMC's own resolver at the host DNS (`IPv4.1.DNS1`, Dell iDRAC;
+  the originals are restored on delete) so a name-based image URL would also resolve.
+- `DELETE /clusters/{id}` deletes the hub objects and **releases** the host (eject media, clear boot override,
+  power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored. Start / stop power the
+  physical host through its BMC. The spoke carries `provisioner = {kind: acm, hub_id, host_id, host_name}`.
+
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub
 subscribes MCE from the mirrored catalog (`installer.open-cluster-management.io/mce-subscription-spec`). Imports

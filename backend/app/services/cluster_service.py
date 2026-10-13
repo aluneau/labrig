@@ -227,7 +227,8 @@ class ClusterService:
         names = [n.name for n in cluster.nodes]
         vm_ids = {vm.name: vm.id for vm in db.query(VM).filter(VM.name.in_(names)).all()} if names else {}
         zone = f"{cluster.name}.{cluster.domain}"
-        bmh = bool((cluster.spec or {}).get("bare_metal"))
+        from app.services.acm_spokes import real_bmh_id
+        bmh = bool((cluster.spec or {}).get("bare_metal")) or real_bmh_id(cluster) is not None
         # Bare-metal nodes are physical hosts (no libvirt VM): derive their state from the cluster status
         bmh_state = {"ready": "running", "starting": "running", "stopping": "running",
                      "stopped": "shutoff"}.get(cluster.status, "missing")
@@ -1062,7 +1063,10 @@ class ClusterService:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
                 if cluster.type == "openshift":
+                    from app.services.acm_spokes import real_bmh_id, spoke_service
                     from app.services.openshift_installer import openshift_installer
+                    if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it through its BMC
+                        return spoke_service.start_real(db, task, cluster)
                     if (cluster.spec or {}).get("bare_metal"):
                         result = openshift_installer.start_bmh(db, task, cluster)
                     else:
@@ -1090,6 +1094,9 @@ class ClusterService:
     def stop_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
+                from app.services.acm_spokes import real_bmh_id, spoke_service
+                if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it off through its BMC
+                    return spoke_service.stop_real(db, task, cluster)
                 if (cluster.spec or {}).get("bare_metal"):
                     from app.services.openshift_installer import openshift_installer
                     return openshift_installer.stop_bmh(db, task, cluster)
@@ -1219,7 +1226,7 @@ class ClusterService:
 
     def delete_cluster(self, db: Session, cluster: Cluster) -> None:
         """Delete node VMs + disks, their reservations / records and the cluster's own network"""
-        from app.services.acm_spokes import provisioner, spoke_service
+        from app.services.acm_spokes import provisioner, real_bmh_id, spoke_service
         spokes = spoke_service.spokes_of(db, cluster) if cluster.type == "openshift" else []
         if spokes:
             raise ValueError(f"{cluster.name} is the ACM hub of {', '.join(s.name for s in spokes)}: delete "
@@ -1237,6 +1244,18 @@ class ClusterService:
             db.delete(cluster)
             db.commit()
             openshift_installer._reconcile_dns(db)  # drop the cluster's host DNS records
+            event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
+            return
+        if real_bmh_id(cluster) is not None:
+            # ACM spoke on a real bare-metal host (groupless): delete its objects on the hub, free the host
+            # (power/eject, not wiped), drop its install files + host DNS records. No VM / lab network.
+            from app.services.openshift_installer import openshift_installer
+            spoke_service.release(db, cluster)
+            openshift_installer.delete_files(cluster)
+            name, cluster_id = cluster.name, cluster.id
+            db.delete(cluster)
+            db.commit()
+            openshift_installer._reconcile_dns(db)
             event_bus.publish({"kind": "cluster", "id": cluster_id, "name": name, "status": "deleted"})
             return
         from app.services.acm import acm_service

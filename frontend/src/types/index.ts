@@ -586,6 +586,17 @@ export interface AcmSpoke {
   install_state?: string | null;
   progress?: number | null;
   console_url?: string | null;
+  real_bmh?: boolean; // built on a real physical server vs an emulated-BMC VM member
+}
+
+/** A static network for a real bare-metal spoke node (no lab-group router / DHCP) */
+export interface AcmSpokeNet {
+  ip: string;
+  prefix: number;
+  gateway: string;
+  dns: string[];
+  ntp?: string[];
+  root_device?: string | null;
 }
 
 export interface AcmStatus {
@@ -602,6 +613,7 @@ export interface AcmStatus {
   importable: { id: number; name: string; type: string; status: string; note?: string | null }[];
   spokes: AcmSpoke[];
   spoke_machines: { name: string; memory: number; vcpu: number }[];
+  spoke_hosts: { id: number; name: string; memory_gib?: number | null; cpu_count?: number | null }[];
   error?: string | null;
 }
 

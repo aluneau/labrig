@@ -181,7 +181,9 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     through the app's BMC emulator), then the ManagedCluster. Kubeconfig, logs, oc: the usual cluster endpoints;
     DELETE /clusters/{id} deletes it through the hub (the machine stays)."""
     from app.services.acm_spokes import spoke_service
-    cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version)
+    net = data.net.model_dump() if data.net is not None else None
+    cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version,
+                           data.host_id, net)
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 

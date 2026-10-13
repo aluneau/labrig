@@ -1,7 +1,7 @@
 """OpenShift cluster options (agent-based installer) and the /openshift API"""
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # 4.20.39, 4.21.0-rc.2, 5.0.0-ec.1
 OCP_VERSION = r"^\d+\.\d+\.\d+(-(rc|ec)\.\d+)?$"
@@ -251,11 +251,34 @@ class AcmStatus(BaseModel):
     spokes: List[Dict[str, Any]] = []
     # BMC members of the hub's group not used by a spoke: [{name, memory, vcpu, redfish_url}]
     spoke_machines: List[Dict[str, Any]] = []
+    # Registered REAL BareMetalHosts available as a spoke machine: [{id, name, memory_gib, cpu_count}]
+    spoke_hosts: List[Dict[str, Any]] = []
     error: Optional[str] = None
 
 
+class AcmSpokeNet(BaseModel):
+    """The real bare-metal spoke node's static network (there is no lab-group router / DHCP)"""
+    ip: str
+    prefix: int = Field(..., ge=1, le=32)
+    gateway: str
+    dns: List[str] = []
+    ntp: List[str] = []
+    root_device: Optional[str] = None  # e.g. /dev/sda; empty = the installer picks the first eligible disk
+
+
 class AcmSpokeRequest(BaseModel):
-    """The hub provisions a single-node OpenShift on a BMC member of its lab group"""
+    """The hub provisions a single-node OpenShift on a spoke machine: either an emulated-BMC `machine`
+    (member of the hub's lab group) or a REAL BareMetalHost (`host_id` + its static `net`)."""
     name: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
-    machine: str = Field(..., pattern=PACKAGE)   # member name (bmc: true) of the hub's group
+    machine: Optional[str] = Field(None, pattern=PACKAGE)   # emulated-BMC member of the hub's group
+    host_id: Optional[int] = None                           # a registered real BareMetalHost (status available)
+    net: Optional[AcmSpokeNet] = None                       # required with host_id
     version: Optional[str] = Field(None, pattern=OCP_VERSION)  # default: the hub's
+
+    @model_validator(mode="after")
+    def _one_machine(self) -> "AcmSpokeRequest":
+        if (self.machine is None) == (self.host_id is None):
+            raise ValueError("Give exactly one of 'machine' (emulated-BMC member) or 'host_id' (real BareMetalHost)")
+        if self.host_id is not None and self.net is None:
+            raise ValueError("A real bare-metal spoke (host_id) needs the node's static 'net' (ip, prefix, gateway, dns)")
+        return self

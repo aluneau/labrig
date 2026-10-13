@@ -48,8 +48,12 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [busy, setBusy] = useState(false);
   const [detach, setDetach] = useState<AcmManagedCluster | null>(null);
   const [confirmEnable, setConfirmEnable] = useState(false);
-  const [spokeMachine, setSpokeMachine] = useState('');
+  const [spokeMachine, setSpokeMachine] = useState(''); // 'member:<name>' | 'host:<id>'
   const [spokeName, setSpokeName] = useState('');
+  const [spokeIp, setSpokeIp] = useState('');
+  const [spokePrefix, setSpokePrefix] = useState('24');
+  const [spokeGateway, setSpokeGateway] = useState('');
+  const [spokeDns, setSpokeDns] = useState('');
   const [deleteSpoke, setDeleteSpoke] = useState<AcmSpoke | null>(null);
 
   const load = useCallback(async () => {
@@ -226,33 +230,77 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
             <CardHeader><CardTitle>Provision a spoke (bare metal, BMC)</CardTitle></CardHeader>
             <CardBody>
               <div style={{ ...muted, marginBottom: 12 }}>
-                The hub installs a single-node OpenShift on a <em>spoke machine</em> of its lab group (group page → BMC
-                tab → Add spoke machines): metal3 boots the machine from the discovery ISO through its emulated BMC
-                (Redfish virtual media), the assisted service installs it, ACM imports it. Same objects as a customer&apos;s
-                ZTP: ClusterDeployment, AgentClusterInstall, InfraEnv, BareMetalHost.
+                The hub installs a single-node OpenShift on a <em>spoke machine</em>: an emulated-BMC member of its lab
+                group (group page → BMC tab), or a registered <strong>real bare-metal host</strong> (Bare-metal hosts
+                page). metal3 boots it from the discovery ISO through its BMC (Redfish virtual media), the assisted
+                service installs it, ACM imports it. Same objects as a customer&apos;s ZTP: ClusterDeployment,
+                AgentClusterInstall, InfraEnv, NMStateConfig, BareMetalHost. A real host needs the node&apos;s static
+                network (no lab-group router).
               </div>
-              <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: 12 }}>
-                <FlexItem>
-                  <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 220 }}
-                    onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
-                    <FormSelectOption value="" label={acm.spoke_machines.length ? 'Spoke machine…' : 'No free spoke machine in the group'} isPlaceholder />
-                    {acm.spoke_machines.map((m) => (
-                      <FormSelectOption key={m.name} value={m.name} label={`${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
-                    ))}
-                  </FormSelect>
-                </FlexItem>
-                <FlexItem>
-                  <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
-                    value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
-                </FlexItem>
-                <FlexItem>
-                  <Button id="acm-spoke-create" isDisabled={!spokeMachine || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName)
-                    || !hubUp || !ready || busy}
-                    onClick={() => run(async () => { await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine); setSpokeName(''); setSpokeMachine(''); })}>
-                    Provision
-                  </Button>
-                </FlexItem>
-              </Flex>
+              {(() => {
+                const isHost = spokeMachine.startsWith('host:');
+                const validIp = (v: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(v.trim());
+                const netOk = !isHost || (validIp(spokeIp) && validIp(spokeGateway) && Number(spokePrefix) >= 1
+                  && Number(spokePrefix) <= 32 && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).every(validIp)
+                  && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).length > 0);
+                const nameOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName);
+                const nothing = !acm.spoke_machines.length && !acm.spoke_hosts.length;
+                const provision = () => run(async () => {
+                  if (isHost) {
+                    await clusterApi.acmSpokeHost(cluster.id, spokeName, Number(spokeMachine.slice(5)), {
+                      ip: spokeIp.trim(), prefix: Number(spokePrefix), gateway: spokeGateway.trim(),
+                      dns: spokeDns.split(',').map((d) => d.trim()).filter(Boolean),
+                    });
+                  } else {
+                    await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine.slice(7));
+                  }
+                  setSpokeName(''); setSpokeMachine(''); setSpokeIp(''); setSpokeGateway(''); setSpokeDns('');
+                });
+                return (
+                  <Stack hasGutter>
+                    <StackItem>
+                      <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                        <FlexItem>
+                          <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 260 }}
+                            onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
+                            <FormSelectOption value="" label={nothing ? 'No free spoke machine or host' : 'Spoke machine…'} isPlaceholder />
+                            {acm.spoke_machines.map((m) => (
+                              <FormSelectOption key={`member:${m.name}`} value={`member:${m.name}`}
+                                label={`VM ${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
+                            ))}
+                            {acm.spoke_hosts.map((h) => (
+                              <FormSelectOption key={`host:${h.id}`} value={`host:${h.id}`}
+                                label={`Bare metal: ${h.name}${h.memory_gib ? ` (${Math.round(h.memory_gib)} GiB, ${h.cpu_count} cores)` : ''}`} />
+                            ))}
+                          </FormSelect>
+                        </FlexItem>
+                        <FlexItem>
+                          <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
+                            value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
+                        </FlexItem>
+                        <FlexItem>
+                          <Button id="acm-spoke-create" isDisabled={!spokeMachine || !nameOk || !netOk || !hubUp || !ready || busy}
+                            onClick={provision}>Provision</Button>
+                        </FlexItem>
+                      </Flex>
+                    </StackItem>
+                    {isHost && (
+                      <StackItem>
+                        <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                          <FlexItem><TextInput id="acm-spoke-ip" aria-label="Node IP" placeholder="node IP, e.g. 10.6.117.11"
+                            value={spokeIp} onChange={(_e, v) => setSpokeIp(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
+                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
+                            value={spokeGateway} onChange={(_e, v) => setSpokeGateway(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
+                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 220 }} /></FlexItem>
+                        </Flex>
+                      </StackItem>
+                    )}
+                  </Stack>
+                );
+              })()}
               {!!acm.spokes.length && (
                 <Table aria-label="Spokes" variant="compact" id="acm-spokes-table">
                   <Thead><Tr><Th>Spoke</Th><Th>Machine</Th><Th>State</Th><Th>BareMetalHost</Th><Th>Install</Th><Th screenReaderText="Actions" /></Tr></Thead>

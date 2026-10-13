@@ -529,30 +529,39 @@ class OpenShiftService:
             config["additionalNTPSources"] = [ntp]
         return config
 
-    @staticmethod
-    def agent_config_bmh(name: str, rendezvous_ip: str, hosts: List[Dict[str, Any]],
+    BMH_IFACE = "bmhnet0"
+
+    @classmethod
+    def nmstate_static(cls, mac: str, ip: str, prefix: int, gateway: str,
+                       dns: List[str]) -> Dict[str, Any]:
+        """A static-IP nmstate config for one NIC matched by MAC (identifier: mac-address, so the kernel's
+        name for it doesn't matter). Shared by the bare-metal agent-config and the ACM spoke's
+        NMStateConfig CR."""
+        iface = cls.BMH_IFACE
+        return {
+            "interfaces": [{
+                "name": iface, "type": "ethernet", "state": "up",
+                "identifier": "mac-address", "mac-address": mac,
+                "ipv4": {"enabled": True, "dhcp": False,
+                         "address": [{"ip": ip, "prefix-length": int(prefix)}]},
+                "ipv6": {"enabled": False},
+            }],
+            "dns-resolver": {"config": {"server": list(dns)}},
+            "routes": {"config": [{"destination": "0.0.0.0/0", "next-hop-address": gateway,
+                                   "next-hop-interface": iface}]},
+        }
+
+    @classmethod
+    def agent_config_bmh(cls, name: str, rendezvous_ip: str, hosts: List[Dict[str, Any]],
                          ntp: Optional[List[str]] = None) -> Dict[str, Any]:
         """Bare-metal agent-config: static networking (nmstate) per host, no router DHCP. The NIC is
         matched by MAC (identifier: mac-address), so the kernel's name for it doesn't matter.
         hosts: [{name, role, mac, ip, prefix, gateway, dns: [...], root_device?}]"""
         def entry(h: Dict[str, Any]) -> Dict[str, Any]:
-            iface = "bmhnet0"
-            nmstate = {
-                "interfaces": [{
-                    "name": iface, "type": "ethernet", "state": "up",
-                    "identifier": "mac-address", "mac-address": h["mac"],
-                    "ipv4": {"enabled": True, "dhcp": False,
-                             "address": [{"ip": h["ip"], "prefix-length": int(h["prefix"])}]},
-                    "ipv6": {"enabled": False},
-                }],
-                "dns-resolver": {"config": {"server": list(h["dns"])}},
-                "routes": {"config": [{"destination": "0.0.0.0/0", "next-hop-address": h["gateway"],
-                                       "next-hop-interface": iface}]},
-            }
             host: Dict[str, Any] = {
                 "hostname": h["name"], "role": h["role"],
-                "interfaces": [{"name": iface, "macAddress": h["mac"]}],
-                "networkConfig": nmstate,
+                "interfaces": [{"name": cls.BMH_IFACE, "macAddress": h["mac"]}],
+                "networkConfig": cls.nmstate_static(h["mac"], h["ip"], h["prefix"], h["gateway"], h["dns"]),
             }
             if h.get("root_device"):
                 host["rootDeviceHints"] = {"deviceName": h["root_device"]}

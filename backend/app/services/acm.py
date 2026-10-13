@@ -379,6 +379,13 @@ class AcmService:
         if gspec is not None:
             result["spoke_machines"] = [{"name": m.name, "memory": m.memory, "vcpu": m.vcpu}
                                         for m in gspec.members if m.bmc and m.name not in used]
+        # Registered real BareMetalHosts available to provision a spoke on (any hub, group or bare-metal)
+        from app.services.baremetal_service import baremetal_service
+        result["spoke_hosts"] = [{"id": h.id, "name": h.name,
+                                  "memory_gib": (h.inventory or {}).get("memory_gib"),
+                                  "cpu_count": (h.inventory or {}).get("cpu_count")}
+                                 for h in baremetal_service.list_hosts(db)
+                                 if h.status == "available" and not h.cluster_name]
         return result
 
     # ---------------------------------------------------------------------------------------- networking
