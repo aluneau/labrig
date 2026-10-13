@@ -466,6 +466,8 @@ class SpokeService:
         ), self._run_real, cluster.id, hub.id, host.id)
         cluster.task_id = task.id
         db.commit()
+        from app.services.gitops_service import gitops_service
+        gitops_service.sync_spoke(db, cluster)  # record the spoke in the GitOps repo (source of truth)
         return cluster
 
     def _run_real(self, db: Session, task: Task, cluster_id: int, hub_id: int, host_id: int) -> Dict[str, Any]:
@@ -610,6 +612,22 @@ class SpokeService:
              "spec": {"applicationManager": {"enabled": True}, "policyController": {"enabled": True},
                       "searchCollector": {"enabled": True}, "certPolicyController": {"enabled": True}}},
         ], "spoke resources", timeout=5 * 60)
+        self._monitor_real(db, task, hub, cluster, host)
+
+    def _monitor_real(self, db: Session, task: Task, hub: Cluster, cluster: Cluster, host: Any) -> None:
+        """Follow a real-BMH spoke's install on the hub to completion (discovery -> install -> kubeconfig ->
+        ManagedCluster Available). Idempotent, so recover_interrupted can re-attach after an app restart: the
+        hub keeps installing regardless, and the agents / CRs are already there."""
+        from app.services.acm import conditions_state
+        from app.services.openshift_addons import AddonRunner
+        svc = self.svc
+        name = cluster.name
+        runner = AddonRunner(hub.name, hub.version, lambda s: svc._sleep(task, s),
+                             lambda m: svc._check(task, cluster, db, None, m))
+
+        def step(pct: int, message: str, phase: str = "preparing", progress: Optional[int] = None) -> None:
+            svc._check(task, cluster, db, pct, message)
+            self.installer._set_live(cluster.id, phase=phase, progress=progress, assisted_info=message)
 
         # discovery: metal3 drives the real BMC's virtual media, the agent registers
         deadline = time.monotonic() + DISCOVERY_TIMEOUT
@@ -662,6 +680,34 @@ class SpokeService:
         host.status = "provisioned"
         db.commit()
         self.installer._set_live(cluster.id, phase="ready")
+
+    def resume_real(self, db: Session, cluster: Cluster) -> Optional[Task]:
+        """Re-attach to a real-BMH spoke the hub is still installing (after an app restart). The CRs are on the
+        hub; a new task follows the install to completion via _monitor_real."""
+        from app.schemas import TaskCreate
+        from app.services.task_service import task_service
+        hub = self.hub_of(db, cluster)
+        if hub is None or self.svc.to_dict(db, hub)["status"] != "ready":
+            return None
+
+        def run(db: Session, task: Task, cluster_id: int, hub_id: int) -> Dict[str, Any]:
+            def body(cluster: Cluster) -> Dict[str, Any]:
+                from app.services.baremetal_service import baremetal_service
+                hub = self.svc.get_cluster(db, hub_id)
+                host = baremetal_service.get_host(db, real_bmh_id(cluster))
+                if hub is None or host is None:
+                    raise ValueError("The hub or the bare-metal host was deleted")
+                self._monitor_real(db, task, hub, cluster, host)
+                self.svc._set_status(db, cluster, "ready", None)
+                return {"spoke": cluster.name}
+            return self.svc._guarded(db, task, cluster_id, body)
+        task = task_service.start(db, TaskCreate(
+            name=f"Resume spoke {cluster.name}", type="cluster_resume", target_type="cluster",
+            target_id=cluster.id, target_name=cluster.name, description="Follow the ACM spoke install"),
+            run, cluster.id, hub.id)
+        cluster.task_id = task.id
+        db.commit()
+        return task
 
     def _ensure_bmc_dns(self, db: Session, cluster: Cluster, host: Any) -> None:
         """Make the real BMC resolve the hub's apps domain (for the virtual-media ISO fetch): set its DNS to
@@ -904,6 +950,8 @@ class SpokeService:
             host.status = "available"
             host.status_message = None
             db.commit()
+            from app.services.gitops_service import gitops_service
+            gitops_service.remove_spoke(cluster.name)
             return
         for node in cluster.nodes:
             try:

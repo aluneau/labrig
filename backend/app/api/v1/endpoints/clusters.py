@@ -187,6 +187,15 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 
+@router.get("/{cluster_id}/acm/gitops")
+def acm_gitops(cluster_id: int, db: Session = Depends(get_db)):
+    """The GitOps repo of this hub's spoke manifests (the source of truth for deploying clusters from git):
+    repo path, recent commits, the spokes it tracks, whether Argo CD is installed, and the Argo CD Application
+    to sync them. The app also applies the CRs directly; git is the fleet-definition / Argo CD path."""
+    from app.services.gitops_service import gitops_service
+    return _bad_request(gitops_service.status, db, _get(db, cluster_id))
+
+
 @router.get("/{cluster_id}/acm/siteconfig")
 def acm_siteconfig(cluster_id: int, db: Session = Depends(get_db)):
     """The GitOps artifact for a real bare-metal spoke: an ACM SiteConfig `ClusterInstance` manifest (+ the BMC

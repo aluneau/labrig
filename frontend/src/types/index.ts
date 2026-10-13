@@ -599,6 +599,19 @@ export interface AcmSpokeNet {
   root_device?: string | null;
 }
 
+/** The GitOps repo of spoke manifests (the source of truth for deploying clusters from git) */
+export interface AcmGitops {
+  enabled: boolean;
+  initialized: boolean;
+  repo_path: string;
+  clone_url: string;
+  spokes: string[];
+  commits: { commit: string; date: string; message: string }[];
+  argocd_installed: boolean;
+  apply_command: string;
+  application: string;
+}
+
 export interface AcmStatus {
   enabled: boolean;
   state?: string | null; // add-on state

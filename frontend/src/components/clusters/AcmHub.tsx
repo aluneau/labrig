@@ -26,7 +26,7 @@ import {
 } from '@patternfly/react-core';
 import { ExternalLinkAltIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
+import { AcmGitops, AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
 import { clusterApi } from '../../services/api';
 import { useLiveEvents } from '../../hooks/useEvents';
 import { errorText } from '../../utils/format';
@@ -68,10 +68,16 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
     }
   };
 
+  const [gitops, setGitops] = useState<AcmGitops | null>(null);
+
   const load = useCallback(async () => {
     try {
-      setAcm(await clusterApi.acm(cluster.id));
+      const status = await clusterApi.acm(cluster.id);
+      setAcm(status);
       setError(null);
+      if (status.enabled) {
+        clusterApi.acmGitops(cluster.id).then(setGitops).catch(() => setGitops(null));
+      }
     } catch (err) {
       setError(errorText(err));
     }
@@ -344,6 +350,56 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                   </Tbody>
                 </Table>
               )}
+            </CardBody>
+          </Card>
+        </StackItem>
+      )}
+
+      {acm.enabled && gitops && gitops.enabled && (
+        <StackItem>
+          <Card id="acm-gitops">
+            <CardHeader><CardTitle>Deploy from git (GitOps)</CardTitle></CardHeader>
+            <CardBody>
+              <div style={{ ...muted, marginBottom: 12 }}>
+                Every bare-metal spoke is also written to a git repo of SiteConfig <code>ClusterInstance</code>
+                manifests on the vm-manager host — the source of truth a fleet commits and deploys from. Push it to
+                a git remote your GitOps controller can reach and point <strong>Argo CD</strong> (OpenShift GitOps)
+                at <code>clusters/</code>, or run <code>oc apply -k clusters/&lt;name&gt;</code> from a clone.
+              </div>
+              <DescriptionList isHorizontal isCompact>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Repo</DescriptionListTerm>
+                  <DescriptionListDescription><code>{gitops.repo_path}</code></DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Tracked spokes</DescriptionListTerm>
+                  <DescriptionListDescription>{gitops.spokes.length ? gitops.spokes.join(', ') : '—'}</DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Argo CD</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    <Label isCompact color={gitops.argocd_installed ? 'green' : 'grey'}>
+                      {gitops.argocd_installed ? 'installed' : 'not installed (install OpenShift GitOps to sync)'}
+                    </Label>
+                    {' '}
+                    <Button variant="link" isInline onClick={() => setSiteConfig({ name: 'Argo CD Application', manifest: gitops.application })}>
+                      View Argo CD Application
+                    </Button>
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+                <DescriptionListGroup>
+                  <DescriptionListTerm>Recent commits</DescriptionListTerm>
+                  <DescriptionListDescription>
+                    {gitops.commits.length ? (
+                      <ul style={{ margin: 0, paddingLeft: 18 }}>
+                        {gitops.commits.slice(0, 5).map((c) => (
+                          <li key={c.commit}><code>{c.commit}</code> {c.message}</li>
+                        ))}
+                      </ul>
+                    ) : '—'}
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              </DescriptionList>
             </CardBody>
           </Card>
         </StackItem>

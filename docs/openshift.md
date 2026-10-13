@@ -257,6 +257,14 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
   ACM SiteConfig `ClusterInstance` (+ a BMC Secret stub, password not embedded) with the `ai-cluster/node-templates`
   templateRefs — the manifest a fleet commits to git for Argo CD / the SiteConfig operator. The app applies the
   expanded CRs directly here; this is the same spoke expressed the way customers define theirs.
+- **Deploy from git** (`services/gitops_service.py`, hub ACM tab → *Deploy from git (GitOps)*,
+  `GET /clusters/{id}/acm/gitops`): every bare-metal spoke is also committed to a git repo of `ClusterInstance`
+  manifests under `DATA_DIR/gitops` (`clusters/<name>/`, one commit per provision / delete) — the GitOps source of
+  truth. Push it to a git remote your GitOps controller can reach and point **Argo CD** (the OpenShift GitOps
+  operator) at `clusters/` with the generated `Application`, or run `oc apply -k clusters/<name>` from a clone. The
+  app still applies the CRs directly (so a spoke deploys without any extra operator); the git repo is the
+  fleet-definition / Argo CD path. Installing the OpenShift GitOps operator on the hub is the one prerequisite to
+  close the git→deploy loop (the app detects it and does not install it for you).
 
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub

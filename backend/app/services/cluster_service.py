@@ -1037,12 +1037,21 @@ class ClusterService:
         previous process. An OpenShift install whose nodes already booted carries on in the nodes: follow it
         again in a new task. Anything else can't be resumed: report it instead of 'provisioning' forever.
         (starting / stopping are derived from the node states once no task runs.)"""
+        from app.services.acm_spokes import real_bmh_id, spoke_service
         from app.services.openshift_installer import openshift_installer
         for cluster in db.query(Cluster).filter(Cluster.status == "provisioning").all():
             if task_service.is_running(cluster.task_id):
                 continue
             task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
             note = f" ({cluster.status_message})" if cluster.status_message else ""
+            # ACM spoke on a real host: the hub keeps installing it; re-attach to follow it to Available.
+            if real_bmh_id(cluster) is not None:
+                if spoke_service.resume_real(db, cluster) is not None:
+                    logger.info(f"Resuming the interrupted spoke install of {cluster.name}")
+                else:
+                    self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "
+                                     "the hub is not ready; delete the spoke and create it again")
+                continue
             # An interrupted install is the create task or a prior resume of it: resume again so the final
             # steps (eject, add-ons, status) run — not just the create, or a bare-metal host stays
             # "provisioning" with its ISO mounted after the cluster is already up.
