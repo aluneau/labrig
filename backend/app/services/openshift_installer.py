@@ -1368,7 +1368,7 @@ class OpenShiftInstaller:
         nodes_by_role = {r: [n.name for n in cluster.nodes if n.role == r] for r in ("ctlplane", "worker")}
         if kind == "storage":
             if name == "lvms":
-                runner.lvms()
+                runner.lvms(bare_metal=self._is_bmh(cluster))
             else:
                 roles = storage_roles(opts, len(nodes_by_role["worker"]))
                 runner.odf([n for r in roles for n in nodes_by_role[r]], opts.odf_profile)
@@ -1434,9 +1434,12 @@ class OpenShiftInstaller:
             if kind == "odf" and len(cluster.nodes) < 3:
                 raise ValueError("ODF needs 3 nodes")
             os_spec["storage"] = kind
-            missing = [n.name for n in cluster.nodes
-                       if n.role in storage_roles(OpenShiftOptions.model_validate(os_spec), workers)
-                       and not self._has_storage_disk(n.name)]
+            # Bare-metal nodes use their own spare disks (LVMS auto-discovers them); only VM nodes need the
+            # app-attached vmm-storage virtio disk.
+            missing = [] if self._is_bmh(cluster) else [
+                n.name for n in cluster.nodes
+                if n.role in storage_roles(OpenShiftOptions.model_validate(os_spec), workers)
+                and not self._has_storage_disk(n.name)]
             if missing:
                 raise ValueError(f"{', '.join(missing)} have no storage disk: add a {os_spec.get('storage_disk_size', 100)} "
                                  f"GiB disk with serial '{STORAGE_SERIAL}' first, or create the cluster with storage")
@@ -1582,8 +1585,14 @@ class OpenShiftInstaller:
         live = self.live(cluster.id)
         status = self.svc.to_dict(db, cluster)["status"]
         addons = (cluster.spec or {}).get("addons") or []
+        # A day-2 add-on (operator / storage / ...) on an already-installed cluster: not the initial install,
+        # so the UI shows the add-on's own progress, not the cluster's install timeline.
+        task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
+        day2 = bool(task_service.is_running(cluster.task_id) and task is not None
+                    and task.type not in ("cluster_create", "cluster_resume"))
         if status == "provisioning" or task_service.is_running(cluster.task_id):
-            return {"phase": live.get("phase") or "preparing", "assisted_status": live.get("assisted_status"),
+            return {"phase": "addons" if day2 else (live.get("phase") or "preparing"), "day2": day2,
+                    "assisted_status": live.get("assisted_status"),
                     "assisted_info": live.get("assisted_info"), "progress": live.get("progress"),
                     "hosts": live.get("hosts") or [], "version": live.get("version") or cluster.version,
                     "cluster_operators": live.get("cluster_operators") or [], "addons": addons}

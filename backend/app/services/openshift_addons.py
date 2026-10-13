@@ -113,15 +113,19 @@ class AddonRunner(MetalLBClient):
         last = "no CSV yet"
         while True:
             try:
-                sub = self.oc_json(["get", "subscription", name, "-n", namespace], 30)
+                # Fully qualify the resources: ACM/MCE add subscriptions.apps.open-cluster-management.io and
+                # other CRDs that shadow the "subscription"/"csv" short names once a hub is installed here.
+                sub = self.oc_json(["get", "subscriptions.operators.coreos.com", name, "-n", namespace], 30)
                 csv = (sub.get("status") or {}).get("installedCSV") or (sub.get("status") or {}).get("currentCSV")
                 if csv:
-                    phase = self.oc(["get", "csv", csv, "-n", namespace, "-o", "jsonpath={.status.phase}"], 30)["stdout"].strip()
+                    phase = self.oc(["get", "clusterserviceversions.operators.coreos.com", csv, "-n", namespace,
+                                     "-o", "jsonpath={.status.phase}"], 30)["stdout"].strip()
                     last = f"{csv}: {phase or 'pending'}"
                     if phase == "Succeeded":
                         return
                     if phase == "Failed":
-                        msg = self.oc(["get", "csv", csv, "-n", namespace, "-o", "jsonpath={.status.message}"], 30)["stdout"]
+                        msg = self.oc(["get", "clusterserviceversions.operators.coreos.com", csv, "-n", namespace,
+                                       "-o", "jsonpath={.status.message}"], 30)["stdout"]
                         raise RuntimeError(f"Operator {name} failed to install: {msg.strip()[-300:]}")
                 else:
                     conds = [c for c in (sub.get("status") or {}).get("conditions") or [] if c.get("status") == "True"]
@@ -162,17 +166,24 @@ class AddonRunner(MetalLBClient):
 
     # -------------------------------------------------------------- storage
 
-    def lvms(self) -> None:
+    def lvms(self, bare_metal: bool = False) -> None:
         ns = self.install_operator("lvms-operator", privileged=True)
-        self.log("Creating the LVMCluster (extra disk of every node)")
+        device_class: Dict[str, Any] = {
+            "name": "vg1", "default": True, "fstype": "xfs",
+            "thinPoolConfig": {"name": "thin-pool-1", "sizePercent": 90, "overprovisionRatio": 10},
+        }
+        if bare_metal:
+            # Physical node: no virtio disk to target — LVMS picks up every available (empty, unused) disk
+            # on the node (the boot disk has partitions, so it's left alone).
+            self.log("Creating the LVMCluster (the node's spare disks)")
+        else:
+            # VM node: the extra virtio disk vm_service attached, by its stable by-id path.
+            self.log("Creating the LVMCluster (extra disk of every node)")
+            device_class["deviceSelector"] = {"paths": [STORAGE_DEVICE], "forceWipeDevicesAndDestroyAllData": True}
         self.apply_retry([{
             "apiVersion": "lvm.topolvm.io/v1alpha1", "kind": "LVMCluster",
             "metadata": {"name": "lvmcluster", "namespace": ns},
-            "spec": {"storage": {"deviceClasses": [{
-                "name": "vg1", "default": True, "fstype": "xfs",
-                "deviceSelector": {"paths": [STORAGE_DEVICE], "forceWipeDevicesAndDestroyAllData": True},
-                "thinPoolConfig": {"name": "thin-pool-1", "sizePercent": 90, "overprovisionRatio": 10},
-            }]}},
+            "spec": {"storage": {"deviceClasses": [device_class]}},
         }], "LVMCluster")
         self.wait_storageclass("lvms-vg1")
         self.set_default_storageclass("lvms-vg1")

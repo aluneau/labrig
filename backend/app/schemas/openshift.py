@@ -200,6 +200,7 @@ class ClusterOperatorStatus(BaseModel):
 class InstallStatus(BaseModel):
     """Live install / health view of an OpenShift cluster"""
     phase: str                           # preparing | booting | installing | finalizing | addons | ready | error | stopped
+    day2: bool = False                   # a day-2 add-on install on a ready cluster (show add-on progress, not the stepper)
     assisted_status: Optional[str] = None
     assisted_info: Optional[str] = None
     progress: Optional[int] = None       # Assisted Service total %
