@@ -223,14 +223,16 @@ first). The machine VM carries the cluster metadata, so a lost DB adopts the spo
 `oc get bmh -n <spoke> -o yaml` (`status.errorMessage`: BMC unreachable / bad credentials), the emulator log
 `DATA_DIR/groups/<group>/bmc-emulator.log`, the machine's console (discovery ISO banner).
 
-**Real bare-metal spokes** (`POST /clusters/{hub}/acm/spokes {name, host_id, net}`, or hub page → ACM →
-*Provision a spoke* → pick a *Bare metal:* host): the same ZTP flow on a **physical server** registered as a
-BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Differences from the emulated path:
+**Real bare-metal spokes** (`POST /clusters/{hub}/acm/spokes {name, host_id, net}` for one host, or
+`{name, hosts, net, topology}` for several — or hub page → ACM → *Provision a spoke* → pick a topology + *Bare
+metal:* host(s)): the same ZTP flow on **physical server(s)** registered as BareMetalHosts (Bare-metal hosts page),
+instead of an emulated-BMC VM. Differences from the emulated path:
 
-- The hub may be **bare-metal / groupless** (no lab-group router). The spoke's `api` / `*.apps.<spoke>.<domain>`
-  resolve through the **host DNS resolver** (`services/dns_service.py`, served automatically for any groupless
-  OpenShift cluster with an `api_ip`); the host reaches the spoke API by the node IP with
-  `tls-server-name api.<spoke>.<domain>` (no router-forwarded port).
+- The hub may be **bare-metal / groupless** *or* a **VM-based OpenShift cluster in a lab group** (see "VM-based hub"
+  below). The spoke's `api` / `*.apps.<spoke>.<domain>` resolve through the **host DNS resolver**
+  (`services/dns_service.py`, served automatically for any groupless OpenShift cluster with an `api_ip`); the host
+  reaches the spoke API by its node IP (SNO) or its API VIP (multi-node) with `tls-server-name api.<spoke>.<domain>`
+  (no router-forwarded port).
 - The `BareMetalHost` mirrors a customer's SiteConfig `ClusterInstance` node: a Dell-optimised
   `idrac-virtualmedia://<bmc>/redfish/v1/Systems/...` address (generic `redfish-virtualmedia://` on non-Dell BMCs),
   **UEFI** boot, `automatedCleaningMode: metadata`, `rootDeviceHints: {minSizeGigabytes: 400}` (robust vs guessing a
@@ -243,12 +245,13 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
   (`https://<hub-node-ip>:6183/...`), so the real BMC fetches it without needing DNS for the apps route. As a
   belt-and-braces step the app also points the BMC's own resolver at the host DNS (`IPv4.1.DNS1`, Dell iDRAC;
   restored on delete).
-- **Bidirectional DNS** (both are groupless SNOs whose on-node dnsmasq only knows its own zone and otherwise
-  returns NXDOMAIN, shadowing the resolver in `resolv.conf`): the spoke gets a **day-0 MachineConfig** (via
+- **Bidirectional DNS** (the spoke's on-node dnsmasq only knows its own zone and otherwise returns NXDOMAIN,
+  shadowing the resolver in `resolv.conf`): the spoke gets a **day-0 MachineConfig** (via
   `AgentClusterInstall.manifestsConfigMapRefs`) forwarding the hub's zone to the host resolver (so its klusterlet /
   assisted-installer-controller reach the hub by name), and the hub gets a **CoreDNS forward**
   (`dns.operator/default`) for the spoke's zone to the host resolver (so ACM's push-import reaches the spoke API).
-  The single host resolver already serves every groupless cluster's zone.
+  The single host resolver serves every groupless cluster's zone and — for a VM hub — the hub's own zone pointed at
+  its router uplink (so these forwards work the same whether the hub is bare-metal or a VM in a group).
 - `DELETE /clusters/{id}` deletes the hub objects and the hub's CoreDNS forward, and **releases** the host (eject
   media, clear boot override, power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored.
   Start / stop power the physical host through its BMC. The spoke carries
@@ -257,6 +260,53 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
   ACM SiteConfig `ClusterInstance` (+ a BMC Secret stub, password not embedded) with the `ai-cluster/node-templates`
   templateRefs — the manifest a fleet commits to git for the SiteConfig operator. It is committed for reference next
   to the apply-ready manifests (below); this is the same spoke expressed the way customers define theirs.
+
+### VM-based hub (ACM hub as a VM OpenShift cluster)
+
+The hub need not be a bare-metal cluster: it can be the ordinary **VM-based OpenShift cluster in a lab group** (it
+has a router + can get a StorageClass via LVM Storage, so the assisted service's volumes are satisfied). Enabling ACM
+and provisioning a real bare-metal spoke works the same, with one reachability design to get right — the hub's
+metal3/Ironic + assisted-image-service live inside the isolated group network, while the real Dell BMC and the spoke
+node sit on a routable lab network:
+
+- **Hub → real BMC** (metal3 drives virtual media): outbound from the group through the **router's NAT/masquerade**
+  to the routable BMC network. Works with the group's default (open) egress; a blocked-egress group must allow the
+  BMC subnet.
+- **Real BMC → the hub's assisted-image-service** (fetch the discovery ISO): the BMC must resolve
+  `*.apps.<hub>.<domain>` and reach the hub ingress. For a VM hub those names otherwise resolve only *inside* the
+  group, so the **host DNS resolver publishes the VM hub's zone → its router uplink IP** (`dns_service._vm_hub_zones`,
+  active once the hub backs ≥1 real spoke); the group router's **haproxy already fronts the hub API `6443` and
+  ingress `80/443` on its uplink**. The app points each BMC's own resolver at the host DNS, so the BMC resolves the
+  image-service route and reaches it over the uplink. `ensure_cim` also forwards Ironic's image ports
+  (`6180/6183`) from the router uplink, as for the emulated-BMC hub.
+- **Spoke node → hub** and **hub → spoke API**: the same bidirectional-DNS plumbing as above, now enabled for a VM
+  hub too (the host resolver answers the hub's api/apps via the uplink, and the spoke's api via its node IP/VIP).
+- **Lab routing prerequisite** (not something the app can configure): the real server's data network must be able to
+  reach the hub router's **uplink IP**, and vice-versa — both are on routable lab networks the vm-manager host
+  already reaches. If they are on different L2 segments, the lab's router must route between them.
+
+### Multi-node bare-metal spokes (topologies)
+
+A real bare-metal spoke can span **several BareMetalHosts** installed as one cluster (`hosts` + `net.api_vip` +
+`net.ingress_vip`). Each host gets its own BMC Secret + `BareMetalHost` + `NMStateConfig` (its static IP); one
+`AgentClusterInstall` carries the role counts in `provisionRequirements` and the two VIPs for the on-cluster
+keepalived load balancer (SNO keeps user-managed networking — the single node *is* the API, no VIPs). Supported
+topologies (`validate_roles` / `topology_name` in `acm_spokes.py`):
+
+| Topology | Hosts | `provisionRequirements` | Notes |
+| --- | --- | --- | --- |
+| `sno` | 1 master | `controlPlaneAgents: 1` | single node, user-managed networking |
+| `tna` | 2 master + 1 arbiter | `controlPlaneAgents: 2, arbiterAgents: 1` | **the GA two-node control plane** in OCP 4.20 (Two-Node + Arbiter); the arbiter is a small etcd-quorum node (2 vCPU / 8 GiB / ~50 GiB) |
+| `compact` | 3 master | `controlPlaneAgents: 3` | schedulable control planes, no workers |
+| `ha` | 3-5 master + N worker | `controlPlaneAgents: 3-5, workerAgents: N` | classic |
+
+**On "2-node":** a genuine two-node control plane in 4.20 is **TNA** (2 control plane + 1 arbiter = 3 physical
+hosts). A true *2-physical-node* cluster (Two-Node OpenShift with **Fencing**, TNF) is **Technology Preview** in 4.20
+and is **not expressible through the `AgentClusterInstall` / ACM flow** (it needs the openshift-installer agent-based
+flow with `featureSet: TechPreviewNoUpgrade` + pacemaker/Redfish fencing), so it is not offered here; use TNA for a
+two-node footprint. Each node needs its own IP; `api_vip`/`ingress_vip` are two free addresses on the machine
+network. The spoke carries `provisioner = {kind: acm, hub_id, host_id (first), host_name, nodes: [{host_id, role}]}`;
+`DELETE /clusters/{id}` releases every host.
 
 ### GitOps / ZTP (deploy a spoke from git)
 

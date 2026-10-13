@@ -587,16 +587,30 @@ export interface AcmSpoke {
   progress?: number | null;
   console_url?: string | null;
   real_bmh?: boolean; // built on a real physical server vs an emulated-BMC VM member
+  topology?: string | null; // sno | tna | compact | ha
+  node_count?: number;
 }
 
-/** A static network for a real bare-metal spoke node (no lab-group router / DHCP) */
+/** A static network for a real bare-metal spoke (no lab-group router / DHCP). For a single-node spoke `ip` is
+ *  the node's address; for a multi-node spoke the per-node IPs come from the hosts list and these are the
+ *  shared parameters + the api/ingress VIPs (the on-cluster keepalived load balancer). */
 export interface AcmSpokeNet {
-  ip: string;
+  ip?: string;
   prefix: number;
   gateway: string;
   dns: string[];
   ntp?: string[];
   root_device?: string | null;
+  api_vip?: string;
+  ingress_vip?: string;
+}
+
+/** One physical host of a multi-node real bare-metal spoke */
+export interface AcmSpokeNode {
+  host_id: number;
+  ip: string;
+  role: 'master' | 'arbiter' | 'worker';
+  root_device?: string;
 }
 
 /** The in-lab git server (Gitea) the app runs so the hub's Argo CD can clone the spoke manifests */

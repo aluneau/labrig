@@ -84,16 +84,41 @@ class DNSService:
 
     @staticmethod
     def _clusters(db: Session) -> List[Cluster]:
-        """OpenShift clusters with no lab-group router but a routable node IP: bare-metal (and future
-        groupless spokes). The group-based clusters get their DNS from their router instead."""
+        """OpenShift clusters with no lab-group router but a routable node IP: bare-metal (and groupless
+        ACM spokes). The group-based clusters get their DNS from their router instead."""
         return [c for c in db.query(Cluster).filter(Cluster.type == "openshift").all()
                 if c.group_id is None and c.api_ip]
+
+    @staticmethod
+    def _vm_hub_zones(db: Session) -> List[Cluster]:
+        """VM-based ACM hubs (in a lab group, so normally only resolvable inside the group) that provision a
+        REAL bare-metal spoke. The physical BMC + the groupless spoke node sit on a routable network and must
+        resolve the hub's api / *.apps by name to fetch the discovery ISO (assisted-image-service) and join;
+        they can't reach the group router's internal DNS. Publishing the hub zone here -> hub.api_ip (the
+        router's uplink address, where haproxy already fronts the hub API 6443 and ingress 80/443) gives them
+        a routable name to resolve. A bare-metal (groupless) hub needs none of this: it is already in
+        _clusters()."""
+        clusters = db.query(Cluster).filter(Cluster.type == "openshift").all()
+        real_spoke_hub_ids = set()
+        for c in clusters:
+            prov = ((c.spec or {}).get("openshift") or {}).get("provisioner") or {}
+            if prov.get("kind") == "acm" and prov.get("host_id") is not None and prov.get("hub_id") is not None:
+                real_spoke_hub_ids.add(prov["hub_id"])
+        return [c for c in clusters
+                if c.group_id is not None and c.api_ip and c.id in real_spoke_hub_ids
+                and ((c.spec or {}).get("openshift") or {}).get("acm")]
 
     def zones(self, db: Session) -> List[Dict[str, Any]]:
         out = []
         for c in self._clusters(db):
             zone = f"{c.name}.{c.domain}"
-            out.append({"cluster": c.name, "zone": zone, "ip": c.api_ip})
+            # A multi-node spoke runs an on-cluster load balancer (keepalived) on two VIPs: api -> apiVIP,
+            # *.apps -> ingressVIP. Single node (SNO) / the hub: one address for both.
+            apps_ip = ((c.spec or {}).get("apps_ip")) or c.api_ip
+            out.append({"cluster": c.name, "zone": zone, "ip": c.api_ip, "apps_ip": apps_ip})
+        for c in self._vm_hub_zones(db):
+            zone = f"{c.name}.{c.domain}"
+            out.append({"cluster": c.name, "zone": zone, "ip": c.api_ip, "apps_ip": c.api_ip})
         return out
 
     # ------------------------------------------------------------------ custom records
@@ -167,7 +192,7 @@ class DNSService:
             lines.append(f"# cluster {z['cluster']}")
             lines.append(f"host-record=api.{z['zone']},{z['ip']}")
             lines.append(f"host-record=api-int.{z['zone']},{z['ip']}")
-            lines.append(f"address=/apps.{z['zone']}/{z['ip']}")
+            lines.append(f"address=/apps.{z['zone']}/{z.get('apps_ip') or z['ip']}")
         custom = self.custom_records(db)
         if custom:
             lines.append("# custom records (user-managed, services/dns_service.py)")

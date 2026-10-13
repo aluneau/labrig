@@ -182,8 +182,9 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     DELETE /clusters/{id} deletes it through the hub (the machine stays)."""
     from app.services.acm_spokes import spoke_service
     net = data.net.model_dump() if data.net is not None else None
+    hosts = [h.model_dump() for h in data.hosts] if data.hosts is not None else None
     cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version,
-                           data.host_id, net, data.gitops)
+                           data.host_id, net, data.gitops, hosts, data.topology)
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 
