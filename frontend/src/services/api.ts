@@ -7,7 +7,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmGitops, AcmGitCredentials, BmcStatus,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmSpokeNode, AcmGitops, AcmGitCredentials, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -264,9 +264,14 @@ export const clusterApi = {
   /** The hub provisions a spoke on an emulated-BMC member: returns the new cluster (its own page, kubeconfig, delete) */
   acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
-  /** The hub provisions a spoke on a REAL BareMetalHost with its static network. gitops = deploy via Argo CD. */
+  /** The hub provisions a single-node spoke on a REAL BareMetalHost with its static network. gitops = Argo CD. */
   acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, gitops = false, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, gitops, version: version || null }),
+  /** The hub provisions a MULTI-node spoke across several REAL BareMetalHosts (compact / two-node-with-arbiter).
+   *  `hosts` = per-node {host_id, ip, role, root_device?}; `net` carries the shared network + the api/ingress VIPs. */
+  acmSpokeMulti: (id: number, name: string, topology: string, hosts: AcmSpokeNode[], net: AcmSpokeNet,
+    gitops = false, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, topology, hosts, net, gitops, version: version || null }),
   /** The GitOps artifact for a real bare-metal spoke: its SiteConfig ClusterInstance manifest (for git / Argo CD) */
   acmSiteconfig: (spokeId: number) => request<{ manifest: string }>(`/clusters/${spokeId}/acm/siteconfig`),
   /** Reference view for the spoke-create form: the SiteConfig ClusterInstance that WOULD be generated (nothing created) */

@@ -46,6 +46,16 @@ const STATE_COLORS: Record<string, LabelProps['color']> = {
 
 const flag = (v?: boolean | null) => (v == null ? 'Unknown' : v ? 'True' : 'False');
 
+// Real-bare-metal spoke topologies and the per-node roles each maps to. "tna" (two-node + arbiter) is the
+// GA two-node control plane in OCP 4.20 (2 control plane + 1 small arbiter); "compact" is 3 control planes.
+type SpokeTopology = 'sno' | 'tna' | 'compact';
+const SPOKE_ROLES: Record<SpokeTopology, ('master' | 'arbiter' | 'worker')[]> = {
+  sno: ['master'],
+  tna: ['master', 'master', 'arbiter'],
+  compact: ['master', 'master', 'master'],
+};
+const emptyRow = () => ({ sel: '', ip: '', root_device: '' });
+
 /** ACM tab of an OpenShift cluster: hub state, console link, managed clusters (import / detach) */
 export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ cluster, onChanged }) => {
   const [acm, setAcm] = useState<AcmStatus | null>(null);
@@ -62,6 +72,11 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [spokeGateway, setSpokeGateway] = useState('');
   const [spokeDns, setSpokeDns] = useState('');
   const [spokeGitops, setSpokeGitops] = useState(false);
+  const [spokeTopology, setSpokeTopology] = useState<SpokeTopology>('sno');
+  const [spokeRows, setSpokeRows] = useState([emptyRow(), emptyRow(), emptyRow()]); // multi-node host rows
+  const [spokeApiVip, setSpokeApiVip] = useState('');
+  const [spokeIngressVip, setSpokeIngressVip] = useState('');
+  const [spokeNtp, setSpokeNtp] = useState('');
   const [deleteSpoke, setDeleteSpoke] = useState<AcmSpoke | null>(null);
   const [siteConfig, setSiteConfig] = useState<{ name: string; manifest: string } | null>(null);
 
@@ -289,53 +304,95 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                 network (no lab-group router).
               </div>
               {(() => {
-                const isHost = spokeMachine.startsWith('host:');
                 const validIp = (v: string) => /^(\d{1,3}\.){3}\d{1,3}$/.test(v.trim());
-                const netOk = !isHost || (validIp(spokeIp) && validIp(spokeGateway) && Number(spokePrefix) >= 1
-                  && Number(spokePrefix) <= 32 && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).every(validIp)
-                  && spokeDns.split(',').map((d) => d.trim()).filter(Boolean).length > 0);
+                const isSno = spokeTopology === 'sno';
+                const roles = SPOKE_ROLES[spokeTopology];
+                const rows = spokeRows.slice(0, roles.length);
+                const isHost = spokeMachine.startsWith('host:');  // SNO on a real host
+                const dnsList = spokeDns.split(',').map((d) => d.trim()).filter(Boolean);
+                const ntpList = spokeNtp.split(',').map((d) => d.trim()).filter(Boolean);
+                const sharedNetOk = validIp(spokeGateway) && Number(spokePrefix) >= 1 && Number(spokePrefix) <= 32
+                  && dnsList.length > 0 && dnsList.every(validIp);
+                // SNO-on-host network check (single IP); emulated member needs no network.
+                const snoNetOk = !isHost || (validIp(spokeIp) && sharedNetOk);
+                // Multi-node: every row has a host + a valid IP, the shared net is valid, and the two VIPs are
+                // valid, distinct, and not one of the node IPs.
+                const nodeIps = rows.map((r) => r.ip.trim());
+                const vipOk = validIp(spokeApiVip) && validIp(spokeIngressVip)
+                  && spokeApiVip.trim() !== spokeIngressVip.trim()
+                  && !nodeIps.includes(spokeApiVip.trim()) && !nodeIps.includes(spokeIngressVip.trim());
+                const rowsOk = rows.every((r) => r.sel && validIp(r.ip)) && new Set(rows.map((r) => r.sel)).size === rows.length;
+                const multiOk = rowsOk && sharedNetOk && vipOk;
                 const nameOk = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(spokeName);
                 const nothing = !acm.spoke_machines.length && !acm.spoke_hosts.length;
+                const notEnoughHosts = !isSno && acm.spoke_hosts.length < roles.length;
+                const canProvision = nameOk && hubUp && ready && !busy
+                  && (isSno ? (!!spokeMachine && snoNetOk) : multiOk);
+                const reset = () => {
+                  setSpokeName(''); setSpokeMachine(''); setSpokeIp(''); setSpokeGateway(''); setSpokeDns('');
+                  setSpokeGitops(false); setGwTouched(false); setSpokeTopology('sno');
+                  setSpokeRows([emptyRow(), emptyRow(), emptyRow()]); setSpokeApiVip(''); setSpokeIngressVip(''); setSpokeNtp('');
+                };
+                const net = {
+                  prefix: Number(spokePrefix), gateway: spokeGateway.trim(), dns: dnsList,
+                  ...(ntpList.length ? { ntp: ntpList } : {}),
+                };
                 const provision = () => run(async () => {
-                  if (isHost) {
-                    await clusterApi.acmSpokeHost(cluster.id, spokeName, Number(spokeMachine.slice(5)), {
-                      ip: spokeIp.trim(), prefix: Number(spokePrefix), gateway: spokeGateway.trim(),
-                      dns: spokeDns.split(',').map((d) => d.trim()).filter(Boolean),
-                    }, spokeGitops && !!gitops?.argocd_installed);
-                  } else {
+                  if (isSno && isHost) {
+                    await clusterApi.acmSpokeHost(cluster.id, spokeName, Number(spokeMachine.slice(5)),
+                      { ip: spokeIp.trim(), ...net }, spokeGitops && !!gitops?.argocd_installed);
+                  } else if (isSno) {
                     await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine.slice(7));
+                  } else {
+                    await clusterApi.acmSpokeMulti(cluster.id, spokeName, spokeTopology,
+                      rows.map((r, i) => ({ host_id: Number(r.sel.slice(5)), ip: r.ip.trim(), role: roles[i],
+                        ...(r.root_device.trim() ? { root_device: r.root_device.trim() } : {}) })),
+                      { ...net, api_vip: spokeApiVip.trim(), ingress_vip: spokeIngressVip.trim() },
+                      spokeGitops && !!gitops?.argocd_installed);
                   }
-                  setSpokeName(''); setSpokeMachine(''); setSpokeIp(''); setSpokeGateway(''); setSpokeDns(''); setSpokeGitops(false); setGwTouched(false);
+                  reset();
                 });
+                // Options for a host-row select: real hosts not already picked in another row.
+                const rowOptions = (idx: number) => acm.spoke_hosts.filter(
+                  (h) => !rows.some((r, j) => j !== idx && r.sel === `host:${h.id}`));
                 return (
                   <Stack hasGutter>
                     <StackItem>
                       <Flex alignItems={{ default: 'alignItemsCenter' }}>
                         <FlexItem>
-                          <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 260 }}
-                            onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
-                            <FormSelectOption value="" label={nothing ? 'No free spoke machine or host' : 'Spoke machine…'} isPlaceholder />
-                            {acm.spoke_machines.map((m) => (
-                              <FormSelectOption key={`member:${m.name}`} value={`member:${m.name}`}
-                                label={`VM ${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
-                            ))}
-                            {acm.spoke_hosts.map((h) => (
-                              <FormSelectOption key={`host:${h.id}`} value={`host:${h.id}`}
-                                label={`Bare metal: ${h.name}${h.memory_gib ? ` (${Math.round(h.memory_gib)} GiB, ${h.cpu_count} cores)` : ''}`} />
-                            ))}
+                          <FormSelect id="acm-spoke-topology" aria-label="Spoke topology" value={spokeTopology} style={{ minWidth: 220 }}
+                            onChange={(_e, v) => setSpokeTopology(v as SpokeTopology)} isDisabled={!hubUp}>
+                            <FormSelectOption value="sno" label="Single node (SNO) — 1 host" />
+                            <FormSelectOption value="tna" label="Two-node + arbiter (TNA) — 3 hosts" />
+                            <FormSelectOption value="compact" label="Compact — 3 control-plane hosts" />
                           </FormSelect>
                         </FlexItem>
+                        {isSno && (
+                          <FlexItem>
+                            <FormSelect id="acm-spoke-machine" aria-label="Spoke machine" value={spokeMachine} style={{ minWidth: 260 }}
+                              onChange={(_e, v) => setSpokeMachine(v)} isDisabled={!hubUp}>
+                              <FormSelectOption value="" label={nothing ? 'No free spoke machine or host' : 'Spoke machine…'} isPlaceholder />
+                              {acm.spoke_machines.map((m) => (
+                                <FormSelectOption key={`member:${m.name}`} value={`member:${m.name}`}
+                                  label={`VM ${m.name} (${Math.round(m.memory / 1024)} GiB, ${m.vcpu} vCPU)`} />
+                              ))}
+                              {acm.spoke_hosts.map((h) => (
+                                <FormSelectOption key={`host:${h.id}`} value={`host:${h.id}`}
+                                  label={`Bare metal: ${h.name}${h.memory_gib ? ` (${Math.round(h.memory_gib)} GiB, ${h.cpu_count} cores)` : ''}`} />
+                              ))}
+                            </FormSelect>
+                          </FlexItem>
+                        )}
                         <FlexItem>
                           <TextInput id="acm-spoke-name" aria-label="Spoke cluster name" placeholder="cluster name, e.g. spoke1"
                             value={spokeName} onChange={(_e, v) => setSpokeName(v)} style={{ width: 220 }} />
                         </FlexItem>
                         <FlexItem>
-                          <Button id="acm-spoke-create" isDisabled={!spokeMachine || !nameOk || !netOk || !hubUp || !ready || busy}
-                            onClick={provision}>Provision</Button>
+                          <Button id="acm-spoke-create" isDisabled={!canProvision} onClick={provision}>Provision</Button>
                         </FlexItem>
                       </Flex>
                     </StackItem>
-                    {isHost && (
+                    {isSno && isHost && (
                       <StackItem>
                         <Flex alignItems={{ default: 'alignItemsCenter' }}>
                           <FlexItem><TextInput id="acm-spoke-ip" aria-label="Node IP" placeholder="node IP, e.g. 10.6.117.11"
@@ -365,6 +422,65 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                         )}
                       </StackItem>
                     )}
+                    {!isSno && (
+                      <StackItem>
+                        <div style={{ ...muted, marginBottom: 8 }}>
+                          {spokeTopology === 'tna'
+                            ? 'Two-node control plane with an arbiter (the GA 2-node topology in OCP 4.20): 2 control-plane hosts + 1 small arbiter host. A true 2-physical-node cluster (fencing) is Tech Preview and not offered here.'
+                            : '3 control-plane hosts (compact). Workloads run on the control planes.'}
+                          {' '}Each host needs its own IP; the cluster runs an on-cluster load balancer on two VIPs (api / ingress).
+                        </div>
+                        {notEnoughHosts && (
+                          <Alert variant="warning" isInline isPlain title={`Needs ${roles.length} free bare-metal hosts; ${acm.spoke_hosts.length} available. Register more on the Bare-metal hosts page.`} />
+                        )}
+                        {rows.map((r, i) => (
+                          <Flex key={i} alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: 6 }}>
+                            <FlexItem><Label isCompact color={roles[i] === 'arbiter' ? 'purple' : 'blue'}>{roles[i]}</Label></FlexItem>
+                            <FlexItem>
+                              <FormSelect aria-label={`Host ${i + 1}`} value={r.sel} style={{ minWidth: 240 }} isDisabled={!hubUp}
+                                onChange={(_e, v) => setSpokeRows((prev) => prev.map((x, j) => (j === i ? { ...x, sel: v } : x)))}>
+                                <FormSelectOption value="" label="Bare-metal host…" isPlaceholder />
+                                {rowOptions(i).map((h) => (
+                                  <FormSelectOption key={`host:${h.id}`} value={`host:${h.id}`}
+                                    label={`${h.name}${h.memory_gib ? ` (${Math.round(h.memory_gib)} GiB, ${h.cpu_count} cores)` : ''}`} />
+                                ))}
+                              </FormSelect>
+                            </FlexItem>
+                            <FlexItem><TextInput aria-label={`Host ${i + 1} IP`} placeholder="node IP"
+                              value={r.ip} onChange={(_e, v) => setSpokeRows((prev) => prev.map((x, j) => (j === i ? { ...x, ip: v } : x)))}
+                              style={{ width: 160 }} /></FlexItem>
+                            <FlexItem><TextInput aria-label={`Host ${i + 1} root device`} placeholder="root device (optional)"
+                              value={r.root_device} onChange={(_e, v) => setSpokeRows((prev) => prev.map((x, j) => (j === i ? { ...x, root_device: v } : x)))}
+                              style={{ width: 180 }} /></FlexItem>
+                          </Flex>
+                        ))}
+                        <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginTop: 6 }}>
+                          <FlexItem><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
+                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
+                            value={spokeGateway} onChange={(_e, v) => { setSpokeGateway(v); setGwTouched(true); }} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
+                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-ntp" aria-label="NTP servers" placeholder="NTP (optional)"
+                            value={spokeNtp} onChange={(_e, v) => setSpokeNtp(v)} style={{ width: 160 }} /></FlexItem>
+                        </Flex>
+                        <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginTop: 6 }}>
+                          <FlexItem><TextInput id="acm-spoke-api-vip" aria-label="API VIP" placeholder="API VIP (free IP)"
+                            value={spokeApiVip} onChange={(_e, v) => setSpokeApiVip(v)} style={{ width: 200 }} /></FlexItem>
+                          <FlexItem><TextInput id="acm-spoke-ingress-vip" aria-label="Ingress VIP" placeholder="Ingress VIP (free IP)"
+                            value={spokeIngressVip} onChange={(_e, v) => setSpokeIngressVip(v)} style={{ width: 200 }} /></FlexItem>
+                        </Flex>
+                        <div style={{ ...muted, marginTop: 8 }}>
+                          The two VIPs are free addresses on the machine network (keepalived moves them across the control
+                          planes). UEFI boot, <code>OVNKubernetes</code>, <code>rootDeviceHints minSizeGigabytes&nbsp;400</code> and
+                          host NTP are applied by default.
+                        </div>
+                        {gitops?.argocd_installed && (
+                          <Checkbox id="acm-spoke-gitops-multi" label="Deploy via GitOps (commit the manifests to git; Argo CD syncs them to the hub)"
+                            isChecked={spokeGitops} onChange={(_e, v) => setSpokeGitops(v)} style={{ marginTop: 8 }} />
+                        )}
+                      </StackItem>
+                    )}
                   </Stack>
                 );
               })()}
@@ -384,7 +500,10 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                             </div>
                           )}
                         </Td>
-                        <Td dataLabel="Machine">{s.machine}{s.ip ? ` (${s.ip})` : ''}</Td>
+                        <Td dataLabel="Machine">
+                          {s.machine}{s.ip ? ` (${s.ip})` : ''}
+                          {s.topology && s.topology !== 'sno' && <Label isCompact style={{ marginLeft: 6 }}>{s.topology}</Label>}
+                        </Td>
                         <Td dataLabel="State"><Label isCompact color={s.state === 'ready' ? 'green' : s.state === 'error' ? 'red' : 'blue'}>{s.state}</Label></Td>
                         <Td dataLabel="BareMetalHost">{s.bmh_state || '—'}</Td>
                         <Td dataLabel="Install">{s.install_state ? `${s.install_state}${s.progress != null ? ` ${s.progress}%` : ''}` : '—'}</Td>

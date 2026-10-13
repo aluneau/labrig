@@ -256,31 +256,74 @@ class AcmStatus(BaseModel):
     error: Optional[str] = None
 
 
+# Node roles for a real bare-metal spoke. "master" = control plane, "worker" = compute, "arbiter" = the
+# lightweight etcd quorum tiebreaker of a Two-Node OpenShift with Arbiter (TNA) cluster (OCP 4.20 GA).
+SPOKE_ROLE = Literal["master", "arbiter", "worker"]
+
+# Supported real-bare-metal spoke topologies, with the (controlPlaneAgents, arbiterAgents, workerAgents)
+# each maps to in the AgentClusterInstall provisionRequirements. "tna" is the GA 2-node control plane
+# (2 control plane + 1 arbiter = 3 physical hosts); a true 2-physical-node cluster (TNF, fencing) is Tech
+# Preview in 4.20 and is not expressible through the AgentClusterInstall CR, so it is not offered here.
+SPOKE_TOPOLOGY = Literal["sno", "tna", "compact", "ha"]
+
+
 class AcmSpokeNet(BaseModel):
-    """The real bare-metal spoke node's static network (there is no lab-group router / DHCP)"""
-    ip: str
+    """The real bare-metal spoke node's static network (there is no lab-group router / DHCP). For a
+    multi-node spoke these are the SHARED network parameters (prefix / gateway / dns / ntp); each host's own
+    IP + root device come from the `hosts` list. `ip` is used only for the single-node (host_id) shape."""
+    ip: Optional[str] = None
     prefix: int = Field(..., ge=1, le=32)
     gateway: str
     dns: List[str] = []
     ntp: List[str] = []
     root_device: Optional[str] = None  # e.g. /dev/sda; empty = the installer picks the first eligible disk
+    # Multi-node only: the on-cluster load balancer (keepalived) VIPs, on the machine network, distinct from
+    # every node IP. SNO uses user-managed networking (the single node IS the API) and needs neither.
+    api_vip: Optional[str] = None
+    ingress_vip: Optional[str] = None
+
+
+class AcmSpokeNode(BaseModel):
+    """One physical host of a multi-node real-bare-metal spoke: a registered BareMetalHost + its static IP
+    on the machine network + its role."""
+    host_id: int
+    ip: str
+    role: SPOKE_ROLE = "master"
+    root_device: Optional[str] = None  # per-host override; empty = the installer picks the first eligible disk
 
 
 class AcmSpokeRequest(BaseModel):
-    """The hub provisions a single-node OpenShift on a spoke machine: either an emulated-BMC `machine`
-    (member of the hub's lab group) or a REAL BareMetalHost (`host_id` + its static `net`)."""
+    """The hub provisions an OpenShift spoke, on exactly one of:
+      - `machine`: an emulated-BMC member of the hub's lab group (single node, SNO); or
+      - `host_id` + `net`: a single REAL BareMetalHost (SNO); or
+      - `hosts` + `net`: several REAL BareMetalHosts (multi-node: compact / HA / two-node-with-arbiter),
+        each with its own IP + role, into ONE cluster with the right provisionRequirements."""
     name: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
     machine: Optional[str] = Field(None, pattern=PACKAGE)   # emulated-BMC member of the hub's group
-    host_id: Optional[int] = None                           # a registered real BareMetalHost (status available)
-    net: Optional[AcmSpokeNet] = None                       # required with host_id
+    host_id: Optional[int] = None                           # a single registered real BareMetalHost
+    hosts: Optional[List[AcmSpokeNode]] = Field(None, min_length=1, max_length=6)  # several real hosts
+    net: Optional[AcmSpokeNet] = None                       # required with host_id / hosts
+    topology: Optional[SPOKE_TOPOLOGY] = None               # default inferred from the host roles / count
     version: Optional[str] = Field(None, pattern=OCP_VERSION)  # default: the hub's
     gitops: bool = False  # deploy "the realistic way": write the manifests to git and let Argo CD sync them
                           #                            onto the hub, instead of the app applying the CRs directly
 
     @model_validator(mode="after")
     def _one_machine(self) -> "AcmSpokeRequest":
-        if (self.machine is None) == (self.host_id is None):
-            raise ValueError("Give exactly one of 'machine' (emulated-BMC member) or 'host_id' (real BareMetalHost)")
-        if self.host_id is not None and self.net is None:
-            raise ValueError("A real bare-metal spoke (host_id) needs the node's static 'net' (ip, prefix, gateway, dns)")
+        chosen = [k for k, v in (("machine", self.machine), ("host_id", self.host_id),
+                                 ("hosts", self.hosts)) if v is not None]
+        if len(chosen) != 1:
+            raise ValueError("Give exactly one of 'machine' (emulated-BMC member), 'host_id' (one real "
+                             "BareMetalHost) or 'hosts' (several real BareMetalHosts)")
+        if (self.host_id is not None or self.hosts is not None) and self.net is None:
+            raise ValueError("A real bare-metal spoke needs the node's static 'net' (prefix, gateway, dns)")
+        if self.host_id is not None and not (self.net and self.net.ip):
+            raise ValueError("A single-host real spoke (host_id) needs net.ip (the node's static IP)")
+        if self.hosts is not None:
+            ids = [h.host_id for h in self.hosts]
+            if len(set(ids)) != len(ids):
+                raise ValueError("The same host appears more than once in 'hosts'")
+            if len(self.hosts) > 1 and not (self.net and self.net.api_vip and self.net.ingress_vip):
+                raise ValueError("A multi-node spoke needs net.api_vip and net.ingress_vip (the on-cluster "
+                                 "load-balancer VIPs on the machine network)")
         return self
