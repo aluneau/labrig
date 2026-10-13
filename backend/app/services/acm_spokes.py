@@ -733,6 +733,75 @@ class SpokeService:
         except Exception as e:
             logger.warning(f"Spoke {cluster.name}: could not restore {host.name}'s BMC DNS: {e}")
 
+    # ---------------------------------------------------------------------- GitOps (SiteConfig)
+
+    def siteconfig_manifest(self, db: Session, cluster: Cluster) -> str:
+        """Render a real-BMH spoke as an ACM SiteConfig `ClusterInstance` (+ the BMC Secret stub), the GitOps
+        artifact a customer commits for Argo CD / the SiteConfig operator to expand into the low-level CRs. The
+        app applies the low-level CRs directly (this hub has only the CRD, not the operator/templates), but this
+        is the same spoke expressed the way their fleet is defined. The BMC password is NOT embedded (the Secret
+        stub carries the username and a placeholder; fill it in git / sealed-secrets)."""
+        import yaml
+        from app.services.baremetal_service import baremetal_service
+        from app.services.openshift_service import openshift_service
+        host_id = real_bmh_id(cluster)
+        if host_id is None:
+            raise ValueError("SiteConfig export is for spokes provisioned on a real BareMetalHost")
+        host = baremetal_service.get_host(db, host_id)
+        if host is None:
+            raise ValueError("The spoke's bare-metal host was deleted")
+        snet = (cluster.spec or {}).get("spoke_net") or {}
+        name = cluster.name
+        version = cluster.version
+        ssh_pub = openshift_service.ssh_keypair(openshift_service.cluster_dir(name))
+        nmstate = openshift_service.nmstate_static(snet["mac"], snet["ip"], snet["prefix"], snet["gateway"],
+                                                   list(snet.get("dns") or []),
+                                                   search=[f"{name}.{cluster.domain}"])
+        bmc_secret = f"{host.name}-bmc"
+        cluster_instance = {
+            "apiVersion": "siteconfig.open-cluster-management.io/v1alpha1", "kind": "ClusterInstance",
+            "metadata": {"name": name, "namespace": name,
+                         "annotations": {"siteconfig.open-cluster-management.io/sync-wave": "1"}},
+            "spec": {
+                "clusterName": name, "baseDomain": cluster.domain,
+                "clusterImageSetNameRef": f"img{version}-x86-64",
+                "pullSecretRef": {"name": "pull-secret"}, "sshPublicKey": ssh_pub,
+                "holdInstallation": False,
+                "templateRefs": [{"name": "ai-cluster-templates-v1", "namespace": "open-cluster-management"}],
+                "additionalNTPSources": list(snet.get("ntp") or []),
+                "networkType": "OVNKubernetes",
+                "machineNetwork": [{"cidr": snet.get("machine_network")}],
+                "clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
+                "serviceNetwork": [{"cidr": "172.30.0.0/16"}],
+                "installConfigOverrides": json.dumps(
+                    {"capabilities": {"baselineCapabilitySet": "None",
+                                      "additionalEnabledCapabilities": ["OperatorLifecycleManager", "Ingress"]}}),
+                "nodes": [{
+                    "hostName": cluster.nodes[0].name if cluster.nodes else f"{name}-ctlplane-0",
+                    "role": "master",
+                    "bmcAddress": baremetal_service.virtualmedia_address(db, host),
+                    "bmcCredentialsName": {"name": bmc_secret},
+                    "bootMACAddress": snet.get("mac"), "bootMode": "UEFI",
+                    "automatedCleaningMode": "metadata",
+                    "rootDeviceHints": ({"deviceName": snet["root_device"]} if snet.get("root_device")
+                                        else {"minSizeGigabytes": 400}),
+                    "templateRefs": [{"name": "ai-node-templates-v1", "namespace": "open-cluster-management"}],
+                    "nodeNetwork": {
+                        "interfaces": [{"name": openshift_service.BMH_IFACE, "macAddress": snet.get("mac")}],
+                        "config": nmstate},
+                }],
+            },
+        }
+        bmc_stub = {
+            "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": bmc_secret, "namespace": name},
+            "stringData": {"username": host.bmc_username, "password": "<BMC_PASSWORD>"}}
+        header = ("# ACM SiteConfig ClusterInstance for spoke "
+                  f"'{name}' (commit to git for Argo CD / the SiteConfig operator).\n"
+                  "# The vm-manager app applies the expanded CRs directly; this is the GitOps form.\n"
+                  "# Create the pull-secret Secret and fill the BMC password before applying.\n")
+        return header + "---\n".join(yaml.safe_dump(doc, sort_keys=False) for doc in (cluster_instance, bmc_stub))
+
     def write_kubeconfig(self, db: Session, hub: Cluster, cluster: Cluster) -> str:
         """The hub's <spoke>-admin-kubeconfig, pointed at the router's forwarded port (like the hub's own); the
         kubeadmin password next to it"""

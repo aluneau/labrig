@@ -17,6 +17,8 @@ import {
   FormSelectOption,
   Label,
   LabelProps,
+  Modal,
+  ModalVariant,
   Spinner,
   Stack,
   StackItem,
@@ -55,6 +57,16 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   const [spokeGateway, setSpokeGateway] = useState('');
   const [spokeDns, setSpokeDns] = useState('');
   const [deleteSpoke, setDeleteSpoke] = useState<AcmSpoke | null>(null);
+  const [siteConfig, setSiteConfig] = useState<{ name: string; manifest: string } | null>(null);
+
+  const openSiteConfig = async (s: AcmSpoke) => {
+    try {
+      const r = await clusterApi.acmSiteconfig(s.id);
+      setSiteConfig({ name: s.name, manifest: r.manifest });
+    } catch (err) {
+      setActionError(errorText(err));
+    }
+  };
 
   const load = useCallback(async () => {
     try {
@@ -323,6 +335,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                         <Td dataLabel="Install">{s.install_state ? `${s.install_state}${s.progress != null ? ` ${s.progress}%` : ''}` : '—'}</Td>
                         <Td isActionCell>
                           <ActionsColumn isDisabled={busy || !ready} items={[
+                            ...(s.real_bmh ? [{ title: 'SiteConfig (GitOps)', onClick: () => openSiteConfig(s) }] : []),
                             { title: 'Delete spoke', onClick: () => setDeleteSpoke(s) },
                           ]} />
                         </Td>
@@ -336,6 +349,23 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
         </StackItem>
       )}
 
+      <Modal title={`SiteConfig ClusterInstance — ${siteConfig?.name || ''}`} isOpen={!!siteConfig}
+        variant={ModalVariant.large} onClose={() => setSiteConfig(null)}
+        actions={[
+          <Button key="copy" variant="secondary"
+            onClick={() => navigator.clipboard?.writeText(siteConfig?.manifest || '')}>Copy</Button>,
+          <Button key="close" variant="link" onClick={() => setSiteConfig(null)}>Close</Button>,
+        ]}>
+        <div style={{ ...muted, marginBottom: 8 }}>
+          The GitOps form of this spoke — commit it to your git repo for Argo CD / the SiteConfig operator. The
+          vm-manager app applies the expanded CRs directly; this is the same spoke as a <code>ClusterInstance</code>.
+          Create the pull-secret and fill the BMC password before applying.
+        </div>
+        <pre style={{ maxHeight: '60vh', overflow: 'auto', fontSize: 12, whiteSpace: 'pre',
+          background: 'var(--pf-v5-global--BackgroundColor--200)', padding: 12, borderRadius: 4 }}>
+          {siteConfig?.manifest}
+        </pre>
+      </Modal>
       <ConfirmModal title={`Delete spoke ${deleteSpoke?.name}?`} isOpen={!!deleteSpoke} danger confirmLabel="Delete"
         onConfirm={() => (deleteSpoke ? run(() => clusterApi.delete(deleteSpoke.id)) : undefined)}
         onClose={() => setDeleteSpoke(null)}>

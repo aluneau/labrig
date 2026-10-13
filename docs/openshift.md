@@ -253,6 +253,10 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
   media, clear boot override, power off, `cluster_name` cleared) — it is **not** wiped; its BMC DNS is restored.
   Start / stop power the physical host through its BMC. The spoke carries
   `provisioner = {kind: acm, hub_id, host_id, host_name}`.
+- **GitOps form**: `GET /clusters/{id}/acm/siteconfig` (spoke row → *SiteConfig (GitOps)*) renders the spoke as an
+  ACM SiteConfig `ClusterInstance` (+ a BMC Secret stub, password not embedded) with the `ai-cluster/node-templates`
+  templateRefs — the manifest a fleet commits to git for Argo CD / the SiteConfig operator. The app applies the
+  expanded CRs directly here; this is the same spoke expressed the way customers define theirs.
 
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub

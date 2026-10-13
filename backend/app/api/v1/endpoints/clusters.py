@@ -187,6 +187,16 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 
+@router.get("/{cluster_id}/acm/siteconfig")
+def acm_siteconfig(cluster_id: int, db: Session = Depends(get_db)):
+    """The GitOps artifact for a real bare-metal spoke: an ACM SiteConfig `ClusterInstance` manifest (+ the BMC
+    Secret stub, password not embedded) to commit to git for Argo CD / the SiteConfig operator. The app applies
+    the expanded low-level CRs directly; this is the same spoke expressed the way a fleet is defined."""
+    from app.services.acm_spokes import spoke_service
+    manifest = _bad_request(spoke_service.siteconfig_manifest, db, _get(db, cluster_id))
+    return {"manifest": manifest}
+
+
 # Last: /{cluster_id}/{action} would otherwise shadow /{cluster_id}/workers
 @router.post("/{cluster_id}/{action}", response_model=Task)
 def cluster_action(cluster_id: int, action: Literal["start", "stop"], db: Session = Depends(get_db)):

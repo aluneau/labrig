@@ -266,6 +266,8 @@ export const clusterApi = {
   /** The hub provisions a spoke on a REAL BareMetalHost with its static network */
   acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, version: version || null }),
+  /** The GitOps artifact for a real bare-metal spoke: its SiteConfig ClusterInstance manifest (for git / Argo CD) */
+  acmSiteconfig: (spokeId: number) => request<{ manifest: string }>(`/clusters/${spokeId}/acm/siteconfig`),
 };
 
 export const openshiftApi = {
