@@ -555,7 +555,7 @@ export interface ClusterCredentials {
   console_url?: string | null;
 }
 
-export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo' | 'acm';
+export type AddonKind = 'operator' | 'lvms' | 'odf' | 'sriov' | 'metallb' | 'metallb-demo' | 'acm' | 'gitops';
 
 /** ACM: a managed cluster of a hub (GET /clusters/{id}/acm) */
 export interface AcmManagedCluster {
@@ -599,17 +599,39 @@ export interface AcmSpokeNet {
   root_device?: string | null;
 }
 
+/** The in-lab git server (Gitea) the app runs so the hub's Argo CD can clone the spoke manifests */
+export interface AcmGitServer {
+  enabled: boolean;
+  running: boolean;
+  version: string;
+  clone_url?: string | null;
+  repo_path: string;
+  error?: string | null;
+  firewall?: string | null;
+}
+
+/** The Argo CD Application that syncs the spokes onto the hub */
+export interface AcmArgoApplication {
+  name: string;
+  sync?: string | null; // Synced | OutOfSync
+  health?: string | null; // Healthy | Progressing | Degraded
+  revision?: string | null;
+  repo_url?: string | null;
+}
+
 /** The GitOps repo of spoke manifests (the source of truth for deploying clusters from git) */
 export interface AcmGitops {
   enabled: boolean;
   initialized: boolean;
   repo_path: string;
-  clone_url: string;
+  clone_url?: string | null;
   spokes: string[];
   commits: { commit: string; date: string; message: string }[];
   argocd_installed: boolean;
+  git_server: AcmGitServer;
+  application?: AcmArgoApplication | null;
+  application_manifest: string;
   apply_command: string;
-  application: string;
 }
 
 export interface AcmStatus {

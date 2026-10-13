@@ -8,6 +8,7 @@
 #                                    # (e.g. a gaming PC: sudo systemctl start vm-manager when needed)
 #   scripts/setup.sh --wg-ports 51820-51869   # UDP ports opened for lab WireGuard (WG_HOST_PORTS), none = skip
 #   scripts/setup.sh --bmc-ports 8180-8199    # TCP ports opened on libvirt bridges for emulated BMCs (BMC_HOST_PORTS)
+#   scripts/setup.sh --git-ports 3000-3009    # TCP ports opened on the LAN for the in-lab git server (GIT_HOST_PORTS)
 #   scripts/setup.sh --no-auth       # no login (AUTH_ENABLED=false in backend/.env): trusted single-user host only
 #   scripts/setup.sh --auth          # turn the login back on (the default for new installs)
 # Release installs (/opt/vm-manager, docs/updates.md) run it through `vm-manager-update install|update`, which
@@ -25,6 +26,7 @@ AT_BOOT=1
 SERVICE_NAME="vm-manager"
 WG_PORTS="51820-51869"
 BMC_PORTS="8180-8199"
+GIT_PORTS="3000-3009"
 AUTH=""  # "" = keep the current setting (on by default), on, off
 RELEASE=0          # code in /opt/vm-manager/releases/<ver>, data /var/lib/vm-manager, config /etc/vm-manager
 RESTART=1
@@ -33,7 +35,7 @@ IMPORT_DATA=""
 CHANNEL="stable"
 REPO="aluneau/labrig"
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --listen) LISTEN="$2"; shift 2 ;;
@@ -42,6 +44,7 @@ while [ $# -gt 0 ]; do
     --no-boot) AT_BOOT=0; shift ;;
     --wg-ports) WG_PORTS="$2"; shift 2 ;;
     --bmc-ports) BMC_PORTS="$2"; shift 2 ;;
+    --git-ports) GIT_PORTS="$2"; shift 2 ;;
     --no-auth) AUTH=off; shift ;;
     --auth) AUTH=on; shift ;;
     --release) RELEASE=1; shift ;;
@@ -319,6 +322,11 @@ if $SUDO sh -c 'command -v ufw' >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null 
     $SUDO ufw allow in on 'virbr+' to any port "${BMC_PORTS/-/:}" proto tcp comment 'vm-manager BMC (Redfish emulator)' >/dev/null
     ok "ufw: tcp $BMC_PORTS allowed on libvirt bridges (emulated BMCs)"
   fi
+  if [ "$GIT_PORTS" != none ]; then
+    # in-lab git server (Gitea): the hub's Argo CD clones the spoke manifests from it over the LAN
+    $SUDO ufw allow "${GIT_PORTS/-/:}/tcp" comment 'vm-manager git server (GitOps)' >/dev/null
+    ok "ufw: tcp $GIT_PORTS allowed (in-lab git server)"
+  fi
   # Host DNS resolver (bare-metal OpenShift api / *.apps), reached by nodes / clients / BMCs over the LAN
   $SUDO ufw allow 53 comment 'vm-manager DNS (bare-metal clusters)' >/dev/null
   ok "ufw: port 53 allowed (vm-manager DNS)"
@@ -347,6 +355,16 @@ elif systemctl is-active --quiet firewalld 2>/dev/null; then
       $SUDO firewall-cmd --permanent --zone=libvirt --add-port="$BMC_PORTS/tcp" >/dev/null
     fi
     ok "firewalld: tcp $BMC_PORTS open in zone libvirt (emulated BMCs)"
+  fi
+  if [ "$GIT_PORTS" != none ]; then
+    # in-lab git server (Gitea), reached by the hub's Argo CD over the LAN: default zone, tcp
+    if ! $SUDO firewall-cmd --query-port="$GIT_PORTS/tcp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --add-port="$GIT_PORTS/tcp" >/dev/null
+    fi
+    if ! $SUDO firewall-cmd --permanent --query-port="$GIT_PORTS/tcp" >/dev/null 2>&1; then
+      $SUDO firewall-cmd --permanent --add-port="$GIT_PORTS/tcp" >/dev/null
+    fi
+    ok "firewalld: tcp $GIT_PORTS open in zone $($SUDO firewall-cmd --get-default-zone) (in-lab git server)"
   fi
   # Host DNS resolver (bare-metal OpenShift api / *.apps)
   for proto in udp tcp; do

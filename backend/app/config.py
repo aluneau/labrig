@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     # "deploy a cluster from git" (Argo CD / oc apply -k). A no-op when git isn't installed.
     GITOPS_ENABLED: bool = True
 
+    # In-lab git server (Gitea) the app runs so OpenShift GitOps / Argo CD on a hub can pull the spoke
+    # manifests from a reachable URL (services/git_server_service.py): one Gitea process, data under
+    # DATA_DIR/git, listening on the first free port of GIT_HOST_PORTS. Open that range (tcp) in the host
+    # firewall so the hub's Argo CD controller reaches it over the LAN: scripts/setup.sh does it.
+    GIT_SERVER_ENABLED: bool = True
+    GIT_HOST_PORTS: str = "3000-3009"
+    # Pinned Gitea release: the binary is downloaded on first use (not vendored), x86_64 only
+    GITEA_VERSION: str = "1.22.6"
+    # Host name / address Argo CD uses to reach the git server (the "clone URL" host); empty = the host's
+    # own DNS/LAN address (dns_service.host_ip()), which the hub's nodes route to
+    GIT_ENDPOINT_HOST: str = ""
+
     # libvirt
     LIBVIRT_URI: str = "qemu:///system"
     # Close the libvirt connection after this many idle minutes when no browser is attached

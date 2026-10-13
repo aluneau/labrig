@@ -183,7 +183,7 @@ def acm_spoke_create(cluster_id: int, data: AcmSpokeRequest, db: Session = Depen
     from app.services.acm_spokes import spoke_service
     net = data.net.model_dump() if data.net is not None else None
     cluster = _bad_request(spoke_service.provision, db, _get(db, cluster_id), data.name, data.machine, data.version,
-                           data.host_id, net)
+                           data.host_id, net, data.gitops)
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 
@@ -194,6 +194,15 @@ def acm_gitops(cluster_id: int, db: Session = Depends(get_db)):
     to sync them. The app also applies the CRs directly; git is the fleet-definition / Argo CD path."""
     from app.services.gitops_service import gitops_service
     return _bad_request(gitops_service.status, db, _get(db, cluster_id))
+
+
+@router.post("/{cluster_id}/acm/gitops/deploy")
+def acm_gitops_deploy(cluster_id: int, db: Session = Depends(get_db)):
+    """Close the loop: push the spoke manifests to the in-lab git server and apply the Argo CD Application that
+    syncs `clusters/` onto this hub. Needs the OpenShift GitOps operator installed (the `gitops` add-on).
+    Returns the GitOps status (incl. the Application sync / health)."""
+    from app.services.gitops_service import gitops_service
+    return _bad_request(gitops_service.deploy_application, db, _get(db, cluster_id))
 
 
 @router.get("/{cluster_id}/acm/siteconfig")

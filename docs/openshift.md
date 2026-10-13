@@ -255,16 +255,37 @@ BareMetalHost (Bare-metal hosts page), instead of an emulated-BMC VM. Difference
   `provisioner = {kind: acm, hub_id, host_id, host_name}`.
 - **GitOps form**: `GET /clusters/{id}/acm/siteconfig` (spoke row → *SiteConfig (GitOps)*) renders the spoke as an
   ACM SiteConfig `ClusterInstance` (+ a BMC Secret stub, password not embedded) with the `ai-cluster/node-templates`
-  templateRefs — the manifest a fleet commits to git for Argo CD / the SiteConfig operator. The app applies the
-  expanded CRs directly here; this is the same spoke expressed the way customers define theirs.
-- **Deploy from git** (`services/gitops_service.py`, hub ACM tab → *Deploy from git (GitOps)*,
-  `GET /clusters/{id}/acm/gitops`): every bare-metal spoke is also committed to a git repo of `ClusterInstance`
-  manifests under `DATA_DIR/gitops` (`clusters/<name>/`, one commit per provision / delete) — the GitOps source of
-  truth. Push it to a git remote your GitOps controller can reach and point **Argo CD** (the OpenShift GitOps
-  operator) at `clusters/` with the generated `Application`, or run `oc apply -k clusters/<name>` from a clone. The
-  app still applies the CRs directly (so a spoke deploys without any extra operator); the git repo is the
-  fleet-definition / Argo CD path. Installing the OpenShift GitOps operator on the hub is the one prerequisite to
-  close the git→deploy loop (the app detects it and does not install it for you).
+  templateRefs — the manifest a fleet commits to git for the SiteConfig operator. It is committed for reference next
+  to the apply-ready manifests (below); this is the same spoke expressed the way customers define theirs.
+
+### GitOps / ZTP (deploy a spoke from git)
+
+The realistic ZTP path: a spoke's provisioning manifests live in **git**, and **OpenShift GitOps (Argo CD)** on the
+hub syncs them onto the cluster to provision it — instead of the app applying the CRs with `oc`. Three pieces
+(`services/gitops_service.py`, `services/git_server_service.py`, hub ACM tab → *Deploy from git (GitOps)*):
+
+- **The repo** (`DATA_DIR/gitops`, `GET /clusters/{id}/acm/gitops`): every real bare-metal spoke is committed to
+  `clusters/<name>/` — `manifests.yaml` (the exact apply-ready CRs the direct path applies, minus the Secrets:
+  `_spoke_manifests` builds both from one place, so git == what runs), `siteconfig.yaml` (the ClusterInstance, for
+  reference) and a `kustomization.yaml`; a top-level `clusters/kustomization.yaml` lists the spokes. One commit per
+  provision / delete.
+- **The in-lab git server** (`git_server_service.py`): the app runs a **Gitea** process (supervised like the BMC
+  emulator — data under `DATA_DIR/git`, binary downloaded on first use at the pinned `GITEA_VERSION`, listening on a
+  free port of `GIT_HOST_PORTS`, opened in the host firewall by `scripts/setup.sh --git-ports`). The repo is mirrored
+  into it (`vmmanager/spokes`, public / anonymous clone) so the hub's Argo CD clones it over the LAN at the host's
+  routed address — no repository credentials.
+- **Argo CD on the hub**: the `gitops` day-2 add-on (ACM tab → *Install OpenShift GitOps*, or `POST
+  /openshift/addons {kind: gitops}`) installs the OpenShift GitOps operator with `install_operator`, waits for the
+  default `openshift-gitops` Argo CD instance, and grants its application-controller a ClusterRole over the ACM
+  provisioning CRs (`hive`, `extensions.hive`, `agent-install`, `metal3`, `cluster`/`agent.open-cluster-management`,
+  `siteconfig`). *Deploy (apply Application)* (`POST /clusters/{id}/acm/gitops/deploy`) pushes the repo and applies an
+  Argo CD `Application` syncing `clusters/` (auto-sync, prune, self-heal); the card shows its Synced / Healthy state.
+
+Then provision a spoke with **Deploy via GitOps** ticked (`acm/spokes` `gitops: true`, real BareMetalHost only): the
+app creates the Namespace + the pull-secret / BMC Secret (never committed to git), commits the manifests, waits for
+Argo CD to sync them onto the hub, and follows the install to Ready — metal3 + the assisted service do the rest
+exactly as in the direct path. The direct-apply path stays the default. The SiteConfig `ClusterInstance` form would
+instead need the SiteConfig operator + `ai-*-templates` on the hub to expand into these CRs.
 
 **Disconnected hubs**: the mirror request includes `advanced-cluster-management` and `multicluster-engine`
 (default channels: the ACM version pairs with that MCE version in the 4.20 catalog), and the MultiClusterHub

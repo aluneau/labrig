@@ -263,13 +263,15 @@ export const clusterApi = {
   /** The hub provisions a spoke on an emulated-BMC member: returns the new cluster (its own page, kubeconfig, delete) */
   acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
-  /** The hub provisions a spoke on a REAL BareMetalHost with its static network */
-  acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, version?: string | null) =>
-    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, version: version || null }),
+  /** The hub provisions a spoke on a REAL BareMetalHost with its static network. gitops = deploy via Argo CD. */
+  acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, gitops = false, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, gitops, version: version || null }),
   /** The GitOps artifact for a real bare-metal spoke: its SiteConfig ClusterInstance manifest (for git / Argo CD) */
   acmSiteconfig: (spokeId: number) => request<{ manifest: string }>(`/clusters/${spokeId}/acm/siteconfig`),
   /** The hub's GitOps repo of spoke manifests (source of truth for deploying clusters from git) */
   acmGitops: (hubId: number) => request<AcmGitops>(`/clusters/${hubId}/acm/gitops`),
+  /** Close the loop: push the manifests to the in-lab git server and apply the Argo CD Application */
+  acmGitopsDeploy: (hubId: number) => post<AcmGitops>(`/clusters/${hubId}/acm/gitops/deploy`),
 };
 
 export const openshiftApi = {

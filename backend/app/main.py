@@ -63,6 +63,12 @@ async def lifespan(app: FastAPI):
             bmc_service.reconcile(db)
         except Exception:
             logging.getLogger(__name__).exception("BMC emulators")
+        # In-lab git server (Gitea) for GitOps, if it was bootstrapped before
+        try:
+            from app.services import git_server_service
+            git_server_service.reconcile()
+        except Exception:
+            logging.getLogger(__name__).exception("Git server")
 
     async def watch_libvirt():
         """No keepalive: libvirt is connected on demand by requests. This loop only
@@ -87,6 +93,8 @@ async def lifespan(app: FastAPI):
     relay.stop()
     from app.services.bmc_service import supervisor as bmc_supervisor
     bmc_supervisor.stop()
+    from app.services.git_server_service import supervisor as git_supervisor
+    git_supervisor.stop()
     libvirt_client.disconnect()
 
 
