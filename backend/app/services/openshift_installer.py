@@ -1405,6 +1405,10 @@ class OpenShiftInstaller:
             # secret (MultiClusterHub imagePullSecret); a disconnected hub has only its mirror's credentials
             runner.acm(None if opts.disconnected else openshift_service.pull_secret(),
                        runner.sources.get("redhat-operators"))
+        elif kind == "gitops":
+            from app.services.gitops_service import gitops_service
+            runner.install_operator("openshift-gitops-operator", namespace="openshift-gitops-operator")
+            gitops_service.finish_argocd_install(runner)
         elif kind == "operator":
             req = next((o for o in opts.operators if o.name == name), None)
             ns = runner.install_operator(name, req.channel if req else None, req.source if req else None,
@@ -1486,6 +1490,13 @@ class OpenShiftInstaller:
                 raise ValueError(problem)
             os_spec["acm"] = True
             name = acm.PACKAGE
+        elif kind == "gitops":
+            # OpenShift GitOps (Argo CD): no sizing gate (a small operator); it closes the git -> deploy loop
+            # for ACM spokes (the hub's Argo CD syncs the spoke manifests from the in-lab git server).
+            if not os_spec.get("acm"):
+                raise ValueError("Enable ACM first: GitOps deploys the hub's spokes")
+            os_spec["gitops"] = True
+            name = "openshift-gitops-operator"
         else:
             raise ValueError(f"Unknown add-on {kind}")
         self._update_spec(db, cluster, openshift=os_spec)

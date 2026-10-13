@@ -63,6 +63,11 @@ The hub's central infrastructure management (metal3 + assisted service) drives t
 installs SNO through `BareMetalHost` / `InfraEnv` / `NMStateConfig` / `AgentClusterInstall` — true ZTP on a
 physical server, next to the emulated-BMC (VM) spokes. See `docs/openshift.md` → *Real bare-metal spokes*.
 
+**GitOps / ZTP from git**: instead of the app applying those CRs directly, tick *Deploy via GitOps* — the spoke's
+manifests are committed to an in-lab git server and synced onto the hub by OpenShift GitOps (Argo CD). Install Argo
+CD and deploy the Application from the hub's ACM tab → *Deploy from git (GitOps)*. See `docs/openshift.md` →
+*GitOps / ZTP (deploy a spoke from git)*.
+
 ## Limitations (first step)
 
 - Single node only (no compact/HA yet); no LVMS/ODF storage, SR-IOV, MetalLB or disconnected installs on bare

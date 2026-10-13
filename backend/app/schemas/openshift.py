@@ -147,7 +147,7 @@ class ClusterCredentials(BaseModel):
 
 class AddonRequest(BaseModel):
     """Day-2: enable an add-on on an installed cluster"""
-    kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo", "acm"]
+    kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo", "acm", "gitops"]
     operator: Optional[OperatorRequest] = None
     sriov: Optional[SriovOptions] = None
     metallb: Optional[MetalLBOptions] = None
@@ -274,6 +274,8 @@ class AcmSpokeRequest(BaseModel):
     host_id: Optional[int] = None                           # a registered real BareMetalHost (status available)
     net: Optional[AcmSpokeNet] = None                       # required with host_id
     version: Optional[str] = Field(None, pattern=OCP_VERSION)  # default: the hub's
+    gitops: bool = False  # deploy "the realistic way": write the manifests to git and let Argo CD sync them
+                          #                            onto the hub, instead of the app applying the CRs directly
 
     @model_validator(mode="after")
     def _one_machine(self) -> "AcmSpokeRequest":

@@ -159,17 +159,21 @@ class SpokeService:
 
     def provision(self, db: Session, hub: Cluster, name: str, machine: Optional[str],
                   version: Optional[str], host_id: Optional[int] = None,
-                  net: Optional[Dict[str, Any]] = None) -> Cluster:
+                  net: Optional[Dict[str, Any]] = None, gitops: bool = False) -> Cluster:
         """POST /clusters/{hub}/acm/spokes: the spoke's cluster row + its provisioning task. `machine` =
-        an emulated-BMC member of the hub's group; `host_id` + `net` = a REAL BareMetalHost (physical server)."""
+        an emulated-BMC member of the hub's group; `host_id` + `net` = a REAL BareMetalHost (physical server).
+        `gitops` = deploy "the realistic way": commit the manifests to the in-lab git server and let the hub's
+        Argo CD sync them, instead of the app applying the CRs directly (real BareMetalHost spokes only)."""
         if not self.acm.is_hub(hub) or self.acm._addon(hub).get("state") != "done":
             raise ValueError(f"ACM is not installed on {hub.name}: enable it first")
         if self.svc.to_dict(db, hub)["status"] != "ready":
             raise ValueError(f"Hub {hub.name} is not ready")
         if db.query(Cluster).filter(Cluster.name == name).first() is not None:
             raise ValueError(f"A cluster named {name} already exists")
+        if gitops and host_id is None:
+            raise ValueError("GitOps deployment is only supported for real BareMetalHost spokes")
         if host_id is not None:
-            return self._provision_real_host(db, hub, name, host_id, net or {}, version)
+            return self._provision_real_host(db, hub, name, host_id, net or {}, version, gitops)
         return self._provision_member(db, hub, name, machine, version)
 
     def _provision_member(self, db: Session, hub: Cluster, name: str, machine: str,
@@ -394,7 +398,7 @@ class SpokeService:
     # ---------------------------------------------------------------------- real bare-metal host spoke
 
     def _provision_real_host(self, db: Session, hub: Cluster, name: str, host_id: int,
-                             net: Dict[str, Any], version: Optional[str]) -> Cluster:
+                             net: Dict[str, Any], version: Optional[str], gitops: bool = False) -> Cluster:
         """Spoke on a REAL BareMetalHost (physical server). The hub is bare-metal / groupless (no router):
         the node's api / *.apps resolve through the host DNS resolver, and the real BMC fetches the discovery
         ISO straight from the hub's assisted-image-service (reachable on its routable network)."""
@@ -441,6 +445,7 @@ class SpokeService:
                 "openshift": {"version": version, "topology": "sno", "storage": "none",
                               "provisioner": {"kind": "acm", "hub_id": hub.id, "hub_name": hub.name,
                                               "host_id": host.id, "host_name": host.name}},
+                "gitops": bool(gitops),
                 "spoke_net": {"ip": ip, "prefix": prefix, "gateway": gateway, "dns": dns,
                               "mac": host.boot_mac, "machine_network": machine_net,
                               "root_device": net.get("root_device"),
@@ -516,6 +521,37 @@ class SpokeService:
             if hub_host_ip:
                 self._ensure_hub_spoke_dns(runner, f"{name}.{cluster.domain}", hub_host_ip)
 
+        step(20, "Hub: ClusterDeployment, AgentClusterInstall, InfraEnv, NMStateConfig, BareMetalHost")
+        secrets, manifests = self._spoke_manifests(db, hub, cluster, host)
+        gitops = bool((cluster.spec or {}).get("gitops"))
+        # Namespace + the two Secrets are app-managed prerequisites either way: the pull secret and the BMC
+        # password are never committed to git. Argo CD (gitops) or a direct apply brings up the rest.
+        runner.apply_retry([manifests[0]], "Namespace")
+        for secret in secrets:
+            runner.oc(["delete", "secret", secret["metadata"]["name"], "-n", name, "--ignore-not-found"], 30)
+            out = runner.oc(["create", "-f", "-"], 60, stdin=json.dumps(secret))
+            if out["exitcode"] != 0:
+                raise RuntimeError(f"Secret {secret['metadata']['name']}: {(out['stderr'] or '').strip()[-300:]}")
+        if gitops:
+            from app.services.gitops_service import gitops_service
+            step(22, "GitOps: committing the manifests to git; Argo CD on the hub syncs them")
+            gitops_service.sync_spoke(db, cluster)       # write + push the manifests to the in-lab git server
+            gitops_service.deploy_application(db, hub)    # ensure the Argo CD Application syncs clusters/
+            self._await_gitops_sync(runner, cluster, step)  # wait for Argo to apply the CRs onto the hub
+        else:
+            runner.apply_retry(manifests, "spoke resources", timeout=5 * 60)
+        self._monitor_real(db, task, hub, cluster, host)
+
+    def _spoke_manifests(self, db: Session, hub: Cluster, cluster: Cluster, host: Any):
+        """The real-BMH spoke's provisioning objects, in one place so the direct-apply path and the GitOps
+        repo are byte-for-byte the same. Returns (secrets, manifests): the Secrets (pull secret + BMC
+        credentials, applied by the app, never committed to git) and the rest (Namespace first, then the
+        low-level CRs metal3 + the assisted service act on). Everything here is derived from the cluster spec
+        + the host record, so gitops_service can regenerate it without running the install."""
+        from app.services.baremetal_service import baremetal_service
+        from app.services.openshift_service import openshift_service
+        name, version = cluster.name, cluster.version
+        snet = cluster.spec["spoke_net"]
         ip = snet["ip"]
         node_dns = list(snet["dns"])
         host_ip = None
@@ -524,29 +560,21 @@ class SpokeService:
             host_ip = dns_service.host_ip()
             if host_ip and host_ip not in node_dns:  # the node resolves its own + the hub's names
                 node_dns = [host_ip] + node_dns
-
-        step(20, "Hub: ClusterDeployment, AgentClusterInstall, InfraEnv, NMStateConfig, BareMetalHost")
-        key_dir = openshift_service.cluster_dir(name)
-        ssh_pub = openshift_service.ssh_keypair(key_dir)
+        ssh_pub = openshift_service.ssh_keypair(openshift_service.cluster_dir(name))
         creds = baremetal_service.credentials(host)
         bmc_address = baremetal_service.virtualmedia_address(db, host)
         bmc_secret = f"{host.name}-bmc"
         imageset = f"img{version}-x86-64"
         nmstate = openshift_service.nmstate_static(snet["mac"], ip, snet["prefix"], snet["gateway"], node_dns,
                                                    search=[f"{name}.{cluster.domain}"])
-        runner.apply_retry([{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}}], "Namespace")
-        for secret in (
+        secrets = [
             {"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
              "metadata": {"name": "pull-secret", "namespace": name},
              "stringData": {".dockerconfigjson": openshift_service.pull_secret()}},
             {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
              "metadata": {"name": bmc_secret, "namespace": name},
              "stringData": {"username": creds["username"], "password": creds["password"]}},
-        ):
-            runner.oc(["delete", "secret", secret["metadata"]["name"], "-n", name, "--ignore-not-found"], 30)
-            out = runner.oc(["create", "-f", "-"], 60, stdin=json.dumps(secret))
-            if out["exitcode"] != 0:
-                raise RuntimeError(f"Secret {secret['metadata']['name']}: {(out['stderr'] or '').strip()[-300:]}")
+        ]
         bmh_spec: Dict[str, Any] = {
             "online": True, "bootMACAddress": snet["mac"], "bootMode": "UEFI",
             "automatedCleaningMode": "metadata",  # quick metadata wipe, like the customers' ClusterInstance
@@ -577,7 +605,7 @@ class SpokeService:
                 "data": {"50-vmm-hub-dns.yaml": json.dumps(
                     self._hub_dns_machineconfig(f"{hub.name}.{hub.domain}", host_ip))}})
             aci_spec["manifestsConfigMapRefs"] = [{"name": f"{name}-manifests"}]
-        runner.apply_retry(extra_manifests + [
+        manifests = [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}}] + extra_manifests + [
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterImageSet", "metadata": {"name": imageset},
              "spec": {"releaseImage": f"quay.io/openshift-release-dev/ocp-release:{version}-x86_64"}},
             {"apiVersion": "extensions.hive.openshift.io/v1beta1", "kind": "AgentClusterInstall",
@@ -603,16 +631,53 @@ class SpokeService:
                                           "bmac.agent-install.openshift.io/hostname": cluster.nodes[0].name,
                                           "bmac.agent-install.openshift.io/role": "master"}},
              "spec": bmh_spec},
+            # cloud / vendor are left unset: ACM auto-detects and sets them (so git stays clean of values a
+            # controller owns, and Argo CD never churns them on a GitOps spoke).
             {"apiVersion": "cluster.open-cluster-management.io/v1", "kind": "ManagedCluster",
-             "metadata": {"name": name, "labels": {"cloud": "auto-detect", "vendor": "auto-detect",
-                                                   "vmm-cluster-type": "spoke"}},
+             "metadata": {"name": name, "labels": {"vmm-cluster-type": "spoke"}},
              "spec": {"hubAcceptsClient": True}},
             {"apiVersion": "agent.open-cluster-management.io/v1", "kind": "KlusterletAddonConfig",
              "metadata": {"name": name, "namespace": name},
              "spec": {"applicationManager": {"enabled": True}, "policyController": {"enabled": True},
                       "searchCollector": {"enabled": True}, "certPolicyController": {"enabled": True}}},
-        ], "spoke resources", timeout=5 * 60)
-        self._monitor_real(db, task, hub, cluster, host)
+        ]
+        return secrets, manifests
+
+    def gitops_manifests(self, db: Session, cluster: Cluster) -> List[Dict[str, Any]]:
+        """The non-secret provisioning manifests for a real-BMH spoke, for gitops_service to commit to git
+        (the exact objects the direct-apply path applies, so Argo CD reconciles the same spoke)."""
+        from app.services.baremetal_service import baremetal_service
+        host_id = real_bmh_id(cluster)
+        if host_id is None:
+            raise ValueError("GitOps export is for spokes provisioned on a real BareMetalHost")
+        host = baremetal_service.get_host(db, host_id)
+        if host is None:
+            raise ValueError("The spoke's bare-metal host was deleted")
+        hub = self.hub_of(db, cluster)
+        if hub is None:
+            raise ValueError("The spoke's hub was deleted")
+        _, manifests = self._spoke_manifests(db, hub, cluster, host)
+        return manifests
+
+    def _await_gitops_sync(self, runner: Any, cluster: Cluster, step: Any, timeout: int = 10 * 60) -> None:
+        """Wait for Argo CD to apply the spoke's CRs onto the hub (the AgentClusterInstall appears), so the
+        install then proceeds exactly like the direct-apply path (_monitor_real)."""
+        deadline = time.monotonic() + timeout
+        last = ""
+        while True:
+            aci = self._get(runner, ["get", "agentclusterinstall", cluster.name, "-n", cluster.name])
+            if aci.get("metadata"):
+                step(30, "Argo CD synced the spoke manifests onto the hub", "booting")
+                return
+            msg = "Waiting for Argo CD to sync the spoke manifests from git"
+            if msg != last:
+                step(25, msg, "preparing")
+                last = msg
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Argo CD did not sync the spoke manifests within {timeout // 60} min. Check the "
+                                   "Argo CD Application (hub ACM tab -> Deploy from git) and that the controller "
+                                   "can reach the in-lab git server.")
+            time.sleep(15)
 
     def _monitor_real(self, db: Session, task: Task, hub: Cluster, cluster: Cluster, host: Any) -> None:
         """Follow a real-BMH spoke's install on the hub to completion (discovery -> install -> kubeconfig ->
@@ -787,7 +852,6 @@ class SpokeService:
         app applies the low-level CRs directly (this hub has only the CRD, not the operator/templates), but this
         is the same spoke expressed the way their fleet is defined. The BMC password is NOT embedded (the Secret
         stub carries the username and a placeholder; fill it in git / sealed-secrets)."""
-        import yaml
         from app.services.baremetal_service import baremetal_service
         from app.services.openshift_service import openshift_service
         host_id = real_bmh_id(cluster)
@@ -798,18 +862,62 @@ class SpokeService:
             raise ValueError("The spoke's bare-metal host was deleted")
         snet = (cluster.spec or {}).get("spoke_net") or {}
         name = cluster.name
-        version = cluster.version
         ssh_pub = openshift_service.ssh_keypair(openshift_service.cluster_dir(name))
+        node_name = cluster.nodes[0].name if cluster.nodes else f"{name}-ctlplane-0"
+        return self._render_siteconfig(db, host, name, cluster.domain, cluster.version, snet, node_name, ssh_pub)
+
+    def siteconfig_preview(self, db: Session, hub: Cluster, host_id: int, net: Dict[str, Any],
+                           name: Optional[str] = None, version: Optional[str] = None) -> str:
+        """The SiteConfig `ClusterInstance` that WOULD be generated for a spoke on `host_id` with `net` params —
+        a reference view for the spoke-create form, rendered from the real host + the parameters the user is
+        typing (not a static blob), without creating anything. Missing fields are shown as placeholders; the SSH
+        key is a placeholder (the real per-cluster key is made at provision time)."""
+        import ipaddress
+        from app.services.baremetal_service import baremetal_service
+        host = baremetal_service.get_host(db, host_id)
+        if host is None:
+            raise ValueError(f"Bare-metal host {host_id} not found")
+        name = (name or "").strip() or "spoke1"
+        version = version or hub.version
+        ip = (net.get("ip") or "").strip()
+        gateway = (net.get("gateway") or "").strip()
+        prefix = int(net.get("prefix") or 24)
+        dns = [d.strip() for d in (net.get("dns") or []) if d.strip()]
+        try:
+            machine_net = str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False)) if ip else f"<node network>/{prefix}"
+        except ValueError:
+            machine_net = f"<node network>/{prefix}"
+        snet = {"mac": host.boot_mac or "<host boot MAC: set it on the Bare-metal hosts page>",
+                "ip": ip or "<node IP>", "prefix": prefix, "gateway": gateway or "<gateway>",
+                "dns": dns or ["<dns>"], "machine_network": machine_net,
+                "root_device": net.get("root_device"),
+                "ntp": list(net.get("ntp") or []) or self.installer._host_ntp_servers()}
+        node_name = f"{name}-ctlplane-0"
+        ssh_pub = "ssh-ed25519 AAAA...  # the per-cluster key is generated when the spoke is provisioned"
+        return self._render_siteconfig(db, host, name, hub.domain, version, snet, node_name, ssh_pub, preview=True)
+
+    def _render_siteconfig(self, db: Session, host: Any, name: str, domain: str, version: str,
+                           snet: Dict[str, Any], node_name: str, ssh_pub: str, preview: bool = False) -> str:
+        """Build the SiteConfig `ClusterInstance` (+ BMC Secret stub) YAML for a real-BMH spoke, from the host
+        record + the static-network params. One place for both the live export (siteconfig_manifest) and the
+        create-form reference view (siteconfig_preview)."""
+        import yaml
+        from app.services.baremetal_service import baremetal_service
+        from app.services.openshift_service import openshift_service
         nmstate = openshift_service.nmstate_static(snet["mac"], snet["ip"], snet["prefix"], snet["gateway"],
                                                    list(snet.get("dns") or []),
-                                                   search=[f"{name}.{cluster.domain}"])
+                                                   search=[f"{name}.{domain}"])
         bmc_secret = f"{host.name}-bmc"
+        try:
+            bmc_address = baremetal_service.virtualmedia_address(db, host)
+        except Exception:
+            bmc_address = f"idrac-virtualmedia://<bmc>/redfish/v1/Systems/System.Embedded.1"
         cluster_instance = {
             "apiVersion": "siteconfig.open-cluster-management.io/v1alpha1", "kind": "ClusterInstance",
             "metadata": {"name": name, "namespace": name,
                          "annotations": {"siteconfig.open-cluster-management.io/sync-wave": "1"}},
             "spec": {
-                "clusterName": name, "baseDomain": cluster.domain,
+                "clusterName": name, "baseDomain": domain,
                 "clusterImageSetNameRef": f"img{version}-x86-64",
                 "pullSecretRef": {"name": "pull-secret"}, "sshPublicKey": ssh_pub,
                 "holdInstallation": False,
@@ -823,9 +931,9 @@ class SpokeService:
                     {"capabilities": {"baselineCapabilitySet": "None",
                                       "additionalEnabledCapabilities": ["OperatorLifecycleManager", "Ingress"]}}),
                 "nodes": [{
-                    "hostName": cluster.nodes[0].name if cluster.nodes else f"{name}-ctlplane-0",
+                    "hostName": node_name,
                     "role": "master",
-                    "bmcAddress": baremetal_service.virtualmedia_address(db, host),
+                    "bmcAddress": bmc_address,
                     "bmcCredentialsName": {"name": bmc_secret},
                     "bootMACAddress": snet.get("mac"), "bootMode": "UEFI",
                     "automatedCleaningMode": "metadata",
@@ -842,10 +950,15 @@ class SpokeService:
             "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
             "metadata": {"name": bmc_secret, "namespace": name},
             "stringData": {"username": host.bmc_username, "password": "<BMC_PASSWORD>"}}
-        header = ("# ACM SiteConfig ClusterInstance for spoke "
-                  f"'{name}' (commit to git for Argo CD / the SiteConfig operator).\n"
-                  "# The vm-manager app applies the expanded CRs directly; this is the GitOps form.\n"
-                  "# Create the pull-secret Secret and fill the BMC password before applying.\n")
+        header = (("# REFERENCE — the ACM SiteConfig ClusterInstance that would define spoke "
+                   f"'{name}' on host '{host.name}'.\n"
+                   "# This is how a real ZTP fleet describes a cluster; the SSH key / some fields are filled in\n"
+                   "# when you provision. The vm-manager app applies the expanded low-level CRs directly.\n"
+                   if preview else
+                   "# ACM SiteConfig ClusterInstance for spoke "
+                   f"'{name}' (commit to git for Argo CD / the SiteConfig operator).\n"
+                   "# The vm-manager app applies the expanded CRs directly; this is the GitOps form.\n"
+                   "# Create the pull-secret Secret and fill the BMC password before applying.\n"))
         return header + "---\n".join(yaml.safe_dump(doc, sort_keys=False) for doc in (cluster_instance, bmc_stub))
 
     def write_kubeconfig(self, db: Session, hub: Cluster, cluster: Cluster) -> str:

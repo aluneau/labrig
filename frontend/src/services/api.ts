@@ -6,7 +6,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmGitops, BmcStatus,
+  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmGitops, AcmGitCredentials, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -263,13 +263,30 @@ export const clusterApi = {
   /** The hub provisions a spoke on an emulated-BMC member: returns the new cluster (its own page, kubeconfig, delete) */
   acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
-  /** The hub provisions a spoke on a REAL BareMetalHost with its static network */
-  acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, version?: string | null) =>
-    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, version: version || null }),
+  /** The hub provisions a spoke on a REAL BareMetalHost with its static network. gitops = deploy via Argo CD. */
+  acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, gitops = false, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, gitops, version: version || null }),
   /** The GitOps artifact for a real bare-metal spoke: its SiteConfig ClusterInstance manifest (for git / Argo CD) */
   acmSiteconfig: (spokeId: number) => request<{ manifest: string }>(`/clusters/${spokeId}/acm/siteconfig`),
+  /** Reference view for the spoke-create form: the SiteConfig ClusterInstance that WOULD be generated (nothing created) */
+  acmSiteconfigPreview: (hubId: number, p: { host_id: number; ip?: string; prefix?: number; gateway?: string; dns?: string; name?: string }) => {
+    const q = new URLSearchParams();
+    q.set('host_id', String(p.host_id));
+    if (p.ip) q.set('ip', p.ip);
+    if (p.prefix != null) q.set('prefix', String(p.prefix));
+    if (p.gateway) q.set('gateway', p.gateway);
+    if (p.dns) q.set('dns', p.dns);
+    if (p.name) q.set('name', p.name);
+    return request<{ manifest: string }>(`/clusters/${hubId}/acm/siteconfig/preview?${q.toString()}`);
+  },
   /** The hub's GitOps repo of spoke manifests (source of truth for deploying clusters from git) */
   acmGitops: (hubId: number) => request<AcmGitops>(`/clusters/${hubId}/acm/gitops`),
+  /** Close the loop: push the manifests to the in-lab git server and apply the Argo CD Application */
+  acmGitopsDeploy: (hubId: number) => post<AcmGitops>(`/clusters/${hubId}/acm/gitops/deploy`),
+  /** The in-lab Gitea admin login (secret read): username + password + web URLs, to open the git server */
+  acmGitCredentials: (hubId: number) => request<AcmGitCredentials>(`/clusters/${hubId}/acm/gitops/git-credentials`),
+  /** Rotate the in-lab Gitea admin password; returns the new credentials */
+  acmGitResetCredentials: (hubId: number) => post<AcmGitCredentials>(`/clusters/${hubId}/acm/gitops/git-credentials`, {}),
 };
 
 export const openshiftApi = {
