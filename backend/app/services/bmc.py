@@ -368,6 +368,7 @@ class RedfishBMC:
     def set_dns_servers(self, servers: List[str]) -> None:
         """Set the BMC's own nameservers (so it can resolve the image-service route to fetch virtual media).
         Dell iDRAC only; other BMCs raise BMCError (the caller treats it as best effort)."""
+        self._discover()
         servers = [s for s in servers if s][:2] or ["0.0.0.0"]
         if self._dell_attributes() is None:
             raise BMCError("setting the BMC's DNS is only supported on Dell iDRAC for now")
