@@ -328,9 +328,12 @@ class AcmService:
         ready = self.svc.to_dict(db, hub)["status"] == "ready"
         if not enabled:
             spec = hub.spec or {}
-            counts = {"masters": int(spec.get("ctlplanes") or 1), "workers": int(spec.get("workers") or 0)}
-            result["sizing"] = sizing_problem(((spec.get("openshift") or {}).get("topology")) or "sno", counts,
-                                              {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
+            # Bare-metal nodes report nominal spec sizes, not the physical host's real capacity: skip the
+            # static size gate (the enable action checks the node's live allocatable headroom instead).
+            if not spec.get("bare_metal"):
+                counts = {"masters": int(spec.get("ctlplanes") or 1), "workers": int(spec.get("workers") or 0)}
+                result["sizing"] = sizing_problem(((spec.get("openshift") or {}).get("topology")) or "sno", counts,
+                                                  {"ctlplane": spec.get("ctlplane") or {}, "worker": spec.get("worker") or {}})
             return result
         entries = {e["name"]: e for e in self._entries(hub)}
         live: Dict[str, Dict[str, Any]] = {}
