@@ -105,6 +105,21 @@ login, kubeconfig or VPN. `args` is the command line after `oc` (shell quoting),
   with how to copy the image in (group Registry tab / `POST /groups/{id}/registry/images`) instead of a pod stuck in
   `ImagePullBackOff`.
 
+## OpenShift storage and built-in add-ons
+
+LVMS, ODF, SR-IOV, MetalLB and ACM are **options of the app**, not plain operators: the app installs the operator
+*and* what it needs around it (extra disk with serial `vmm-storage` per storage node, LocalVolumeSet, StorageCluster,
+default StorageClass, pools...). The tool descriptions and the server instructions say so; a request that lists
+`odf-operator` (or `lvms-operator`, `metallb-operator`, ...) as a plain operator is refused in plain words with the
+option to use instead, at create (`openshift.operators`) and day 2 (`kind: operator`).
+
+- *"Create an OpenShift cluster with ODF"* → `create_cluster {"name": "ocp", "type": "openshift", "openshift":
+  {"topology": "compact", "storage": "odf"}}` (ODF needs 3 nodes: `compact`, or `ha` with 3+ workers; SNO is refused
+  with that advice). Leave `ctlplane` / `worker` out: the defaults include ODF's overhead (`odf_profile` lab: +6 GiB,
+  +2 vCPU per storage node); explicit sizes below it are refused.
+- *"Add ODF to cluster ocp"* → `install_cluster_addon(cluster="ocp", kind="odf")`: hot-plugs the storage disks the
+  nodes lack, then the same setup as at create.
+
 ## ACM (Advanced Cluster Management)
 
 No dedicated tools: `api_request` drives the ACM endpoints (docs/openshift.md "ACM hub"), `oc` / `kubectl` look

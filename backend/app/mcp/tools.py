@@ -567,6 +567,12 @@ async def create_cluster(ctx: Ctx, spec: Dict[str, Any]) -> Any:
     - OpenShift SNO with LVMS and an operator: {"name": "sno", "type": "openshift", "openshift":
       {"topology": "sno", "storage": "lvms", "operators": [{"name": "kubernetes-nmstate-operator"}]}}
       (needs the pull secret: GET/PUT /openshift/pull-secret; versions: GET /openshift/versions)
+    - OpenShift with ODF (Ceph, needs 3 nodes): {"name": "ocp", "type": "openshift", "openshift":
+      {"topology": "compact", "storage": "odf"}} (or "topology": "ha", "workers": 3); leave ctlplane / worker
+      out: the defaults include the ODF overhead (~26 GiB RAM per compact master)
+    - storage (lvms / odf), SR-IOV, MetalLB and ACM are built-in options (the app installs AND configures them:
+      disks, StorageCluster, pools...): never list their operators (odf-operator, lvms-operator...) in
+      "operators", nor install them by hand with oc. On an existing cluster: install_cluster_addon(kind='odf').
     - disconnected: kubeadm "disconnected": true; OpenShift "openshift": {"disconnected": true}
     kubeadm / OpenShift go into a lab group: "group_id" of an existing one, else one is created.
 
@@ -789,12 +795,18 @@ async def kubeadm_files(ctx: Ctx, cluster: Ref,
 
 @tool
 async def install_cluster_addon(ctx: Ctx, cluster: Ref,
-                                kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo"],
+                                kind: Literal["operator", "lvms", "odf", "sriov", "metallb", "metallb-demo", "acm",
+                                              "gitops"],
                                 operator: Optional[str] = None, channel: Optional[str] = None,
                                 source: Optional[str] = None, namespace: Optional[str] = None,
                                 options: Optional[Dict[str, Any]] = None) -> Any:
     """Day-2 add-on on an installed OpenShift cluster (task): an OLM operator (Namespace + OperatorGroup +
-    Subscription, and its CR when the app knows it), LVMS / ODF storage, SR-IOV operator, MetalLB (+ demo).
+    Subscription, and its CR when the app knows it), LVMS / ODF storage, SR-IOV operator, MetalLB (+ demo),
+    ACM hub, OpenShift GitOps. kind='odf' / 'lvms' is the complete storage setup: it hot-plugs the extra disk
+    (serial vmm-storage) into the storage nodes, installs the operators (LSO + ODF), creates the StorageCluster /
+    LVMCluster and the default StorageClass; ODF needs 3 nodes. Never use kind='operator' for odf-operator,
+    lvms-operator, metallb-operator, sriov-network-operator or advanced-cluster-management (refused: they have
+    their own kind). To get storage at install time, use create_cluster's openshift.storage instead.
     Find package names with search_operators. Disconnected clusters mirror the operator first.
     kubeadm MetalLB: api_request PUT /clusters/{id}/metallb.
 
@@ -822,6 +834,9 @@ async def install_cluster_addon(ctx: Ctx, cluster: Ref,
 async def search_operators(ctx: Ctx, query: str = "", cluster: Optional[Ref] = None) -> Any:
     """Find OLM operators. With a cluster: its live catalogs (package, channels, source); without: the
     curated list offered at OpenShift install time. Also returns the operators already installed.
+    Curated entries with `managed_by` (storage:lvms, storage:odf, sriov, metallb, acm) are built-in options:
+    request them with create_cluster's openshift.storage / sriov / metallb / acm, or install_cluster_addon's
+    matching kind, not as plain operators.
 
     Args:
         query: substring of the package / display name, e.g. 'nmstate', 'cert-manager'
