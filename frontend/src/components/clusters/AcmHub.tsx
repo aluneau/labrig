@@ -39,6 +39,12 @@ import { ConfirmModal } from '../common/ConfirmModal';
 
 const muted: React.CSSProperties = { fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' };
 
+/** A form input with a small visible caption above it: placeholders vanish once a field is filled, and the
+ *  spoke network rows are all bare IPs (gateway / DNS / VIPs look alike without a label). */
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <FlexItem><div style={{ ...muted, marginBottom: 2 }}>{label}</div>{children}</FlexItem>
+);
+
 const STATE_COLORS: Record<string, LabelProps['color']> = {
   available: 'green', importing: 'blue', detaching: 'blue', unavailable: 'orange', error: 'red', unknown: 'grey',
   done: 'green', installing: 'blue', pending: 'blue', Running: 'green', Installing: 'blue', Pending: 'blue',
@@ -328,6 +334,15 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                 const notEnoughHosts = !isSno && acm.spoke_hosts.length < roles.length;
                 const canProvision = nameOk && hubUp && ready && !busy
                   && (isSno ? (!!spokeMachine && snoNetOk) : multiOk);
+                // What still blocks Provision, in plain words (shown once the user started filling the form)
+                const missing: string[] = [];
+                if (!nameOk) missing.push('a cluster name (lowercase letters, digits, -)');
+                if (isSno && !spokeMachine) missing.push('a spoke machine');
+                if (isSno && isHost && !validIp(spokeIp)) missing.push('a valid node IP');
+                if (!isSno && !rowsOk) missing.push('a different host and a valid IP on every row');
+                if ((isHost || !isSno) && !sharedNetOk) missing.push('a gateway, a prefix (1-32) and DNS server IPs');
+                if (!isSno && !vipOk) missing.push('two different free VIPs that are not node IPs');
+                const started = !!(spokeName || spokeMachine || spokeRows.some((r) => r.sel || r.ip));
                 const reset = () => {
                   setSpokeName(''); setSpokeMachine(''); setSpokeIp(''); setSpokeGateway(''); setSpokeDns('');
                   setSpokeGitops(false); setGwTouched(false); setSpokeTopology('sno');
@@ -391,22 +406,25 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                           <Button id="acm-spoke-create" isDisabled={!canProvision} onClick={provision}>Provision</Button>
                         </FlexItem>
                       </Flex>
+                      {started && hubUp && ready && missing.length > 0 && (
+                        <div id="acm-spoke-missing" style={{ ...muted, marginTop: 6 }}>Still needed: {missing.join('; ')}.</div>
+                      )}
                     </StackItem>
                     {isSno && isHost && (
                       <StackItem>
-                        <Flex alignItems={{ default: 'alignItemsCenter' }}>
-                          <FlexItem><TextInput id="acm-spoke-ip" aria-label="Node IP" placeholder="node IP, e.g. 10.6.117.11"
+                        <Flex alignItems={{ default: 'alignItemsFlexEnd' }}>
+                          <Field label="Node IP"><TextInput id="acm-spoke-ip" aria-label="Node IP" placeholder="node IP, e.g. 10.6.117.11"
                             value={spokeIp} onChange={(_e, v) => {
                               setSpokeIp(v);
                               const m = v.trim().match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
                               if (m && !gwTouched) setSpokeGateway(`${m[1]}.254`); // sensible default: .254 of the node's /24
-                            }} style={{ width: 200 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
-                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
-                            value={spokeGateway} onChange={(_e, v) => { setSpokeGateway(v); setGwTouched(true); }} style={{ width: 200 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
-                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 220 }} /></FlexItem>
+                            }} style={{ width: 200 }} /></Field>
+                          <Field label="Prefix"><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
+                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></Field>
+                          <Field label="Gateway"><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
+                            value={spokeGateway} onChange={(_e, v) => { setSpokeGateway(v); setGwTouched(true); }} style={{ width: 200 }} /></Field>
+                          <Field label="DNS servers"><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
+                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 220 }} /></Field>
                         </Flex>
                         <div style={{ ...muted, marginTop: 8 }}>
                           Good defaults are applied: gateway <code>.254</code> of the node&apos;s network (edit if yours differs),
@@ -454,21 +472,21 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                               style={{ width: 180 }} /></FlexItem>
                           </Flex>
                         ))}
-                        <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginTop: 6 }}>
-                          <FlexItem><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
-                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
-                            value={spokeGateway} onChange={(_e, v) => { setSpokeGateway(v); setGwTouched(true); }} style={{ width: 200 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
-                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 200 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-ntp" aria-label="NTP servers" placeholder="NTP (optional)"
-                            value={spokeNtp} onChange={(_e, v) => setSpokeNtp(v)} style={{ width: 160 }} /></FlexItem>
+                        <Flex alignItems={{ default: 'alignItemsFlexEnd' }} style={{ marginTop: 6 }}>
+                          <Field label="Prefix"><TextInput id="acm-spoke-prefix" aria-label="Prefix" placeholder="prefix" type="number"
+                            value={spokePrefix} onChange={(_e, v) => setSpokePrefix(v)} style={{ width: 90 }} /></Field>
+                          <Field label="Gateway"><TextInput id="acm-spoke-gw" aria-label="Gateway" placeholder="gateway, e.g. 10.6.117.254"
+                            value={spokeGateway} onChange={(_e, v) => { setSpokeGateway(v); setGwTouched(true); }} style={{ width: 200 }} /></Field>
+                          <Field label="DNS servers"><TextInput id="acm-spoke-dns" aria-label="DNS servers" placeholder="DNS (comma-separated)"
+                            value={spokeDns} onChange={(_e, v) => setSpokeDns(v)} style={{ width: 200 }} /></Field>
+                          <Field label="NTP servers"><TextInput id="acm-spoke-ntp" aria-label="NTP servers" placeholder="NTP (optional)"
+                            value={spokeNtp} onChange={(_e, v) => setSpokeNtp(v)} style={{ width: 160 }} /></Field>
                         </Flex>
-                        <Flex alignItems={{ default: 'alignItemsCenter' }} style={{ marginTop: 6 }}>
-                          <FlexItem><TextInput id="acm-spoke-api-vip" aria-label="API VIP" placeholder="API VIP (free IP)"
-                            value={spokeApiVip} onChange={(_e, v) => setSpokeApiVip(v)} style={{ width: 200 }} /></FlexItem>
-                          <FlexItem><TextInput id="acm-spoke-ingress-vip" aria-label="Ingress VIP" placeholder="Ingress VIP (free IP)"
-                            value={spokeIngressVip} onChange={(_e, v) => setSpokeIngressVip(v)} style={{ width: 200 }} /></FlexItem>
+                        <Flex alignItems={{ default: 'alignItemsFlexEnd' }} style={{ marginTop: 6 }}>
+                          <Field label="API VIP"><TextInput id="acm-spoke-api-vip" aria-label="API VIP" placeholder="API VIP (free IP)"
+                            value={spokeApiVip} onChange={(_e, v) => setSpokeApiVip(v)} style={{ width: 200 }} /></Field>
+                          <Field label="Ingress VIP"><TextInput id="acm-spoke-ingress-vip" aria-label="Ingress VIP" placeholder="Ingress VIP (free IP)"
+                            value={spokeIngressVip} onChange={(_e, v) => setSpokeIngressVip(v)} style={{ width: 200 }} /></Field>
                         </Flex>
                         <div style={{ ...muted, marginTop: 8 }}>
                           The two VIPs are free addresses on the machine network (keepalived moves them across the control

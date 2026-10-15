@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Alert, Button, Card, CardBody, CardTitle, ClipboardCopy, DescriptionList, DescriptionListDescription,
-  DescriptionListGroup, DescriptionListTerm, Spinner, TextInput,
+  DescriptionListGroup, DescriptionListTerm, Flex, FlexItem, Spinner, TextInput,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { TrashIcon } from '@patternfly/react-icons';
@@ -119,39 +119,40 @@ export const DnsCard: React.FC = () => {
                 They resolve for anyone pointing their DNS at the host.
               </p>
               {formError && <Alert variant="danger" isInline isPlain title={formError} className="pf-v5-u-mb-sm" />}
-              <Table aria-label="Custom DNS records" variant="compact" borders={false}>
+              {dns.records.length > 0 && <Table aria-label="Custom DNS records" variant="compact" borders={false}>
                 <Thead><Tr><Th>Name</Th><Th>Type</Th><Th>Value</Th><Th screenReaderText="Actions" /></Tr></Thead>
                 <Tbody>
                   {dns.records.map((r) => (
                     <Tr key={r.name}>
-                      <Td><code>{r.name}</code></Td>
-                      <Td>{r.type}</Td>
-                      <Td>{r.ip || r.cname}</Td>
+                      <Td dataLabel="Name"><code>{r.name}</code></Td>
+                      <Td dataLabel="Type">{r.type}</Td>
+                      <Td dataLabel="Value">{r.ip || r.cname}</Td>
                       <Td isActionCell>
                         <Button variant="plain" aria-label={`Remove ${r.name}`} isDisabled={busy}
                           onClick={() => remove(r.name)}><TrashIcon /></Button>
                       </Td>
                     </Tr>
                   ))}
-                  <Tr>
-                    <Td>
-                      <TextInput aria-label="Record name" value={name} placeholder="registry.lab"
-                        onChange={(_e, v) => setName(v)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
-                    </Td>
-                    <Td />
-                    <Td>
-                      <TextInput aria-label="Record value" value={value} placeholder="10.6.117.50 or a name"
-                        onChange={(_e, v) => setValue(v)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
-                    </Td>
-                    <Td isActionCell>
-                      <Button variant="secondary" size="sm" isDisabled={busy || !name.trim() || !value.trim()}
-                        onClick={add}>Add</Button>
-                    </Td>
-                  </Tr>
                 </Tbody>
-              </Table>
+              </Table>}
+              {/* The add form sits under the table, not in a row of it: in the narrow-screen card layout that row
+                  squeezed the name input to a few characters */}
+              <Flex className="pf-v5-u-mt-sm" alignItems={{ default: 'alignItemsCenter' }}>
+                <FlexItem grow={{ default: 'grow' }} style={{ minWidth: 180 }}>
+                  <TextInput aria-label="Record name" value={name} placeholder="name, e.g. registry.lab"
+                    onChange={(_e, v) => setName(v)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
+                </FlexItem>
+                <FlexItem grow={{ default: 'grow' }} style={{ minWidth: 180 }}>
+                  <TextInput aria-label="Record value" value={value} placeholder="10.6.117.50 or a name"
+                    onChange={(_e, v) => setValue(v)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') add(); }} />
+                </FlexItem>
+                <FlexItem>
+                  <Button variant="secondary" isDisabled={busy || !name.trim() || !value.trim()}
+                    onClick={add}>Add</Button>
+                </FlexItem>
+              </Flex>
             </div>
           </>
         )}
