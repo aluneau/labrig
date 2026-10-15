@@ -105,6 +105,15 @@ async function protocol() {
   check(ov.libvirt && Array.isArray(ov.vms), 'overview');
   const d = await ok('api_describe', { path_contains: '/vms/{vm_id}/disks', method: 'POST' });
   check(d.length === 1 && d[0].models && d[0].models.VMDiskCreate, 'api_describe returns the body schema + models');
+  // ODF is a built-in option, not an operator: guidance in the tool text, refusals that never start an install
+  const tl = (await rpc('tools/list', {})).result.tools;
+  check(/storage": "odf"/.test(tl.find((t) => t.name === 'create_cluster').description), 'create_cluster shows the ODF option');
+  const noPs = /pull secret/i;
+  let o = await call('create_cluster', { spec: { name: 'e2e-odf', type: 'openshift', openshift: { storage: 'odf' } } });
+  check(o.isError && (/topology.*compact/.test(o.text) || noPs.test(o.text)), `SNO + ODF refused with the fix: ${o.text.slice(0, 160)}`);
+  o = await call('create_cluster', { spec: { name: 'e2e-odf', type: 'openshift',
+    openshift: { topology: 'compact', operators: [{ name: 'odf-operator' }] } } });
+  check(o.isError && (/storage": "odf"/.test(o.text) || noPs.test(o.text)), `odf-operator as a plain operator refused: ${o.text.slice(0, 160)}`);
   const imgs = await ok('list_cloud_images');
   check(Array.isArray(imgs.images), 'list_cloud_images');
   for (const t of ['list_networks', 'list_groups', 'list_clusters', 'list_templates']) await ok(t);

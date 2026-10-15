@@ -97,6 +97,37 @@ CATALOG: List[Dict[str, Any]] = [
 CATALOG_INDEXES = {"redhat-operators": "redhat-operator-index", "certified-operators": "certified-operator-index",
                    "community-operators": "community-operator-index", "redhat-marketplace": "redhat-marketplace-index"}
 CATALOG_CACHE_TTL = 7 * 24 * 3600
+# Operators the app installs AND configures through an option (CR, disks, pools...): listing them as plain
+# operators would install a bare, unconfigured operator (day 2) or be skipped (create). managed_by ->
+# (create option, day-2 add-on kind)
+MANAGED_OPTIONS = {
+    "storage:lvms": ('"openshift": {"storage": "lvms"}', "lvms"),
+    "storage:odf": ('"openshift": {"storage": "odf", "topology": "compact"} (3+ nodes: compact or ha)', "odf"),
+    "sriov": ('"openshift": {"sriov": {"enabled": true}}', "sriov"),
+    "metallb": ('"openshift": {"metallb": {"enabled": true}}', "metallb"),
+    "acm": ('"openshift": {"acm": true}', "acm"),
+}
+
+
+def managed_by(package: str) -> Optional[str]:
+    """The option that installs this package (CATALOG managed_by), None for a plain OLM operator"""
+    if package == "multicluster-engine":  # pulled in by ACM's MultiClusterHub operator
+        return "acm"
+    return next((e.get("managed_by") for e in CATALOG if e["name"] == package), None)
+
+
+def managed_operator_error(package: str, day2: bool) -> Optional[str]:
+    """Plain-words refusal for a managed operator requested as a plain operator"""
+    owner = managed_by(package)
+    if owner is None:
+        return None
+    option, kind = MANAGED_OPTIONS[owner]
+    how = f'the add-on kind "{kind}" instead (POST /clusters/{{id}}/openshift/addons {{"kind": "{kind}"}})' if day2 \
+        else f"{option} in the cluster spec instead of listing it in operators"
+    return (f"{package} is installed and configured by vm-manager itself (operator, custom resources"
+            f"{', storage disks' if owner.startswith('storage') else ''}): use {how}")
+
+
 CATALOG_TIMEOUT = 20 * 60
 # Subscriptions an operator creates itself at run time (not declared in its bundle): mirrored with it
 # (ACM's MultiClusterHub operator subscribes to multicluster-engine itself)

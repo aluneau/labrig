@@ -25,7 +25,10 @@ INSTRUCTIONS = (
     "DNS/DHCP/NAT, WireGuard, BGP, mirror registry), k3s / kubeadm / OpenShift clusters, customer-case templates. "
     "Start with `overview`. Resources accept a name or an id. Long operations return a task: follow them with "
     "wait_for_task / wait_for_cluster. For anything without a dedicated tool, api_describe then api_request "
-    "(the same REST API as the web UI and the OpenTofu provider). Deleting things is irreversible: confirm first."
+    "(the same REST API as the web UI and the OpenTofu provider). OpenShift storage (LVMS / ODF), SR-IOV, MetalLB "
+    "and ACM are built-in: create_cluster's openshift options or install_cluster_addon's kind, which also add the "
+    "disks / custom resources they need; don't install those operators by hand. Deleting things is irreversible: "
+    "confirm first."
 )
 
 

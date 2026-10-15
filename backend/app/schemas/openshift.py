@@ -51,12 +51,21 @@ class MetalLBOptions(BaseModel):
 class OpenShiftOptions(BaseModel):
     version: Optional[str] = Field(None, pattern=OCP_VERSION)  # None = latest of the channel
     channel: str = Field("stable-4.20", pattern=OCP_CHANNEL)
-    topology: Literal["sno", "compact", "ha"] = "sno"
-    storage: Literal["none", "lvms", "odf"] = "none"
-    storage_disk_size: int = Field(100, ge=20, le=2048)  # GiB, extra disk per storage node (LVMS / ODF)
-    # ODF footprint: "lab" = small Ceph requests/limits, no object storage (NooBaa, RGW); "lean" = Red Hat sizing
-    odf_profile: Literal["lab", "lean"] = "lab"
-    operators: List[OperatorRequest] = []
+    topology: Literal["sno", "compact", "ha"] = Field("sno", description=(
+        "sno = 1 node; compact = 3 masters that also run workloads (and ODF); ha = 3 masters + `workers` workers"))
+    storage: Literal["none", "lvms", "odf"] = Field("none", description=(
+        "Storage installed AND configured by the app (operator, an extra disk per storage node, StorageCluster / "
+        "LVMCluster, default StorageClass). lvms = node-local, any topology; odf = OpenShift Data Foundation (Ceph), "
+        "needs 3 nodes: topology compact (on the masters) or ha with 3+ workers (on the workers); node sizes get "
+        "the ODF overhead added when ctlplane / worker are left out. Don't list lvms-operator / odf-operator / "
+        "local-storage-operator in operators"))
+    storage_disk_size: int = Field(100, ge=20, le=2048, description="GiB, extra disk per storage node (LVMS / ODF)")
+    odf_profile: Literal["lab", "lean"] = Field("lab", description=(
+        "ODF footprint: lab = small Ceph requests/limits, no object storage (NooBaa, RGW), +6 GiB / +2 vCPU per "
+        "storage node; lean = Red Hat sizing, +24 GiB / +8 vCPU"))
+    operators: List[OperatorRequest] = Field([], description=(
+        "Plain OLM operators (search_operators). Storage, SR-IOV, MetalLB and ACM are options of their own "
+        "(storage / sriov / metallb / acm), not operators"))
     sriov: SriovOptions = SriovOptions()
     metallb: MetalLBOptions = MetalLBOptions()
     # Red Hat Advanced Cluster Management hub (docs/openshift.md "ACM hub"): the ACM operator (it installs the
