@@ -91,8 +91,39 @@ class _Allowed:
             return self.ids
 
 
-def main():
-    config = _load(sys.argv[1])
+def _guard(app, allowed_ids):
+    """sushy-tools checks instance_denied on /Systems/<identity> routes only: its VirtualMedia blueprint
+    (/Systems/<identity>/VirtualMedia/..., InsertMedia redefines the domain) and /Managers/<identity> (id = the
+    domain UUID) have no check, so any VM of the host could be reached with the group's BMC credentials. Deny
+    every route that names a VM outside the allow list, and drop them from the Managers collection."""
+    import flask
+    from sushy_tools import error as sushy_error
+
+    @app.before_request
+    def _deny_other_instances():
+        identity = (flask.request.view_args or {}).get("identity")
+        path = flask.request.path
+        if identity is not None and path.startswith(("/redfish/v1/Systems/", "/redfish/v1/Managers/")) \
+                and identity not in allowed_ids():
+            raise sushy_error.NotFound()
+
+    @app.after_request
+    def _filter_managers(response):
+        if flask.request.path.rstrip("/") == "/redfish/v1/Managers" and response.status_code == 200:
+            try:
+                data = json.loads(response.get_data(as_text=True))
+                ids = allowed_ids()
+                data["Members"] = [m for m in data.get("Members") or []
+                                   if m.get("@odata.id", "").rstrip("/").rsplit("/", 1)[-1] in ids]
+                data["Members@odata.count"] = len(data["Members"])
+                response.set_data(json.dumps(data))
+            except (ValueError, AttributeError):
+                pass
+        return response
+
+
+def build_app(config):
+    """The configured sushy-tools Flask app (not running), restricted to the allow list"""
     _patch_resolver(config.get("hosts") or {}, config.get("redirects") or {}, config.get("redirect_ports") or [])
     from sushy_tools.emulator import api_utils
     from sushy_tools.emulator import main as emulator
@@ -113,6 +144,7 @@ def main():
         api_utils.error.NotFound = sushy_error.NotFound
 
     app = emulator.app
+    _guard(app, allowed.get)
     app.config.update({
         "SUSHY_EMULATOR_LISTEN_IP": config["listen"],
         "SUSHY_EMULATOR_LISTEN_PORT": int(config["port"]),
@@ -123,6 +155,12 @@ def main():
         "SUSHY_EMULATOR_IGNORE_BOOT_DEVICE": False,
         "SUSHY_EMULATOR_STORAGE_POOL": config.get("storage_pool") or "default",
     })
+    return app, emulator
+
+
+def main():
+    config = _load(sys.argv[1])
+    _, emulator = build_app(config)
     argv = ["sushy-emulator", "--interface", config["listen"], "--port", str(config["port"]),
             "--libvirt-uri", config.get("libvirt_uri") or "qemu:///system"]
     if config.get("cert") and config.get("key"):
