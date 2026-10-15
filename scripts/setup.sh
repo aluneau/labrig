@@ -449,7 +449,7 @@ EOF
   # Host DNS resolver (services/dns_service.py): a dnsmasq answering api / *.apps of groupless / bare-metal
   # OpenShift clusters -> their node IP. The app writes $DATA/dns/dnsmasq.conf and restarts it (polkit rule);
   # CAP_NET_BIND_SERVICE lets it bind :53 as the non-root service user.
-  [ -n "$DATA" ] || DATA="$APP_DIR/backend/data"
+  [ -n "${DATA:-}" ] || DATA="$APP_DIR/backend/data"
   DNSMASQ="$(command -v dnsmasq 2>/dev/null || ls /usr/sbin/dnsmasq /usr/bin/dnsmasq 2>/dev/null | head -1)"
   [ -n "$DNSMASQ" ] || DNSMASQ=/usr/sbin/dnsmasq
   $SUDO install -d -o "$TARGET_USER" -g "$TARGET_GROUP" "$DATA/dns"
