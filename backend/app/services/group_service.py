@@ -1543,6 +1543,7 @@ class GroupService:
         model.router.uplink_ip = None
         model.router.registry.hostname = model.router.registry.ca_pem = None
         model.owner = None
+        model.bmc = None  # emulator port / listen address: assigned on this host (bmc_service.assign)
         if model.router.wireguard is not None:  # assigned on this host / by this router
             wg = model.router.wireguard
             wg.public_key = wg.subnet = wg.subnet6 = wg.host_port = None

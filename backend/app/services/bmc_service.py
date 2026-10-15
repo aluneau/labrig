@@ -87,13 +87,16 @@ def assign(db: Session, spec: Any, existing: Any, group_id: Optional[int]) -> No
         if not spec.bmc.listen:
             raise ValueError(f"BMC members need the group's uplink network ({spec.uplink}) to have an address on the "
                              "host (a NAT / routed libvirt network), or set BMC_LISTEN")
+    taken = set()
+    for g in db.query(Group).all():
+        if g.id != group_id and g.name != spec.name:
+            port = ((g.spec or {}).get("bmc") or {}).get("port")
+            if port:
+                taken.add(int(port))
+    if spec.bmc.port is not None and int(spec.bmc.port) in taken:
+        # a stale assignment (an imported export / a template): another group's emulator has it
+        spec.bmc.port = None
     if spec.bmc.port is None:
-        taken = set()
-        for g in db.query(Group).all():
-            if g.id != group_id and g.name != spec.name:
-                port = ((g.spec or {}).get("bmc") or {}).get("port")
-                if port:
-                    taken.add(int(port))
         first, last = port_range()
         spec.bmc.port = next((p for p in range(first, last + 1) if p not in taken), None)
         if spec.bmc.port is None:
