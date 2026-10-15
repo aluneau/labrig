@@ -1,7 +1,12 @@
-"""Test setup: a throw-away SQLite DB + data dir, libvirt's test driver, authentication on.
-Roles are faked (no dependency on the host's users / groups): see `roles`."""
+"""Test setup: a throw-away SQLite DB + data dir, libvirt's test driver, authentication on, set before any app
+import. Roles are faked (no dependency on the host's users / groups): see `roles`.
+
+Run: cd backend && venv/bin/python -m pytest tests
+"""
 import os
+import sys
 import tempfile
+from pathlib import Path
 
 _tmp = tempfile.mkdtemp(prefix="vmm-tests-")
 os.environ.update({
@@ -10,7 +15,9 @@ os.environ.update({
     "LIBVIRT_URI": "test:///default",
     "WG_RELAY_LISTEN": "127.0.0.2",
     "AUTH_ENABLED": "true",
+    "HOST_DNS_ENABLED": "false",
 })
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest  # noqa: E402
 
@@ -50,3 +57,17 @@ def admin_headers():
 @pytest.fixture
 def viewer_headers():
     return {"Authorization": f"Bearer {_token('victor')}"}
+
+
+@pytest.fixture()
+def db():
+    """A fresh empty database per test"""
+    from app import models  # noqa: F401  (registers the tables)
+    from app.database import Base, engine
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()

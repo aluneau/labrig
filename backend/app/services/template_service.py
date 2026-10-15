@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 BUILTIN_DIR = Path(__file__).resolve().parents[1] / "templates"
 PLACEHOLDER = re.compile(r"\{\{\s*([a-z_][a-z0-9_]*(?::\d+)?)\s*\}\}")
 IPV4_IN_TEXT = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d/]|\.\d)")
+CIDR_IN_TEXT = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})(?![\d.])")
 GROUP_WAIT_TIMEOUT = 30 * 60
 BUILTINS = ("group", "domain")  # + ip:N (N-th address of the group network)
 # Features a template may list in `requires` that the app checks on this host
@@ -767,7 +768,19 @@ class TemplateService:
                     if ip in net and ip not in (net.network_address, net.broadcast_address):
                         return "{{ip:%d}}" % (int(ip) - int(net.network_address))
                     return m.group(0)
-                return IPV4_IN_TEXT.sub(repl, obj)
+
+                def repl_net(m: "re.Match") -> str:  # 10.0.0.40/32, 10.0.0.64/28, the group network itself
+                    try:
+                        sub = ipaddress.IPv4Network(m.group(0), strict=False)
+                    except ValueError:
+                        return m.group(0)
+                    if sub == net:
+                        return "{{cidr}}"
+                    ip = ipaddress.IPv4Address(m.group(1))
+                    if sub.subnet_of(net) and ip not in (net.network_address, net.broadcast_address):
+                        return "{{ip:%d}}/%s" % (int(ip) - int(net.network_address), m.group(2))
+                    return m.group(0)  # e.g. 10.0.0.0/26: {{ip:0}} isn't a placeholder
+                return IPV4_IN_TEXT.sub(repl, CIDR_IN_TEXT.sub(repl_net, obj))
             return obj
         spec = relative(spec)
 

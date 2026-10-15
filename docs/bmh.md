@@ -54,7 +54,8 @@ and the zones it serves.
 
 You can also add your own **custom records** to this resolver from the Host page (the "DNS resolver" card),
 like managing records on a lab group's router: a name → IPv4 is an A record, a name → another name is an
-alias (CNAME). They are stored in the DB (`host_dns_records`) and rendered into the dnsmasq config alongside
+alias (CNAME); an alias target must be a name this resolver serves itself (another custom record, a
+cluster's `api`/`api-int`): dnsmasq can't follow an alias to an upstream name or a wildcard. They are stored in the DB (`host_dns_records`) and rendered into the dnsmasq config alongside
 the cluster zones (`host-record=` / `cname=`), applied live. A name that would shadow a cluster zone the
 resolver already owns (`api`/`api-int`/`*.apps` of a bare-metal cluster) is rejected. API:
 `GET/POST /api/v1/hosts/dns/records` (`{name, ip}` or `{name, cname}`) and

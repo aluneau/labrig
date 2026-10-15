@@ -160,12 +160,29 @@ class DNSService:
             raise ValueError(f"'{name}' is already resolved by the host for cluster '{owner}'")
         if db.query(HostDnsRecord).filter(HostDnsRecord.name == name).first():
             raise ValueError(f"a record for '{name}' already exists")
+        if cname:
+            self._check_cname_target(db, name, cname)
         row = HostDnsRecord(name=name, ip=ip, cname=cname)
         db.add(row)
         db.commit()
         self.reconcile(db)
         return {"name": row.name, "ip": row.ip, "cname": row.cname,
                 "type": "A" if row.ip else "CNAME"}
+
+    def _check_cname_target(self, db: Session, name: str, target: str) -> None:
+        """dnsmasq's cname= only resolves to an address when the target is a name dnsmasq knows itself
+        (host-record / another cname): an upstream name (example.com) or one only covered by a wildcard
+        (address=) answers the bare CNAME and clients get no address."""
+        if target == name:
+            raise ValueError(f"'{name}' can't be an alias of itself")
+        local = {r.name for r in db.query(HostDnsRecord).all() if not r.name.startswith("*.")}
+        for z in self.zones(db):
+            local.update(("api." + z["zone"].lower(), "api-int." + z["zone"].lower()))
+        if target not in local:
+            raise ValueError(
+                f"the alias target '{target}' must be a name this resolver serves itself (a custom A record or "
+                "alias, or a cluster's api / api-int name): dnsmasq can't follow an alias to an upstream name or a "
+                "wildcard, clients would get no address. Add an A record instead.")
 
     def delete_record(self, db: Session, name: str) -> bool:
         """Remove a custom record by name. Returns False if it did not exist."""
