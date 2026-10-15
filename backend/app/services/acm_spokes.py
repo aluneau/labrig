@@ -1251,6 +1251,9 @@ class SpokeService:
                     runner.oc(args + ["--ignore-not-found", "--wait=false"], 60)
                 except (RuntimeError, ValueError) as e:
                     logger.warning(f"Spoke {cluster.name}: oc {' '.join(args[:2])} on {hub.name}: {e}")
+            # the machine is powered off below (and by the BMH delete): its klusterlet can't acknowledge the
+            # addon pre-delete / ManifestWork cleanup, which kept the ManagedCluster + namespace Terminating
+            self.acm.reap_lost(hub, cluster.name)
             if hosts:  # drop the hub CoreDNS forward for this spoke's zone
                 self._remove_hub_spoke_dns(runner, f"{cluster.name}.{cluster.domain}")
         elif hub is not None:
