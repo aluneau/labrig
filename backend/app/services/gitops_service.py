@@ -278,7 +278,7 @@ class GitOpsService:
         return {"name": f"{hub.name}-spokes",
                 "sync": (status.get("sync") or {}).get("status"),
                 "health": (status.get("health") or {}).get("status"),
-                "revision": (status.get("sync") or {}).get("revision", "")[:7],
+                "revision": ((status.get("sync") or {}).get("revision") or "")[:7],
                 "repo_url": self.repo_url(),
                 "url": self.application_url(console, hub)}
 

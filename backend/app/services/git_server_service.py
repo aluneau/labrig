@@ -254,15 +254,25 @@ def _migrate() -> None:
         logger.warning(f"Gitea migrate: {(out.stderr or out.stdout).strip()[-300:]}")
 
 
+def _change_password(password: str) -> subprocess.CompletedProcess:
+    """Set the admin password. Gitea >= 1.22 flags the account must-change-password by default on
+    change-password, which then refuses API calls (403): clear it (older releases lack the flag)."""
+    args = ["admin", "user", "change-password", "--username", ADMIN_USER, "--password", password]
+    out = _gitea(args + ["--must-change-password=false"])
+    if out.returncode != 0 and "must-change-password" in (out.stdout + out.stderr):
+        out = _gitea(args)
+    return out
+
+
 def _ensure_admin(password: str) -> None:
-    """Create the admin user (idempotent: 'already exists' on a rerun)."""
+    """Create the admin user, or set its password when it already exists (it may have been rotated while the
+    server was stopped: the app must still push with the stored one)."""
     out = _gitea(["admin", "user", "create", "--admin", "--username", ADMIN_USER, "--password", password,
                   "--email", f"{ADMIN_USER}@localhost", "--must-change-password=false"])
-    if out.returncode != 0 and "already exists" not in (out.stdout + out.stderr):
-        # the password may have rotated between runs: reset it so the app can still push
-        reset = _gitea(["admin", "user", "change-password", "--username", ADMIN_USER, "--password", password])
+    if out.returncode != 0:
+        reset = _change_password(password)
         if reset.returncode != 0:
-            logger.warning(f"Gitea admin bootstrap: {(out.stderr or out.stdout).strip()[-300:]}")
+            logger.warning(f"Gitea admin bootstrap: {(reset.stderr or reset.stdout or out.stderr).strip()[-300:]}")
 
 
 # ------------------------------------------------------------------------------------------------ HTTP API
@@ -432,8 +442,7 @@ def admin_credentials(reset: bool = False) -> Dict[str, Any]:
         state["password"] = secrets.token_urlsafe(16)
         _save_state(state)
         if supervisor.running():
-            out = _gitea(["admin", "user", "change-password", "--username", ADMIN_USER,
-                          "--password", state["password"]])
+            out = _change_password(state["password"])
             if out.returncode != 0:  # not created yet (e.g. only picked a port): create the admin now
                 _ensure_admin(state["password"])
     # The password is a runtime-generated secret (secrets.token_urlsafe, stored 0600 in state.json),
