@@ -370,6 +370,7 @@ class Supervisor:
 
 
 supervisor = Supervisor()
+_last_error: Optional[str] = None  # the last failed start (reconcile at startup), for status()
 _ready_lock = threading.Lock()
 
 
@@ -381,6 +382,14 @@ def ensure_ready(timeout: int = 120) -> Dict[str, Any]:
         raise RuntimeError(problem)
     state = _credentials()
     port, password = int(state["port"]), state["password"]
+    # Fast path (every push): already up, the stored password works and the repository exists. Skips the
+    # `gitea migrate` / `admin user create` subprocesses, which take seconds each.
+    if _port_alive(port, timeout=2) and _api("GET", "/user", port, password)[0] == 200 \
+            and _api("GET", f"/repos/{ADMIN_USER}/{REPO_NAME}", port, password)[0] == 200:
+        if state.get("clone_url") != clone_url():
+            state["clone_url"] = clone_url()
+            _save_state(state)
+        return state
     ensure_binary()
     _write_config(port)
     _migrate()            # create the DB schema before touching users
@@ -390,21 +399,55 @@ def ensure_ready(timeout: int = 120) -> Dict[str, Any]:
         raise RuntimeError(f"The Gitea git server did not answer on :{port} within {timeout}s "
                            f"(see {base_dir()/'gitea.out'})")
     _ensure_repo(port, password)
+    global _last_error
+    _last_error = None
     state = _load_state()
     state["clone_url"] = clone_url()
     _save_state(state)
     return state
 
 
-def push(local_repo: Path) -> str:
-    """Push a local git repository (DATA_DIR/gitops) into the Gitea spokes repository; returns the clone URL."""
+def running() -> bool:
+    return supervisor.running()
+
+
+def push_url() -> str:
+    """The authenticated loopback URL the app fetches from / pushes to (never shown or logged: see redact)."""
     state = ensure_ready()
     port, password = int(state["port"]), state["password"]
-    url = f"http://{ADMIN_USER}:{urllib.parse.quote(password, safe='')}@127.0.0.1:{port}/{ADMIN_USER}/{REPO_NAME}.git"
-    out = subprocess.run(["git", "-C", str(local_repo), "push", "--force", url, "HEAD:refs/heads/main"],
-                         capture_output=True, text=True, env=_ENV, timeout=120, check=False)
+    return f"http://{ADMIN_USER}:{urllib.parse.quote(password, safe='')}@127.0.0.1:{port}/{ADMIN_USER}/{REPO_NAME}.git"
+
+
+def redact(text: str) -> str:
+    """Strip the admin password from a git / Gitea message before it is logged or returned."""
+    password = _load_state().get("password")
+    if password:
+        text = text.replace(urllib.parse.quote(password, safe=""), "***").replace(password, "***")
+    return text
+
+
+def _run_git(local_repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(local_repo), *args], capture_output=True, text=True, env=_ENV,
+                          timeout=120, check=False)
+
+
+def push(local_repo: Path) -> str:
+    """Push a local git repository (DATA_DIR/gitops) into the Gitea spokes repository; returns the clone URL.
+    A fast-forward push: gitops_service merges what users pushed to Gitea first. If the server's history still
+    can't be fast-forwarded (unmergeable edits), its tip is kept as a `backup/<time>` branch before the app's
+    history replaces main — a user's commits are never silently lost."""
+    url = push_url()
+    out = _run_git(local_repo, "push", url, "HEAD:refs/heads/main")
+    if out.returncode != 0 and ("rejected" in out.stderr or "non-fast-forward" in out.stderr
+                                or "fetch first" in out.stderr):
+        backup = f"backup/{time.strftime('%Y%m%d-%H%M%S')}"
+        fetched = _run_git(local_repo, "fetch", "-q", url, "main")
+        if fetched.returncode == 0:
+            _run_git(local_repo, "push", url, f"FETCH_HEAD:refs/heads/{backup}")
+            logger.warning(f"GitOps: the in-lab git server's main had unmergeable commits: kept as branch {backup}")
+        out = _run_git(local_repo, "push", "--force", url, "HEAD:refs/heads/main")
     if out.returncode != 0:
-        raise RuntimeError(f"git push to the in-lab server failed: {(out.stderr or out.stdout).strip()[-300:]}")
+        raise RuntimeError(f"git push to the in-lab server failed: {redact((out.stderr or out.stdout).strip()[-300:])}")
     return clone_url()
 
 
@@ -424,7 +467,7 @@ def status() -> Dict[str, Any]:
         "admin_user": ADMIN_USER,
         "bootstrapped": has_port,
         "repo_path": str(base_dir()),
-        "error": problem,
+        "error": problem or _last_error,
         "firewall": (f"The hub's Argo CD must reach this port over the LAN: scripts/setup.sh opens "
                      f"GIT_HOST_PORTS ({settings.GIT_HOST_PORTS}/tcp)"),
     }
@@ -464,4 +507,6 @@ def reconcile() -> None:
     try:
         ensure_ready(timeout=60)
     except Exception as e:  # pragma: no cover - startup must not fail over the git server
+        global _last_error
+        _last_error = f"The git server did not start: {redact(str(e))}"
         logger.warning(f"Git server reconcile: {e}")

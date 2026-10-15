@@ -315,11 +315,15 @@ The realistic ZTP path: a spoke's provisioning manifests live in **git**, and **
 hub syncs them onto the cluster to provision it — instead of the app applying the CRs with `oc`. Three pieces
 (`services/gitops_service.py`, `services/git_server_service.py`, hub ACM tab → *Deploy from git (GitOps)*):
 
-- **The repo** (`DATA_DIR/gitops`, `GET /clusters/{id}/acm/gitops`): every real bare-metal spoke is committed to
-  `clusters/<name>/` — `manifests.yaml` (the exact apply-ready CRs the direct path applies, minus the Secrets:
-  `_spoke_manifests` builds both from one place, so git == what runs), `siteconfig.yaml` (the ClusterInstance, for
-  reference) and a `kustomization.yaml`; a top-level `clusters/kustomization.yaml` lists the spokes. One commit per
-  provision / delete.
+- **The repo** (`DATA_DIR/gitops`, `GET /clusters/{id}/acm/gitops`): every GitOps spoke is committed to
+  `clusters/<hub>/<spoke>/manifests.yaml` (the exact apply-ready CRs the direct path applies, minus the Secrets:
+  `_spoke_manifests` / `_member_manifests` build both from one place, so git == what runs; real hosts also get a
+  reference `siteconfig.yaml`, not synced). ClusterImageSets go once per release to `clusters/<hub>/imagesets/`
+  (shared by spokes of a release, `Prune=false`). One directory per hub: each hub's Argo CD syncs only its own. No
+  index file: **deleting a spoke's directory in git deprovisions it** (Argo CD prunes its objects on the hub; the
+  status then lists it under `missing_from_git` until its cluster row is deleted). One commit per provision /
+  delete; direct-apply spokes are not in the synced tree (Argo CD's self-heal would fight the app's delete). An
+  older `clusters/<spoke>/` layout is moved under its hub on the next write.
 - **The in-lab git server** (`git_server_service.py`): the app runs a **Gitea** process (supervised like the BMC
   emulator — data under `DATA_DIR/git`, binary downloaded on first use at the pinned `GITEA_VERSION`, listening on a
   free port of `GIT_HOST_PORTS`, opened in the host firewall by `scripts/setup.sh --git-ports`). The repo is mirrored
@@ -327,21 +331,31 @@ hub syncs them onto the cluster to provision it — instead of the app applying 
   routed address — no repository credentials. The GitOps card exposes its **web UI** (`web_url`, *Open Gitea*), the
   spokes repo page (`repo_web_url`) and the **admin login** (`admin_user` = `vmmanager`; the password is a secret read
   `GET /clusters/{id}/acm/gitops/git-credentials`, stored 0600 in `DATA_DIR/git/state.json`, never logged — `POST` the
-  same path rotates it). Browse / push manually from Gitea with those credentials.
+  same path rotates it). Browse / push manually from Gitea with those credentials: before every commit the app
+  fetches the server and merges what users pushed (its own files win a conflict), and pushes fast-forward only — an
+  unmergeable server history is kept as a `backup/<time>` branch, never silently dropped. Gitea is a child of the
+  app: it stops with it and `reconcile` starts it again at startup (data and password kept); Argo CD just retries
+  meanwhile. `status.spokes` / `commits` are read from the server (what Argo CD sees).
 - **Argo CD on the hub**: the `gitops` day-2 add-on (ACM tab → *Install OpenShift GitOps*, or `POST
   /openshift/addons {kind: gitops}`) installs the OpenShift GitOps operator with `install_operator`, waits for the
   default `openshift-gitops` Argo CD instance, and grants its application-controller a ClusterRole over the ACM
   provisioning CRs (`hive`, `extensions.hive`, `agent-install`, `metal3`, `cluster`/`agent.open-cluster-management`,
   `siteconfig`). *Deploy (apply Application)* (`POST /clusters/{id}/acm/gitops/deploy`) pushes the repo and applies an
-  Argo CD `Application` syncing `clusters/` (auto-sync, prune, self-heal); the card shows its Synced / Healthy state.
+  Argo CD `Application` `<hub>-spokes` syncing `clusters/<hub>` (directory source, recurse, include
+  `{imagesets/*.yaml,*/manifests.yaml}`; auto-sync, prune, self-heal) and starts a sync at once (Argo CD polls git
+  every 3 min); the card shows its Synced / Healthy state, the last operation and its message.
   The **Argo CD web console** is the `openshift-gitops-server` Route on the hub (`apps.<hub>`, served by the host DNS
   resolver): `gitops.status` returns it as `argocd_url` (*Open Argo CD*) and a deep-link to the `<hub>-spokes`
   Application as `application.url` (*View in Argo CD*). The links are disabled with a reason until the Route exists.
 
-Then provision a spoke with **Deploy via GitOps** ticked (`acm/spokes` `gitops: true`, real BareMetalHost only): the
-app creates the Namespace + the pull-secret / BMC Secret (never committed to git), commits the manifests, waits for
-Argo CD to sync them onto the hub, and follows the install to Ready — metal3 + the assisted service do the rest
-exactly as in the direct path. The direct-apply path stays the default. The SiteConfig `ClusterInstance` form would
+Then provision a spoke with **Deploy via GitOps** ticked (`acm/spokes` `gitops: true`, on real BareMetalHosts or on
+an emulated-BMC member of the hub's group; refused up front without Argo CD on the hub): the app creates the
+Namespace + the pull-secret / BMC Secret (never committed to git), commits + pushes the manifests, applies the
+Application, waits for Argo CD to sync them onto the hub, and follows the install to Ready — metal3 + the assisted
+service do the rest exactly as in the direct path. An app restart during the install re-attaches to it (Argo CD
+keeps going on its own). **Deleting** a GitOps spoke removes its directory from git first and waits for Argo CD to
+sync that commit (prune), then cleans up what is left with `oc` — the other order would let self-heal re-create
+it. The direct-apply path stays the default. The SiteConfig `ClusterInstance` form would
 instead need the SiteConfig operator + `ai-*-templates` on the hub to expand into these CRs.
 
 **Understanding a spoke before you build it**: the spoke-create form prefills sensible defaults as you type — the
