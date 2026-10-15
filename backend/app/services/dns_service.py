@@ -200,7 +200,10 @@ class DNSService:
                 # Skip anything a cluster zone now owns (shouldn't happen: add_record rejects it)
                 if self.owns(db, r["name"]):
                     continue
-                if r["ip"]:
+                if r["ip"] and r["name"].startswith("*."):
+                    # host-record takes no wildcard: address=/zone/ip answers the zone and every name below it
+                    lines.append(f"address=/{r['name'][2:]}/{r['ip']}")
+                elif r["ip"]:
                     # host-record also answers the matching PTR
                     lines.append(f"host-record={r['name']},{r['ip']}")
                 elif r["cname"]:

@@ -1717,6 +1717,7 @@ export interface HostDnsZone {
   cluster: string;
   zone: string;
   ip: string | null;
+  apps_ip?: string | null; // *.apps target (a multi-node spoke's ingress VIP); defaults to ip
 }
 
 // A user-managed custom record on the host resolver: an A record (name -> ip) or an alias (name -> cname)
