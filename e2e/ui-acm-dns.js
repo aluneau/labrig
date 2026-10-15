@@ -45,7 +45,7 @@ const gitops = {
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') problems.push(`[${m.type()}] ${page.url()} ${m.text().slice(0, 300)}`); });
   page.on('pageerror', (e) => problems.push(`[pageerror] ${page.url()} ${e.message}`));
-  page.on('response', (r) => { if (r.status() >= 400) problems.push(`[http ${r.status()}] ${r.request().method()} ${r.url()}`); });
+  page.on('response', (r) => { if (r.status() >= 400) problems.push(`[http ${r.status()}] ${r.request().method()} ${r.url()} ${r.request().postData() || ''}`); });
   // Host DNS: pretend the resolver is installed so the records form shows (the real host may not have it)
   await page.route('**/api/v1/hosts/dns', async (route) => {
     const res = await route.fetch(); const j = await res.json();
@@ -85,14 +85,22 @@ const gitops = {
   for (const theme of ['dark']) {
     await page.evaluate(() => document.documentElement.classList.add('pf-v5-theme-dark'));
     await shot(`dns-${theme}`);
+    await page.locator('.pf-v5-c-card', { hasText: 'DNS resolver' }).screenshot({ path: `ui-dns-${theme}-card.png` });
     await page.evaluate(() => document.documentElement.classList.remove('pf-v5-theme-dark'));
   }
   await page.setViewportSize({ width: 400, height: 860 }); await page.waitForTimeout(500);
   await shot('dns-400');
+  await page.locator('.pf-v5-c-card', { hasText: 'DNS resolver' }).screenshot({ path: 'ui-dns-400-card.png' });
+  log('dns 400 add inputs:', JSON.stringify(await page.evaluate(() => ['Record name', 'Record value'].map((l) => {
+    const e = document.querySelector(`[aria-label="${l}"]`); if (!e) return 'missing';
+    const r = e.getBoundingClientRect(); return `${Math.round(r.width)}x${Math.round(r.height)}`;
+  }))));
+  await page.getByLabel('Record name').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'ui-dns-400-addrow.png' });
   log('dns 400 h-overflow:', await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth));
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const n of ['e2e-ui-rec.lab', 'e2e-ui-alias.lab']) { await page.getByLabel(`Remove ${n}`).click(); await page.waitForTimeout(1000); }
-  log('after cleanup:', (await table.innerText()).replace(/\s+/g, ' '));
+  log('after cleanup, table shown:', await table.count());
 
   // ---- Clusters page + Create modal (ACM switch)
   await page.goto(BASE + '/clusters'); await page.waitForTimeout(2000);
