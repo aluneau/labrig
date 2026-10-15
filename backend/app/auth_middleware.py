@@ -29,11 +29,14 @@ PUBLIC = {
 PUBLIC_RE = re.compile(r"^/api/v1/groups/\d+/registry/ca\.crt$")
 # Viewers may still manage their own session and API tokens
 VIEWER_WRITES_RE = re.compile(r"^/api/v1/auth/(logout|tokens(/\d+|/cli)?)$")
-# Reads that hand out credentials: admins only
+# Reads that hand out credentials: admins only. Ids are matched as ANY segment, not \d+: FastAPI's int
+# parsing also accepts "+1", "1.0", " 1", "1_0"… which would otherwise reach the endpoint unchecked.
+# export (YAML text) and router/config (rendered files: squid users, cloud-init) carry passwords that
+# the JSON key redaction can't see.
 SECRET_READS_RE = re.compile(
-    r"^/api/v1/(clusters/\d+/(kubeconfig|logs|oc-output(/[^/]+)?|openshift/(credentials|ssh-key)"
-    r"|acm/gitops/git-credentials)|vms/\d+/logs"
-    r"|groups/\d+/(registry/credentials|bmc/credentials|wireguard/peers/[^/]+/config))$")
+    r"^/api/v1/(clusters/[^/]+/(kubeconfig|logs|oc-output(/[^/]+)?|openshift/(credentials|ssh-key)"
+    r"|acm/gitops/git-credentials)|vms/[^/]+/logs"
+    r"|groups/[^/]+/(registry/credentials|bmc/credentials|wireguard/peers/[^/]+/config|export|router/config))$")
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # The caller's own default token: not masked for viewers
 CLI_TOKEN_PATH = "/api/v1/auth/tokens/cli"

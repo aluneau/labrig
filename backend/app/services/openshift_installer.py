@@ -14,6 +14,7 @@ Service on the rendezvous host (master-0, port 8090, polled with curl from the r
 host has no route to the group network), then the API through the router's haproxy (clusterversion /
 clusteroperators, CSR approval) -> eject + delete the ISO -> add-ons.
 """
+import hmac
 import ipaddress
 import json
 import logging
@@ -1013,7 +1014,8 @@ class OpenShiftInstaller:
         for cluster in db.query(Cluster).all():
             if not self._is_bmh(cluster):
                 continue
-            if self._iso_token(cluster) == token:
+            expected = self._iso_token(cluster)
+            if expected and hmac.compare_digest(expected.encode(), token.encode()):  # constant time
                 iso = openshift_service.cluster_dir(cluster.name) / "agent.x86_64.iso"
                 return iso if iso.exists() else None
         return None
