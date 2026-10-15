@@ -739,16 +739,9 @@ class AcmService:
                     lost = conditions_state(self._get_mc(runner, name)).get("available") is not True
                     lost_since = (lost_since or time.monotonic()) if lost else None
                     if lost_since is not None and time.monotonic() - lost_since > 120:
-                        # the klusterlet no longer reports (removed, or the cluster unreachable / deleted): nobody
-                        # will acknowledge the cleanup. As the ACM docs do for unreachable clusters, drop the
-                        # leftover finalizers (ManifestWorks, then the ManagedCluster's) so it can go
                         self.svc._check(task, hub, db, 50, f"{name}: its klusterlet no longer reports: removing the "
                                                            "leftover finalizers")
-                        for work in runner.oc(["get", "manifestwork", "-n", name, "-o", "name"], 30)["stdout"].split():
-                            runner.oc(["patch", work, "-n", name, "--type", "merge", "-p",
-                                       '{"metadata":{"finalizers":null}}'], 30)
-                        runner.oc(["patch", "managedcluster", name, "--type", "merge", "-p",
-                                   '{"metadata":{"finalizers":null}}'], 30)
+                        self._drop_finalizers(runner, name)
                         lost_since = time.monotonic()
                     if time.monotonic() > deadline:
                         msg = (f"{name} is still being detached after {DETACH_TIMEOUT // 60} min: the hub waits for "
@@ -766,6 +759,45 @@ class AcmService:
             return self.svc._guarded(db, task, hub_id, body, failed_status="ready")
         return self.svc._run_task(db, hub, "acm_detach", f"Detach {name} from", run, name)
 
+    @staticmethod
+    def _drop_finalizers(runner: Any, name: str) -> None:
+        """The klusterlet no longer reports (removed, or the cluster unreachable / deleted): nobody will
+        acknowledge the cleanup. As the ACM docs do for unreachable clusters, drop the leftover finalizers
+        (ManagedClusterAddOns' pre-delete hooks, ManifestWorks, then the ManagedCluster's) so it can go."""
+        for kind in ("managedclusteraddon", "manifestwork"):
+            for obj in runner.oc(["get", kind, "-n", name, "-o", "name"], 30)["stdout"].split():
+                runner.oc(["patch", obj, "-n", name, "--type", "merge", "-p", '{"metadata":{"finalizers":null}}'], 30)
+        runner.oc(["patch", "managedcluster", name, "--type", "merge", "-p", '{"metadata":{"finalizers":null}}'], 30)
+
+    def reap_lost(self, hub: Cluster, name: str) -> None:
+        """After `delete managedcluster --wait=false` of a cluster that is being deleted (a spoke whose machine is
+        powered off, a managed cluster whose VMs go): its klusterlet won't run the cleanup, so the ManagedCluster
+        and its namespace would stay Terminating on the hub forever. In the background (never blocks the delete):
+        once the hub has lost the klusterlet for 2 min, drop the leftover finalizers."""
+        import threading
+        runner = self._runner(hub)
+        hub_name = hub.name
+
+        def run() -> None:
+            deadline = time.monotonic() + 30 * 60
+            lost_since = None
+            try:
+                while time.monotonic() < deadline:
+                    mc = self._get_mc(runner, name)
+                    if not mc:
+                        return
+                    lost = conditions_state(mc).get("available") is not True
+                    lost_since = (lost_since or time.monotonic()) if lost else None
+                    if lost_since is not None and time.monotonic() - lost_since > 120:
+                        logger.info(f"ACM {hub_name}: {name} lost while being deleted: dropping leftover finalizers")
+                        self._drop_finalizers(runner, name)
+                        lost_since = time.monotonic()
+                    time.sleep(20)
+                logger.warning(f"ACM {hub_name}: ManagedCluster {name} still there 30 min after its delete")
+            except Exception as e:  # best effort
+                logger.warning(f"ACM {hub_name}: cleanup of {name}: {e}")
+        threading.Thread(target=run, name=f"acm-reap-{name}", daemon=True).start()
+
     # ---------------------------------------------------------------------------------------- deletes
 
     def forget(self, db: Session, cluster: Cluster) -> None:
@@ -781,6 +813,7 @@ class AcmService:
                     try:
                         self._runner(hub).oc(["delete", "managedcluster", cluster.name, "--ignore-not-found",
                                               "--wait=false"], 30)
+                        self.reap_lost(hub, cluster.name)  # its VMs go now: the klusterlet can't clean up
                     except (RuntimeError, ValueError) as e:
                         logger.warning(f"Deleting ManagedCluster {cluster.name} on {hub.name}: {e}")
                     self._drop_entry(db, hub, cluster.name)

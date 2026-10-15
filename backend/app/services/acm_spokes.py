@@ -380,7 +380,10 @@ class SpokeService:
             {"apiVersion": "agent-install.openshift.io/v1beta1", "kind": "InfraEnv",
              "metadata": {"name": name, "namespace": name},
              "spec": {"clusterRef": {"name": name, "namespace": name}, "pullSecretRef": {"name": "pull-secret"},
-                      "sshAuthorizedKey": ssh_pub, "agentLabels": {"vmm-spoke": name}}},
+                      "sshAuthorizedKey": ssh_pub, "agentLabels": {"vmm-spoke": name},
+                      # chrony on the router: the DHCP NTP option alone leaves the discovery agent with no
+                      # source ("Host couldn't synchronize with any NTP server"), as for the hub's agent-config
+                      "additionalNTPSources": [network.gateway()]}},
             {"apiVersion": "metal3.io/v1alpha1", "kind": "BareMetalHost",
              "metadata": {"name": member["name"], "namespace": name,
                           "labels": {"infraenvs.agent-install.openshift.io": name},
@@ -1250,6 +1253,9 @@ class SpokeService:
                     runner.oc(args + ["--ignore-not-found", "--wait=false"], 60)
                 except (RuntimeError, ValueError) as e:
                     logger.warning(f"Spoke {cluster.name}: oc {' '.join(args[:2])} on {hub.name}: {e}")
+            # the machine is powered off below (and by the BMH delete): its klusterlet can't acknowledge the
+            # addon pre-delete / ManifestWork cleanup, which kept the ManagedCluster + namespace Terminating
+            self.acm.reap_lost(hub, cluster.name)
             if hosts:  # drop the hub CoreDNS forward for this spoke's zone
                 self._remove_hub_spoke_dns(runner, f"{cluster.name}.{cluster.domain}")
         elif hub is not None:
