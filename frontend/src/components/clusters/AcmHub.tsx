@@ -8,13 +8,10 @@ import {
   CardHeader,
   CardTitle,
   Checkbox,
-  ClipboardCopy,
-  ClipboardCopyVariant,
   DescriptionList,
   DescriptionListDescription,
   DescriptionListGroup,
   DescriptionListTerm,
-  Divider,
   Flex,
   FlexItem,
   FormSelect,
@@ -27,11 +24,11 @@ import {
   Stack,
   StackItem,
   TextInput,
-  Title,
 } from '@patternfly/react-core';
 import { ExternalLinkAltIcon, SyncAltIcon } from '@patternfly/react-icons';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { AcmGitCredentials, AcmGitops, AcmManagedCluster, AcmSpoke, AcmStatus, Cluster } from '../../types';
+import { AcmGitops, AcmManagedCluster, AcmSpoke, AcmStatus, AddonState, Cluster } from '../../types';
+import { AcmGitopsCard, gitopsPhase } from './AcmGitops';
 import { clusterApi } from '../../services/api';
 import { useLiveEvents } from '../../hooks/useEvents';
 import { errorText } from '../../utils/format';
@@ -90,20 +87,8 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
   };
 
   const [gitops, setGitops] = useState<AcmGitops | null>(null);
-  const [gitCreds, setGitCreds] = useState<AcmGitCredentials | null>(null);
-  const [credsBusy, setCredsBusy] = useState(false);
+  const [gitopsAddon, setGitopsAddon] = useState<AddonState | null>(null); // OpenShift GitOps add-on install, while a task runs
   const [gwTouched, setGwTouched] = useState(false);
-
-  const showGitCreds = async (reset: boolean) => {
-    setCredsBusy(true);
-    try {
-      setGitCreds(reset ? await clusterApi.acmGitResetCredentials(cluster.id) : await clusterApi.acmGitCredentials(cluster.id));
-    } catch (err) {
-      setActionError(errorText(err));
-    } finally {
-      setCredsBusy(false);
-    }
-  };
 
   const openSiteConfigPreview = async () => {
     try {
@@ -126,20 +111,41 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
       if (status.enabled) {
         clusterApi.acmGitops(cluster.id).then(setGitops).catch(() => setGitops(null));
       }
+      if (cluster.task_running) {
+        clusterApi.installStatus(cluster.id)
+          .then((s) => setGitopsAddon(s.addons.find((a) => a.kind === 'gitops') || null)).catch(() => {});
+      } else {
+        setGitopsAddon(null);
+      }
     } catch (err) {
       setError(errorText(err));
     }
-  }, [cluster.id]);
+  }, [cluster.id, cluster.task_running]);
 
-  const moving = !!acm && (['pending', 'installing'].includes(acm.state || '')
+  const gitopsMoving = (!!gitopsAddon && ['pending', 'installing'].includes(gitopsAddon.state))
+    || (!!gitops && gitopsPhase(gitops) === 'syncing');
+  const moving = gitopsMoving || (!!acm && (['pending', 'installing'].includes(acm.state || '')
     || acm.managed.some((m) => ['importing', 'detaching'].includes(m.state))
-    || acm.spokes.some((s) => ['pending', 'provisioning'].includes(s.state)));
+    || acm.spokes.some((s) => ['pending', 'provisioning'].includes(s.state))));
   useEffect(() => {
     load();
     const timer = setInterval(() => { if (!document.hidden) load(); }, moving ? 10000 : 30000);
     return () => clearInterval(timer);
   }, [load, moving, cluster.updated_at]);
   useLiveEvents(['cluster'], (e) => { if (e.id === cluster.id) load(); });
+
+  // "Deploy from git" choice of the real bare-metal spoke forms (only once Argo CD runs on the hub)
+  const gitopsChoice = (id: string) => {
+    if (!gitops?.enabled) return null;
+    if (!gitops.argocd_installed) {
+      return <div style={{ ...muted, marginTop: 8 }}>To deploy this spoke from git (GitOps), install OpenShift GitOps in the GitOps card below first.</div>;
+    }
+    return (
+      <Checkbox id={id} style={{ marginTop: 8 }} isChecked={spokeGitops} onChange={(_e, v) => setSpokeGitops(v)}
+        label="Deploy from git (GitOps)"
+        description="The app commits the spoke's manifests to the hub's git repository and Argo CD applies them. Unticked: the app applies them directly." />
+    );
+  };
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -416,10 +422,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                             Preview the SiteConfig ClusterInstance
                           </Button> to see exactly how this spoke is built.
                         </div>
-                        {gitops?.argocd_installed && (
-                          <Checkbox id="acm-spoke-gitops" label="Deploy via GitOps (commit the manifests to git; Argo CD syncs them to the hub)"
-                            isChecked={spokeGitops} onChange={(_e, v) => setSpokeGitops(v)} style={{ marginTop: 8 }} />
-                        )}
+                        {gitopsChoice('acm-spoke-gitops')}
                       </StackItem>
                     )}
                     {!isSno && (
@@ -475,10 +478,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                           planes). UEFI boot, <code>OVNKubernetes</code>, <code>rootDeviceHints minSizeGigabytes&nbsp;400</code> and
                           host NTP are applied by default.
                         </div>
-                        {gitops?.argocd_installed && (
-                          <Checkbox id="acm-spoke-gitops-multi" label="Deploy via GitOps (commit the manifests to git; Argo CD syncs them to the hub)"
-                            isChecked={spokeGitops} onChange={(_e, v) => setSpokeGitops(v)} style={{ marginTop: 8 }} />
-                        )}
+                        {gitopsChoice('acm-spoke-gitops-multi')}
                       </StackItem>
                     )}
                   </Stack>
@@ -492,6 +492,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                       <Tr key={s.name} id={`acm-spoke-${s.name}`}>
                         <Td dataLabel="Spoke">
                           <Link to={`/clusters/${s.id}`}>{s.name}</Link>
+                          {s.gitops && <Label isCompact color="purple" style={{ marginLeft: 6 }}>from git</Label>}
                           {s.message && <div style={muted}>{s.message}</div>}
                           {s.state === 'ready' && (
                             <div>
@@ -525,200 +526,31 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
 
       {acm.enabled && gitops && gitops.enabled && (
         <StackItem>
-          <Card id="acm-gitops">
-            <CardHeader><CardTitle>Deploy from git (GitOps)</CardTitle></CardHeader>
-            <CardBody>
-              <div style={{ ...muted, marginBottom: 16 }}>
-                The realistic ZTP path: every bare-metal spoke is committed to a git repo of provisioning
-                manifests on the vm-manager host, pushed to an <strong>in-lab git server</strong> the app runs, and
-                synced onto the hub by <strong>Argo CD</strong> (OpenShift GitOps) — instead of the app applying the
-                CRs directly. Install Argo CD, apply the Application, then provision a spoke with <em>Deploy via
-                GitOps</em> ticked. The SiteConfig <code>ClusterInstance</code> form is also committed, for reference.
-              </div>
-
-              <Stack hasGutter>
-                {/* 1. The in-lab git server (Gitea) */}
-                <StackItem>
-                  <Title headingLevel="h3" size="md" style={{ marginBottom: 8 }}>1. In-lab git server (Gitea)</Title>
-                  <DescriptionList isHorizontal isCompact>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>State</DescriptionListTerm>
-                      <DescriptionListDescription id="acm-gitops-server">
-                        <Label isCompact color={gitops.git_server.running ? 'green' : 'grey'}>
-                          {gitops.git_server.running ? `Gitea ${gitops.git_server.version} running` : 'not started yet'}
-                        </Label>
-                        {!gitops.git_server.running && <span style={{ ...muted, marginLeft: 8 }}>
-                          starts on the first deploy / GitOps spoke</span>}
-                        {gitops.git_server.error && <div style={muted}>{gitops.git_server.error}</div>}
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Web UI</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        <Button id="acm-gitea-open" variant="link" isInline component="a"
-                          href={gitops.git_server.web_url || undefined} target="_blank" rel="noreferrer"
-                          icon={<ExternalLinkAltIcon />} iconPosition="end" isDisabled={!gitops.git_server.web_url}>
-                          Open Gitea
-                        </Button>
-                        {gitops.git_server.repo_web_url && (
-                          <>{' · '}<Button variant="link" isInline component="a" href={gitops.git_server.repo_web_url}
-                            target="_blank" rel="noreferrer" icon={<ExternalLinkAltIcon />} iconPosition="end">
-                            spokes repository</Button></>
-                        )}
-                        {!gitops.git_server.web_url && <span style={{ ...muted, marginLeft: 8 }}>
-                          (available once the git server is started)</span>}
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    {gitops.clone_url && (
-                      <DescriptionListGroup>
-                        <DescriptionListTerm>Clone URL</DescriptionListTerm>
-                        <DescriptionListDescription>
-                          <ClipboardCopy isReadOnly hoverTip="Copy" clickTip="Copied"
-                            variant={ClipboardCopyVariant.inlineCompact}>{gitops.clone_url}</ClipboardCopy>
-                          <div style={muted}>Anonymous clone (what Argo CD uses). {gitops.git_server.firewall}</div>
-                        </DescriptionListDescription>
-                      </DescriptionListGroup>
-                    )}
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Admin login</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        <code>{gitops.git_server.admin_user || 'vmmanager'}</code>
-                        {!gitCreds ? (
-                          <Button id="acm-gitea-creds" variant="link" isInline style={{ marginLeft: 8 }}
-                            isLoading={credsBusy} isDisabled={credsBusy} onClick={() => showGitCreds(false)}>
-                            Show password
-                          </Button>
-                        ) : (
-                          <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                            <ClipboardCopy isReadOnly hoverTip="Copy" clickTip="Copied"
-                              variant={ClipboardCopyVariant.inlineCompact}>{gitCreds.password}</ClipboardCopy>
-                            <Button variant="link" isInline isLoading={credsBusy} isDisabled={credsBusy}
-                              onClick={() => showGitCreds(true)}>Reset</Button>
-                            <Button variant="link" isInline onClick={() => setGitCreds(null)}>Hide</Button>
-                          </span>
-                        )}
-                        <div style={muted}>Password stored on the host (0600, never logged). Log in to Gitea to browse / push manually.</div>
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Local repo</DescriptionListTerm>
-                      <DescriptionListDescription><code>{gitops.repo_path}</code></DescriptionListDescription>
-                    </DescriptionListGroup>
-                  </DescriptionList>
-                </StackItem>
-
-                <StackItem><Divider /></StackItem>
-
-                {/* 2. Argo CD on the hub */}
-                <StackItem>
-                  <Title headingLevel="h3" size="md" style={{ marginBottom: 8 }}>2. OpenShift GitOps (Argo CD) on the hub</Title>
-                  <DescriptionList isHorizontal isCompact>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Operator</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        <Label id="acm-gitops-argocd" isCompact color={gitops.argocd_installed ? 'green' : 'grey'}>
-                          {gitops.argocd_installed ? 'installed' : 'not installed'}
-                        </Label>
-                        {!gitops.argocd_installed && (
-                          <Button id="acm-gitops-install" variant="secondary" isInline style={{ marginLeft: 8 }}
-                            isDisabled={!hubUp || !ready || busy || cluster.task_running}
-                            onClick={() => run(() => clusterApi.addAddon(cluster.id, { kind: 'gitops' }))}>
-                            Install OpenShift GitOps
-                          </Button>
-                        )}
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Argo CD console</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        <Button id="acm-argocd-open" variant="link" isInline component="a"
-                          href={gitops.argocd_url || undefined} target="_blank" rel="noreferrer"
-                          icon={<ExternalLinkAltIcon />} iconPosition="end" isDisabled={!gitops.argocd_url}>
-                          Open Argo CD
-                        </Button>
-                        {!gitops.argocd_url && <span style={{ ...muted, marginLeft: 8 }}>
-                          {gitops.argocd_installed ? '(waiting for the openshift-gitops-server route)' : '(install OpenShift GitOps first)'}</span>}
-                        {' · '}
-                        <Button variant="link" isInline onClick={() => setSiteConfig({ name: 'Argo CD Application', manifest: gitops.application_manifest })}>
-                          View Application YAML
-                        </Button>
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    {gitops.argocd_installed && (
-                      <DescriptionListGroup>
-                        <DescriptionListTerm>Application</DescriptionListTerm>
-                        <DescriptionListDescription id="acm-gitops-application">
-                          {gitops.application ? (
-                            <>
-                              <Label isCompact color={gitops.application.sync === 'Synced' ? 'green' : 'orange'}>
-                                {gitops.application.sync || 'unknown'}
-                              </Label>{' '}
-                              <Label isCompact color={gitops.application.health === 'Healthy' ? 'green' : 'orange'}>
-                                {gitops.application.health || 'unknown'}
-                              </Label>
-                              {gitops.application.revision && <span style={{ ...muted, marginLeft: 8 }}>@ {gitops.application.revision}</span>}
-                              {gitops.application.url && (
-                                <>{' · '}<Button id="acm-argocd-app" variant="link" isInline component="a"
-                                  href={gitops.application.url} target="_blank" rel="noreferrer"
-                                  icon={<ExternalLinkAltIcon />} iconPosition="end">View in Argo CD</Button></>
-                              )}
-                            </>
-                          ) : <span style={muted}>not deployed yet</span>}
-                          <Button id="acm-gitops-deploy" variant="secondary" isInline style={{ marginLeft: 8 }}
-                            isDisabled={!hubUp || !ready || busy || cluster.task_running}
-                            onClick={() => run(async () => { const g = await clusterApi.acmGitopsDeploy(cluster.id); setGitops(g); })}>
-                            {gitops.application ? 'Re-sync' : 'Deploy (apply Application)'}
-                          </Button>
-                        </DescriptionListDescription>
-                      </DescriptionListGroup>
-                    )}
-                  </DescriptionList>
-                </StackItem>
-
-                <StackItem><Divider /></StackItem>
-
-                {/* 3. What's in the repo */}
-                <StackItem>
-                  <Title headingLevel="h3" size="md" style={{ marginBottom: 8 }}>3. Tracked spokes &amp; history</Title>
-                  <DescriptionList isHorizontal isCompact>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Spokes in git</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        {gitops.spokes.length ? gitops.spokes.map((s) => <Label key={s} isCompact style={{ marginRight: 6 }}>{s}</Label>) : '—'}
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                    <DescriptionListGroup>
-                      <DescriptionListTerm>Recent commits</DescriptionListTerm>
-                      <DescriptionListDescription>
-                        {gitops.commits.length ? (
-                          <ul style={{ margin: 0, paddingLeft: 18 }}>
-                            {gitops.commits.slice(0, 5).map((c) => (
-                              <li key={c.commit}><code>{c.commit}</code> {c.message}</li>
-                            ))}
-                          </ul>
-                        ) : '—'}
-                      </DescriptionListDescription>
-                    </DescriptionListGroup>
-                  </DescriptionList>
-                </StackItem>
-              </Stack>
-            </CardBody>
-          </Card>
+          <AcmGitopsCard cluster={cluster} gitops={gitops} addon={gitopsAddon} spokes={acm.spokes}
+            canAct={hubUp && ready && !busy && !cluster.task_running} busy={busy}
+            onInstall={() => run(() => clusterApi.addAddon(cluster.id, { kind: 'gitops' }))}
+            onSync={() => run(async () => { const g = await clusterApi.acmGitopsDeploy(cluster.id); setGitops(g); })}
+            onShowYaml={(name, manifest) => setSiteConfig({ name, manifest })} />
         </StackItem>
       )}
 
-      <Modal title={`SiteConfig ClusterInstance — ${siteConfig?.name || ''}`} isOpen={!!siteConfig}
+      <Modal title={siteConfig?.name.startsWith('Argo CD') ? siteConfig.name : `SiteConfig ClusterInstance — ${siteConfig?.name || ''}`} isOpen={!!siteConfig}
         variant={ModalVariant.large} onClose={() => setSiteConfig(null)}
         actions={[
           <Button key="copy" variant="secondary"
             onClick={() => navigator.clipboard?.writeText(siteConfig?.manifest || '')}>Copy</Button>,
           <Button key="close" variant="link" onClick={() => setSiteConfig(null)}>Close</Button>,
         ]}>
-        <div style={{ ...muted, marginBottom: 8 }}>
+        {siteConfig?.name.startsWith('Argo CD') ? (
+          <div style={{ ...muted, marginBottom: 8 }}>
+            What the app applies on the hub to connect Argo CD to the spokes repository: it syncs the
+            <code> clusters/</code> folder of branch <code>main</code>, with auto-sync, prune and self-heal.
+          </div>
+        ) : <div style={{ ...muted, marginBottom: 8 }}>
           The GitOps form of this spoke — commit it to your git repo for Argo CD / the SiteConfig operator. The
           vm-manager app applies the expanded CRs directly; this is the same spoke as a <code>ClusterInstance</code>.
           Create the pull-secret and fill the BMC password before applying.
-        </div>
+        </div>}
         <pre style={{ maxHeight: '60vh', overflow: 'auto', fontSize: 12, whiteSpace: 'pre',
           background: 'var(--pf-v5-global--BackgroundColor--200)', padding: 12, borderRadius: 4 }}>
           {siteConfig?.manifest}

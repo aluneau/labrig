@@ -589,6 +589,7 @@ export interface AcmSpoke {
   real_bmh?: boolean; // built on a real physical server vs an emulated-BMC VM member
   topology?: string | null; // sno | tna | compact | ha
   node_count?: number;
+  gitops?: boolean; // deployed from git (Argo CD applied its manifests) rather than applied directly
 }
 
 /** A static network for a real bare-metal spoke (no lab-group router / DHCP). For a single-node spoke `ip` is
@@ -645,6 +646,11 @@ export interface AcmArgoApplication {
   revision?: string | null;
   repo_url?: string | null;
   url?: string | null; // deep-link into the Argo CD web console for this Application
+  reconciled_at?: string | null; // last time Argo CD compared git with the hub
+  /** the last sync operation: phase Running | Succeeded | Failed | Error + Argo CD's message */
+  operation?: { phase?: string | null; message?: string | null; started_at?: string | null; finished_at?: string | null } | null;
+  /** per spoke (folder clusters/<name>/): worst sync / health of its resources on the hub */
+  spokes?: Record<string, { sync?: string | null; health?: string | null; resources?: number; out_of_sync?: number }>;
 }
 
 /** The GitOps repo of spoke manifests (the source of truth for deploying clusters from git) */
