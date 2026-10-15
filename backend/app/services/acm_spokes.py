@@ -380,7 +380,10 @@ class SpokeService:
             {"apiVersion": "agent-install.openshift.io/v1beta1", "kind": "InfraEnv",
              "metadata": {"name": name, "namespace": name},
              "spec": {"clusterRef": {"name": name, "namespace": name}, "pullSecretRef": {"name": "pull-secret"},
-                      "sshAuthorizedKey": ssh_pub, "agentLabels": {"vmm-spoke": name}}},
+                      "sshAuthorizedKey": ssh_pub, "agentLabels": {"vmm-spoke": name},
+                      # chrony on the router: the DHCP NTP option alone leaves the discovery agent with no
+                      # source ("Host couldn't synchronize with any NTP server"), as for the hub's agent-config
+                      "additionalNTPSources": [network.gateway()]}},
             {"apiVersion": "metal3.io/v1alpha1", "kind": "BareMetalHost",
              "metadata": {"name": member["name"], "namespace": name,
                           "labels": {"infraenvs.agent-install.openshift.io": name},
