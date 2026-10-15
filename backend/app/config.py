@@ -121,8 +121,11 @@ class Settings(BaseSettings):
     # set to 0.0.0.0 to reach them from the LAN (they have no password).
     VNC_LISTEN: str = "127.0.0.1"
 
-    # CORS (also the extra origins accepted on cookie-authenticated WebSockets / writes, e.g. the dev UI)
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+    # CORS (also the extra origins accepted on cookie-authenticated WebSockets / writes). Empty by default: a
+    # listed origin gets full credentialed access with the session cookie, and localhost:<any port> is the
+    # same *site* as localhost:8000 for SameSite=strict, so whatever serves those ports could act as the user.
+    # `run.sh --dev` sets it for the CRA dev UI (http://localhost:3000).
+    CORS_ORIGINS: list[str] = []
 
     # Authentication (docs/auth.md). Users = the host's Linux accounts, checked through PAM.
     # false: no login at all (everyone is admin): only on a trusted machine / loopback.

@@ -124,7 +124,7 @@ known account name on purpose. Expose the app only to networks you trust, or ski
   live in memory: a restart resets them.
 - **CSRF**: the cookie is `SameSite=Strict`. On top of that, every write made with the cookie must carry the
   `X-VMM-Request` header (the UI adds it; a cross-site form can't), and its `Origin`, if any, must be the
-  app's own (or one of `CORS_ORIGINS`, for the dev UI on :3000). Requests with a Bearer token are exempt:
+  app's own (or one of `CORS_ORIGINS`: empty by default, `run.sh --dev` sets it to the dev UI on :3000). Requests with a Bearer token are exempt:
   browsers never send a token on their own.
 - **WebSocket hijacking**: the VNC WebSocket needs the session cookie **and** a same-origin `Origin` header.
   Otherwise the handshake is refused (HTTP 403).

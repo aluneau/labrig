@@ -23,5 +23,10 @@ if ! id -nG | grep -qw libvirt; then
   echo "         run 'sudo usermod -aG libvirt $(id -un)' and log in again." >&2
 fi
 
+if [ "${1:-}" = "--dev" ] && [ -z "${CORS_ORIGINS:-}" ]; then
+  # the dev UI on :3000 proxies /api with its own Origin: accept it (never in production, see config.py)
+  export CORS_ORIGINS='["http://localhost:3000"]'
+fi
+
 cd backend
 exec venv/bin/python -m uvicorn app.main:app --host "$HOST" --port "$PORT" --timeout-graceful-shutdown 3 ${1:+--reload}
