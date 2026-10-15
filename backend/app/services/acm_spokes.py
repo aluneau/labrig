@@ -497,6 +497,8 @@ class SpokeService:
                 ipaddress.ip_address(ip)
             except ValueError:
                 raise ValueError(f"Host '{host.name}': invalid node IP {ip!r}")
+            if ip in all_ips:
+                raise ValueError(f"Host '{host.name}': node IP {ip} is already given to another host")
             net_i = str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
             machine_net = machine_net or net_i
             if net_i != machine_net:
@@ -853,7 +855,7 @@ class SpokeService:
                 raise TimeoutError(f"Argo CD did not sync the spoke manifests within {timeout // 60} min. Check the "
                                    "Argo CD Application (hub ACM tab -> Deploy from git) and that the controller "
                                    "can reach the in-lab git server.")
-            time.sleep(15)
+            runner.sleep(15)  # the task's sleep: raises when the task is cancelled
 
     def _monitor_real(self, db: Session, task: Task, hub: Cluster, cluster: Cluster, hosts: List[Any]) -> None:
         """Follow a real-BMH spoke's install on the hub to completion (discovery -> install -> kubeconfig ->

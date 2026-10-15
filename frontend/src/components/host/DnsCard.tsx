@@ -104,7 +104,7 @@ export const DnsCard: React.FC = () => {
                   <Tbody>
                     {dns.zones.map((z) => (
                       <Tr key={z.cluster}>
-                        <Td>{z.cluster}</Td><Td><code>*.apps.{z.zone}</code>, <code>api.{z.zone}</code></Td><Td>{z.ip || '—'}</Td>
+                        <Td>{z.cluster}</Td><Td><code>*.apps.{z.zone}</code>, <code>api.{z.zone}</code></Td><Td>{z.apps_ip && z.apps_ip !== z.ip ? `api ${z.ip || '—'}, *.apps ${z.apps_ip}` : (z.ip || '—')}</Td>
                       </Tr>
                     ))}
                   </Tbody>
