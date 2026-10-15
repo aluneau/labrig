@@ -660,6 +660,8 @@ export interface AcmGitops {
   repo_path: string;
   clone_url?: string | null;
   spokes: string[];
+  path?: string | null; // the hub's folder in the repo (clusters/<hub>), synced by its Argo CD Application
+  missing_from_git?: string[]; // GitOps spokes of this hub whose folder is no longer in git (deleted there)
   commits: { commit: string; date: string; message: string }[];
   argocd_installed: boolean;
   argocd_url?: string | null; // the Argo CD web console (openshift-gitops-server Route on the hub)

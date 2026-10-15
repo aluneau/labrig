@@ -262,8 +262,8 @@ export const clusterApi = {
     post<Task>(`/clusters/${id}/acm/managed`, { cluster_id: clusterId, method }),
   acmDetach: (id: number, name: string) => del<Task>(`/clusters/${id}/acm/managed/${encodeURIComponent(name)}`),
   /** The hub provisions a spoke on an emulated-BMC member: returns the new cluster (its own page, kubeconfig, delete) */
-  acmSpoke: (id: number, name: string, machine: string, version?: string | null) =>
-    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, version: version || null }),
+  acmSpoke: (id: number, name: string, machine: string, gitops = false, version?: string | null) =>
+    post<Cluster>(`/clusters/${id}/acm/spokes`, { name, machine, gitops, version: version || null }),
   /** The hub provisions a single-node spoke on a REAL BareMetalHost with its static network. gitops = Argo CD. */
   acmSpokeHost: (id: number, name: string, hostId: number, net: AcmSpokeNet, gitops = false, version?: string | null) =>
     post<Cluster>(`/clusters/${id}/acm/spokes`, { name, host_id: hostId, net, gitops, version: version || null }),

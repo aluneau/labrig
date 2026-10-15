@@ -363,7 +363,7 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                     await clusterApi.acmSpokeHost(cluster.id, spokeName, Number(spokeMachine.slice(5)),
                       { ip: spokeIp.trim(), ...net }, spokeGitops && !!gitops?.argocd_installed);
                   } else if (isSno) {
-                    await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine.slice(7));
+                    await clusterApi.acmSpoke(cluster.id, spokeName, spokeMachine.slice(7), spokeGitops && !!gitops?.argocd_installed);
                   } else {
                     await clusterApi.acmSpokeMulti(cluster.id, spokeName, spokeTopology,
                       rows.map((r, i) => ({ host_id: Number(r.sel.slice(5)), ip: r.ip.trim(), role: roles[i],
@@ -442,6 +442,9 @@ export const AcmHub: React.FC<{ cluster: Cluster; onChanged: () => void }> = ({ 
                         </div>
                         {gitopsChoice('acm-spoke-gitops')}
                       </StackItem>
+                    )}
+                    {isSno && !isHost && spokeMachine.startsWith('member:') && gitops?.enabled && (
+                      <StackItem>{gitopsChoice('acm-spoke-gitops-machine')}</StackItem>
                     )}
                     {!isSno && (
                       <StackItem>

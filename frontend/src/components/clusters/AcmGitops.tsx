@@ -32,7 +32,7 @@ const tile: React.CSSProperties = {
   border: '1px solid var(--pf-v5-global--BorderColor--100)', borderRadius: 6, padding: '10px 12px', height: '100%',
   minWidth: 0, overflowWrap: 'anywhere',
 };
-const SPOKE_FILES = ['manifests.yaml', 'siteconfig.yaml', 'kustomization.yaml'];
+const SPOKE_FILES = ['manifests.yaml', 'siteconfig.yaml'];
 /** How often Argo CD looks at git by itself (its default timeout.reconciliation) */
 const ARGO_POLL = '3 minutes';
 
@@ -186,7 +186,7 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
         return (
           <Alert isInline variant="warning" title="Argo CD is installed but not connected to the spokes repository yet">
             Connecting pushes the repository to the git server on this host and creates the Argo CD Application
-            <code> {cluster.name}-spokes</code> that applies its <code>clusters/</code> folder to the hub. Provisioning a
+            <code> {cluster.name}-spokes</code> that applies its <code>clusters/&lt;hub&gt;/</code> folder to the hub. Provisioning a
             spoke with <em>Deploy from git</em> also does it.
             {actions(syncButton('Connect Argo CD to git', 'primary'))}
           </Alert>
@@ -297,8 +297,9 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
 
   // ---- 3. What's in git: one row per spoke folder + recent commits
   const spokeRows = Array.from(new Set([...g.spokes, ...spokes.filter((s) => s.gitops).map((s) => s.name)])).sort();
+  const hubDir = g.path || `clusters/${cluster.name}`;
   const fileLink = (spoke: string, f: string) => (repoWeb && srv.running ? (
-    <a key={f} href={`${repoWeb}/src/branch/main/clusters/${spoke}/${f}`} target="_blank" rel="noreferrer" style={{ marginRight: 10, whiteSpace: 'nowrap', display: 'inline-block' }}>{f}</a>
+    <a key={f} href={`${repoWeb}/src/branch/main/${hubDir}/${spoke}/${f}`} target="_blank" rel="noreferrer" style={{ marginRight: 10, whiteSpace: 'nowrap', display: 'inline-block' }}>{f}</a>
   ) : <code key={f} style={{ marginRight: 10, whiteSpace: 'nowrap', display: 'inline-block' }}>{f}</code>);
   const files = (
     <div id="acm-gitops-files">
@@ -306,9 +307,15 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
         <CodeBranchIcon style={{ marginRight: 6 }} />What&apos;s in git
       </Title>
       <div style={{ ...muted, marginBottom: 8 }}>
-        Branch <code>main</code>, folder <code>clusters/</code>: one folder per spoke. The pull secret and BMC passwords
+        Branch <code>main</code>, folder <code>{hubDir}/</code>: one folder per spoke. The pull secret and BMC passwords
         are never committed: the app creates them on the hub.
       </div>
+      {g.missing_from_git && g.missing_from_git.length ? (
+        <div style={{ ...muted, marginBottom: 8 }}>
+          <StateIcon s="warn" />Removed from git: <code>{g.missing_from_git.join(', ')}</code>. Argo CD deletes their
+          hub resources once it syncs that commit; delete the spoke here too to clean up the app&apos;s side.
+        </div>
+      ) : null}
       {spokeRows.length === 0 ? (
         <div style={{ ...tile, height: 'auto', textAlign: 'center', padding: 16 }} id="acm-gitops-empty">
           <div style={{ fontWeight: 600 }}>No spoke in git yet</div>
@@ -384,7 +391,7 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
           {srv.firewall && <div style={muted}>{srv.firewall}</div>}
         </li>
         <li style={{ marginBottom: 8 }}>
-          Edit <code>clusters/&lt;spoke&gt;/manifests.yaml</code>, commit, and push with the Gitea login:
+          Edit <code>{hubDir}/&lt;spoke&gt;/manifests.yaml</code>, commit, and push with the Gitea login:
           <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
             <span>user <code>{srv.admin_user || 'vmmanager'}</code></span>
             {!creds ? (
@@ -403,9 +410,10 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
         <li style={{ marginBottom: 8 }}>Argo CD applies the new commit within {ARGO_POLL} (or press <em>Sync now</em>).</li>
       </ol>
       <Alert isInline isPlain variant="warning" title="The app's own copy wins">
-        The app keeps the repository on this host (<code>{g.repo_path}</code>) and pushes it, replacing the branch, each
-        time it provisions or deletes a GitOps spoke and on <em>Sync now</em>. Commits pushed from elsewhere are then
-        lost: keep them for experiments, or make the change in the app.
+        The app keeps the repository on this host (<code>{g.repo_path}</code>). Before each push (GitOps spoke
+        provisioned or deleted, <em>Sync now</em>) it merges what is in Gitea, so your commits are kept; the app&apos;s
+        manifests win where both changed the same spoke, and if the histories can&apos;t be merged Gitea&apos;s version
+        is saved as a <code>backup/&lt;time&gt;</code> branch.
       </Alert>
     </ExpandableSection>
   );
@@ -421,7 +429,7 @@ export const AcmGitopsCard: React.FC<Props> = ({ cluster, gitops: g, addon, spok
         </FlexItem>
         <FlexItem flex={{ default: 'flex_1' }} style={{ ...tile, height: 'auto' }}>
           <strong>From git (GitOps / ZTP)</strong>
-          <div style={muted}>The app commits the same manifests to <code>clusters/&lt;spoke&gt;/</code>, pushes the repository
+          <div style={muted}>The app commits the same manifests to <code>clusters/&lt;hub&gt;/&lt;spoke&gt;/</code>, pushes the repository
             to the git server on this host, and Argo CD on the hub applies them, as in a customer&apos;s zero touch
             provisioning setup. Deleting the spoke removes its folder; Argo CD then deletes its resources.</div>
         </FlexItem>
