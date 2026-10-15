@@ -458,7 +458,7 @@ class SpokeRequest(BaseModel):
 
 @router.get("/{group_id}/bmc")
 def bmc_status(group_id: int, db: Session = Depends(get_db)):
-    """The group's Redfish emulator (address, running) and one redfish-virtualmedia:// address per BMC member"""
+    """The group's Redfish emulator (address, running) and one redfish-virtualmedia+http:// address per BMC member"""
     from app.services import bmc_service
     return bmc_service.status(_group_or_404(db, group_id))
 

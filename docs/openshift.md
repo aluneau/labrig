@@ -186,7 +186,8 @@ Ironic powers a server and boots it from a virtual-media ISO, the assisted insta
   group's uplink network (e.g. `192.168.122.1`) on a port of `BMC_HOST_PORTS` (8180-8199), HTTP basic auth with
   per-group credentials (`GET /groups/{id}/bmc/credentials`, never in the spec), and only the group's BMC members
   visible (other VMs: 404). Group page → **BMC (Redfish)** tab: each machine's
-  `redfish-virtualmedia://192.168.122.1:8180/redfish/v1/Systems/<uuid>` address (copy it into a BareMetalHost's
+  `redfish-virtualmedia+http://192.168.122.1:8180/redfish/v1/Systems/<uuid>` address (plain HTTP: without `+http`
+  Ironic speaks TLS to the emulator and the host stays in "Redfish connection failed"; copy it into a BareMetalHost's
   `bmc.address`, with `disableCertificateVerification: true`), its boot MAC, and **Add spoke machines** (N empty
   members `spoke-N`, 16 GiB / 8 vCPU / 120 GiB by default, created powered off: the hub powers them).
   API: `GET /groups/{id}/bmc`, `POST /groups/{id}/bmc/spokes {count, memory, vcpu, disk_size}`; OpenTofu

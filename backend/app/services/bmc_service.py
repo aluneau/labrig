@@ -249,7 +249,8 @@ def status(group: Group) -> Dict[str, Any]:
         member = next((m for m in spec.get("members") or [] if m["name"] == name), {})
         members.append({
             "name": name, "vm": vm, "uuid": uuid, "mac": member.get("mac"), "ip": member.get("ip"),
-            "redfish_url": f"redfish-virtualmedia://{addr}/redfish/v1/Systems/{uuid}" if addr and uuid else None,
+            # +http: the emulator serves plain HTTP, Ironic defaults to https for redfish-virtualmedia://
+            "redfish_url": f"redfish-virtualmedia+http://{addr}/redfish/v1/Systems/{uuid}" if addr and uuid else None,
         })
     problem = available()
     return {"enabled": bool(names), "address": addr, "running": supervisor.running(group.name),
