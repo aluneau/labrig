@@ -75,7 +75,7 @@ async function waitSynced(hubId, label, head) {
     const a = s.application;
     if (!a) return null;
     const rev = head || s.head;
-    return a.sync === 'Synced' && a.operation === 'Succeeded' && (!rev || a.revision === rev.slice(0, 7)) ? s : null;
+    return a.sync === 'Synced' && a.operation?.phase === 'Succeeded' && (!rev || a.revision === rev.slice(0, 7)) ? s : null;
   }, 10, label);
 }
 

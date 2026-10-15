@@ -370,6 +370,7 @@ class Supervisor:
 
 
 supervisor = Supervisor()
+_last_error: Optional[str] = None  # the last failed start (reconcile at startup), for status()
 _ready_lock = threading.Lock()
 
 
@@ -398,6 +399,8 @@ def ensure_ready(timeout: int = 120) -> Dict[str, Any]:
         raise RuntimeError(f"The Gitea git server did not answer on :{port} within {timeout}s "
                            f"(see {base_dir()/'gitea.out'})")
     _ensure_repo(port, password)
+    global _last_error
+    _last_error = None
     state = _load_state()
     state["clone_url"] = clone_url()
     _save_state(state)
@@ -464,7 +467,7 @@ def status() -> Dict[str, Any]:
         "admin_user": ADMIN_USER,
         "bootstrapped": has_port,
         "repo_path": str(base_dir()),
-        "error": problem,
+        "error": problem or _last_error,
         "firewall": (f"The hub's Argo CD must reach this port over the LAN: scripts/setup.sh opens "
                      f"GIT_HOST_PORTS ({settings.GIT_HOST_PORTS}/tcp)"),
     }
@@ -504,4 +507,6 @@ def reconcile() -> None:
     try:
         ensure_ready(timeout=60)
     except Exception as e:  # pragma: no cover - startup must not fail over the git server
+        global _last_error
+        _last_error = f"The git server did not start: {redact(str(e))}"
         logger.warning(f"Git server reconcile: {e}")

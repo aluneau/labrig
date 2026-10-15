@@ -426,19 +426,16 @@ class GitOpsService:
         except ValueError:
             return None
         status = body.get("status") or {}
-        op = status.get("operationState") or {}
         return {"name": self.app_name(hub),
                 "sync": (status.get("sync") or {}).get("status"),
                 "health": (status.get("health") or {}).get("status"),
                 "revision": ((status.get("sync") or {}).get("revision") or "")[:7],
                 "path": ((body.get("spec") or {}).get("source") or {}).get("path"),
-                "operation": op.get("phase"),
-                "message": (op.get("message") or "")[:300] or None,
                 "repo_url": self.repo_url(),
                 "url": self.application_url(console, hub),
                 "reconciled_at": status.get("reconciledAt"),
                 "operation": self._operation_view(status.get("operationState") or {}),
-                "spokes": self._spoke_resources(status.get("resources") or [])}
+                "spokes": self._spoke_resources(hub.name, status.get("resources") or [])}
 
     @staticmethod
     def _operation_view(op: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -448,10 +445,10 @@ class GitOpsService:
         return {"phase": op.get("phase"), "message": (op.get("message") or "")[:600],
                 "started_at": op.get("startedAt"), "finished_at": op.get("finishedAt")}
 
-    def _spoke_resources(self, resources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _spoke_resources(self, hub_name: str, resources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """Per-spoke rollup of the Application's resources (namespaced ones by namespace, cluster-scoped ones such
         as the ManagedCluster by name): worst sync / health state + resource count."""
-        spokes = set(p.name for p in (self.repo / "clusters").glob("*")) if (self.repo / "clusters").is_dir() else set()
+        spokes = set(self._spoke_dirs(hub_name))
         bad_health = ["Missing", "Degraded", "Progressing", "Suspended", "Unknown"]
         out: Dict[str, Dict[str, Any]] = {}
         for r in resources:
