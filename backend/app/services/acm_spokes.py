@@ -1281,7 +1281,7 @@ class SpokeService:
             if len(nodes) > 1:
                 machine = f"{machine} +{len(nodes) - 1} more"
             entry = {"id": c.id, "name": c.name, "machine": machine, "version": c.version,
-                     "real_bmh": p.get("host_id") is not None,
+                     "real_bmh": p.get("host_id") is not None, "gitops": bool((c.spec or {}).get("gitops")),
                      "topology": ((c.spec or {}).get("openshift") or {}).get("topology"),
                      "node_count": len(nodes) or (len(c.nodes) if c.nodes else 1),
                      "state": d["status"], "message": d["status_message"],

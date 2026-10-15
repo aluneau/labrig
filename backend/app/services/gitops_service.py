@@ -435,7 +435,38 @@ class GitOpsService:
                 "operation": op.get("phase"),
                 "message": (op.get("message") or "")[:300] or None,
                 "repo_url": self.repo_url(),
-                "url": self.application_url(console, hub)}
+                "url": self.application_url(console, hub),
+                "reconciled_at": status.get("reconciledAt"),
+                "operation": self._operation_view(status.get("operationState") or {}),
+                "spokes": self._spoke_resources(status.get("resources") or [])}
+
+    @staticmethod
+    def _operation_view(op: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The last Argo CD sync operation, for the UI: phase (Running | Succeeded | Failed | Error) + its message."""
+        if not op:
+            return None
+        return {"phase": op.get("phase"), "message": (op.get("message") or "")[:600],
+                "started_at": op.get("startedAt"), "finished_at": op.get("finishedAt")}
+
+    def _spoke_resources(self, resources: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Per-spoke rollup of the Application's resources (namespaced ones by namespace, cluster-scoped ones such
+        as the ManagedCluster by name): worst sync / health state + resource count."""
+        spokes = set(p.name for p in (self.repo / "clusters").glob("*")) if (self.repo / "clusters").is_dir() else set()
+        bad_health = ["Missing", "Degraded", "Progressing", "Suspended", "Unknown"]
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in resources:
+            name = r.get("namespace") if r.get("namespace") in spokes else r.get("name") if r.get("name") in spokes else None
+            if not name:
+                continue
+            e = out.setdefault(name, {"sync": "Synced", "health": "Healthy", "resources": 0, "out_of_sync": 0})
+            e["resources"] += 1
+            if r.get("status") and r.get("status") != "Synced":
+                e["out_of_sync"] += 1
+                e["sync"] = r.get("status")
+            h = (r.get("health") or {}).get("status")
+            if h in bad_health and (e["health"] not in bad_health or bad_health.index(h) < bad_health.index(e["health"])):
+                e["health"] = h
+        return out
 
     # ------------------------------------------------------------------ views
 

@@ -81,20 +81,22 @@ async def login(request: Request, response: Response, body: Optional[LoginReques
             username = None
         loop = asyncio.get_running_loop()
         started = loop.time()
-        ok, reason = (await run_in_threadpool(auth_service.check_password, username, body.password)
-                      if username else (False, "unknown user"))
+        # Role first: the password of an account that may not use the app is never checked, so the login
+        # page is not a password oracle (nor a pam_faillock lock-out lever) for every account on the host
+        role = await run_in_threadpool(auth_service.role_of, username, False) if username else None
+        if username is None:
+            ok, reason = False, "unknown user"
+        elif role is None:
+            ok, reason = False, "not in an admin or viewer group (password not checked)"
+        else:
+            ok, reason = await run_in_threadpool(auth_service.check_password, username, body.password)
         if not ok:
             limiter.failed(ip, name)
             await asyncio.sleep(max(0.0, FAILURE_FLOOR - (loop.time() - started)))
             audit_log.info(f"login failed user={name} ip={ip}: {reason}")
-            raise HTTPException(status_code=401, detail="Invalid user name or password")
+            raise HTTPException(status_code=401, detail="Invalid user name or password, or the account is not in "
+                                                        "a VM Manager group (ask an admin)")
         limiter.succeeded(ip, name)
-        role = await run_in_threadpool(auth_service.role_of, username, False)
-        if role is None:
-            audit_log.info(f"login refused user={username} ip={ip}: not in an admin or viewer group")
-            groups = ", ".join(_split(settings.AUTH_ADMIN_GROUPS) + _split(settings.AUTH_VIEWER_GROUPS))
-            raise HTTPException(status_code=403, detail=f"{username} is not allowed to use VM Manager: "
-                                                        f"ask an admin to add it to one of these groups: {groups}")
     value = await run_in_threadpool(auth_service.create_session, db, username, ip,
                                     request.headers.get("user-agent", ""))
     response.set_cookie(SESSION_COOKIE, value, httponly=True, samesite="strict", secure=_secure(request),
