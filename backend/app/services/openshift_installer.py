@@ -44,7 +44,8 @@ from app.services.group_service import group_service, network_name as group_netw
 from app.services import acm, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
-from app.services.openshift_service import CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, openshift_service
+from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, managed_by,
+                                            managed_operator_error, openshift_service)
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
 
@@ -180,7 +181,14 @@ class OpenShiftInstaller:
         openshift_service.pull_secret()  # raises when missing
         counts = topology_counts(opts, data.workers)
         if opts.storage == "odf" and counts["masters"] + counts["workers"] < 3:
-            raise ValueError("ODF needs 3 nodes: use LVMS on single-node OpenShift")
+            raise ValueError('ODF needs 3 nodes: set "topology": "compact" (3 masters that also run ODF) or "ha" '
+                             'with 3+ workers, or use LVMS ("storage": "lvms") on single-node OpenShift')
+        enabled = {"storage:lvms": opts.storage == "lvms", "storage:odf": opts.storage == "odf",
+                   "sriov": opts.sriov.enabled, "metallb": opts.metallb.enabled, "acm": opts.acm}
+        for op in opts.operators:
+            owner = managed_by(op.name)
+            if owner and not enabled[owner]:  # it would be skipped: the option installs and configures it
+                raise ValueError(managed_operator_error(op.name, day2=False))
         if opts.storage == "odf" and opts.topology == "ha" and 0 < counts["workers"] < 3:
             raise ValueError("ODF on an HA cluster runs on the workers: 3 workers at least (or use compact)")
         try:
@@ -259,6 +267,15 @@ class OpenShiftInstaller:
             if not given and role in roles:
                 res["memory"] += ODF_EXTRA[opts.odf_profile]["memory"]
                 res["vcpu"] += ODF_EXTRA[opts.odf_profile]["vcpu"]
+            elif role in roles:  # sized by the request: ODF's Ceph pods need room on top of OpenShift
+                extra = ODF_EXTRA[opts.odf_profile]
+                need = {k: MINIMUMS[kind][k] + extra[k] for k in ("memory", "vcpu")}
+                if any(res[k] < v for k, v in need.items()):
+                    raise ValueError(
+                        f"ODF ({opts.odf_profile} profile) runs on the {'masters' if role == 'ctlplane' else 'workers'}"
+                        f": they need at least {need['memory']} MiB and {need['vcpu']} vCPU (OpenShift minimum + "
+                        f"{extra['memory']} MiB / {extra['vcpu']} vCPU for Ceph), not {res['memory']} MiB / "
+                        f"{res['vcpu']} vCPU. Leave \"{role}\" out to get the defaults with the ODF overhead included.")
             if not given and opts.acm and (role == "worker" or not counts["workers"]):
                 # ACM hub: the nodes that run it get its documented reservation on top
                 for k, v in acm.HUB_DEFAULTS[kind].items():
@@ -1421,6 +1438,11 @@ class OpenShiftInstaller:
 
     def add_addon(self, db: Session, cluster: Cluster, request: Any) -> Task:
         """POST /clusters/{id}/openshift/addons: install one add-on on a ready cluster"""
+        refused = request.operator and managed_operator_error(request.operator.name, day2=True)
+        if request.kind == "operator" and refused:  # a bare operator without the app's setup (disks, CRs, pools)
+            raise ValueError(refused)
+        if request.kind == "odf" and len(cluster.nodes) < 3:
+            raise ValueError("ODF needs 3 nodes (Ceph replicates over 3): use LVMS on this cluster")
         if self.svc.to_dict(db, cluster)["status"] != "ready":
             raise ValueError("Start the cluster first")
         os_spec = dict(cluster.spec.get("openshift") or {})
@@ -1435,18 +1457,19 @@ class OpenShiftInstaller:
             if os_spec.get("storage") not in (None, "none", kind):
                 raise ValueError(f"The cluster already uses {os_spec['storage']} storage")
             workers = sum(1 for n in cluster.nodes if n.role == "worker")
-            if kind == "odf" and len(cluster.nodes) < 3:
-                raise ValueError("ODF needs 3 nodes")
             os_spec["storage"] = kind
             # Bare-metal nodes use their own spare disks (LVMS auto-discovers them); only VM nodes need the
-            # app-attached vmm-storage virtio disk.
+            # app-attached vmm-storage virtio disk: hot-plugged here when missing (as at create).
             missing = [] if self._is_bmh(cluster) else [
                 n.name for n in cluster.nodes
                 if n.role in storage_roles(OpenShiftOptions.model_validate(os_spec), workers)
                 and not self._has_storage_disk(n.name)]
-            if missing:
-                raise ValueError(f"{', '.join(missing)} have no storage disk: add a {os_spec.get('storage_disk_size', 100)} "
-                                 f"GiB disk with serial '{STORAGE_SERIAL}' first, or create the cluster with storage")
+            pending = [vm for vm in missing
+                       if self._attach_storage_disk(vm, int(os_spec.get("storage_disk_size") or 100))["pending"]]
+            if pending:
+                raise ValueError(f"The storage disk (serial '{STORAGE_SERIAL}') could not be hot-plugged into "
+                                 f"{', '.join(pending)}: it is attached for the next start. Stop and start the "
+                                 f"cluster, then add {kind} again")
             kind, name = "storage", kind
         elif kind == "sriov":
             if not all(self._has_igb(n.name) for n in cluster.nodes):
@@ -1538,6 +1561,19 @@ class OpenShiftInstaller:
     def _has_storage_disk(vm: str) -> bool:
         xml = libvirt_client.get_vm_xml(vm) or ""
         return f"<serial>{STORAGE_SERIAL}</serial>" in xml
+
+    @staticmethod
+    def _attach_storage_disk(vm: str, size_gb: int) -> Dict[str, Any]:
+        """Day-2 LVMS / ODF: the empty virtio disk with serial vmm-storage (hot-plugged when the node runs)"""
+        pool_name = libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
+        path = libvirt_client.create_volume(pool_name, libvirt_client.free_volume_name(pool_name, f"{vm}-storage", "qcow2"),
+                                            size_gb * 1024 ** 3, "qcow2")
+        try:
+            return libvirt_client.attach_disk(vm, domain_xml.data_disk_xml(
+                path, libvirt_client.next_disk_target(vm, "vd"), "virtio", "qcow2", serial=STORAGE_SERIAL))
+        except Exception:
+            libvirt_client.delete_volume_by_path(path)
+            raise
 
     @staticmethod
     def _has_igb(vm: str) -> bool:
