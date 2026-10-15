@@ -72,7 +72,8 @@ installs SNO through `BareMetalHost` / `InfraEnv` / `NMStateConfig` / `AgentClus
 physical server, next to the emulated-BMC (VM) spokes. See `docs/openshift.md` → *Real bare-metal spokes*.
 
 **GitOps / ZTP from git**: instead of the app applying those CRs directly, tick *Deploy via GitOps* — the spoke's
-manifests are committed to an in-lab git server and synced onto the hub by OpenShift GitOps (Argo CD). Install Argo
+manifests are committed to an in-lab git server (`clusters/<hub>/<spoke>/`) and synced onto the hub by OpenShift
+GitOps (Argo CD); deleting that directory in git deprovisions the spoke. Install Argo
 CD and deploy the Application from the hub's ACM tab → *Deploy from git (GitOps)*. See `docs/openshift.md` →
 *GitOps / ZTP (deploy a spoke from git)*.
 
