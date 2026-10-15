@@ -1464,8 +1464,10 @@ class OpenShiftInstaller:
                 n.name for n in cluster.nodes
                 if n.role in storage_roles(OpenShiftOptions.model_validate(os_spec), workers)
                 and not self._has_storage_disk(n.name)]
-            pending = [vm for vm in missing
-                       if self._attach_storage_disk(vm, int(os_spec.get("storage_disk_size") or 100))["pending"]]
+            # already attached "for the next start" by an earlier try: don't attach a second disk
+            pending = [vm for vm in missing if self._has_storage_disk(vm, inactive=True)]
+            pending += [vm for vm in missing if vm not in pending
+                        and self._attach_storage_disk(vm, int(os_spec.get("storage_disk_size") or 100))["pending"]]
             if pending:
                 raise ValueError(f"The storage disk (serial '{STORAGE_SERIAL}') could not be hot-plugged into "
                                  f"{', '.join(pending)}: it is attached for the next start. Stop and start the "
@@ -1558,8 +1560,8 @@ class OpenShiftInstaller:
         return self.svc._run_task(db, cluster, "addon", f"Add {name} to", run)
 
     @staticmethod
-    def _has_storage_disk(vm: str) -> bool:
-        xml = libvirt_client.get_vm_xml(vm) or ""
+    def _has_storage_disk(vm: str, inactive: bool = False) -> bool:
+        xml = libvirt_client.get_vm_xml(vm, inactive=inactive) or ""
         return f"<serial>{STORAGE_SERIAL}</serial>" in xml
 
     @staticmethod

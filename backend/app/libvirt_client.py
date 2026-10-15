@@ -284,9 +284,9 @@ class LibvirtClient:
             "autostart": bool(domain.autostart()),
         }
 
-    def get_vm_xml(self, name: str) -> Optional[str]:
+    def get_vm_xml(self, name: str, inactive: bool = False) -> Optional[str]:
         try:
-            return self.connect().lookupByName(name).XMLDesc(0)
+            return self.connect().lookupByName(name).XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE if inactive else 0)
         except libvirt.libvirtError:
             return None
 
