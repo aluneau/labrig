@@ -152,9 +152,12 @@ def check_password(username: str, password: str) -> Tuple[bool, str]:
 # ---- login backoff ----------------------------------------------------------------------------
 
 class LoginLimiter:
-    """Exponential backoff per (IP, user) after 3 failures (2 s, 4 s… up to 5 min), and a per-IP
-    ceiling (30 failures in 15 min, whatever the user names) against spraying. Memory only."""
+    """Exponential backoff per (IP, user) after 3 failures (2 s, 4 s… up to 5 min), a per-IP
+    ceiling (30 failures in 15 min, whatever the user names) against spraying, and a per-user backoff
+    whatever the IP after 10 failures: the client IP can be spoofed with X-Forwarded-For from loopback
+    (uvicorn trusts 127.0.0.1) or simply rotated. Memory only."""
     FREE_FAILURES = 3
+    USER_FREE_FAILURES = 10
     MAX_DELAY = 300
     IP_WINDOW = 900
     IP_MAX = 30
@@ -163,6 +166,7 @@ class LoginLimiter:
         self._lock = threading.Lock()
         self._pairs: Dict[Tuple[str, str], Tuple[int, float]] = {}  # -> (failures, blocked until)
         self._ips: Dict[str, List[float]] = {}
+        self._users: Dict[str, Tuple[int, float]] = {}  # user -> (failures from any IP, blocked until)
 
     def retry_after(self, ip: str, username: str) -> int:
         """Seconds to wait before another attempt is allowed (0 = now)"""
@@ -173,7 +177,8 @@ class LoginLimiter:
             if len(recent) >= self.IP_MAX:
                 return int(recent[0] + self.IP_WINDOW - now) + 1
             _, until = self._pairs.get((ip, username.lower()), (0, 0.0))
-            return max(0, int(until - now + 0.999))
+            _, user_until = self._users.get(username.lower(), (0, 0.0))
+            return max(0, int(max(until, user_until) - now + 0.999))
 
     def failed(self, ip: str, username: str) -> None:
         now = time.time()
@@ -184,12 +189,21 @@ class LoginLimiter:
             delay = 0 if count < self.FREE_FAILURES else min(self.MAX_DELAY, 2 ** (count - self.FREE_FAILURES + 1))
             self._pairs[key] = (count, now + delay)
             self._ips.setdefault(ip, []).append(now)
+            user = username.lower()
+            count, _ = self._users.get(user, (0, 0.0))
+            count += 1
+            free = self.USER_FREE_FAILURES
+            delay = 0 if count < free else min(self.MAX_DELAY, 2 ** (count - free + 1))
+            self._users[user] = (count, now + delay)
             if len(self._pairs) > 10000:  # bound memory
                 self._pairs = {k: v for k, v in self._pairs.items() if v[1] > now}
+            if len(self._users) > 10000:
+                self._users = {k: v for k, v in self._users.items() if v[1] > now}
 
     def succeeded(self, ip: str, username: str) -> None:
         with self._lock:
             self._pairs.pop((ip, username.lower()), None)
+            self._users.pop(username.lower(), None)
 
 
 limiter = LoginLimiter()

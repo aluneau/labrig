@@ -119,8 +119,11 @@ known account name on purpose. Expose the app only to networks you trust, or ski
 ## Protections
 
 - **Login backoff**, per client IP + user name: 3 free failures, then 2 s, 4 s, 8 s… up to 5 min between attempts
-  (`429` with `Retry-After`). A client IP is also limited to 30 failures in 15 min, whatever user names it tries.
-  Unknown users take as long as wrong passwords (≈1.5 s minimum), so they can't be told apart. The counters
+  (`429` with `Retry-After`). A client IP is also limited to 30 failures in 15 min, whatever user names it tries,
+  and a user name to 10 free failures from any IP, then the same growing delays (IPs can be rotated, and uvicorn
+  trusts `X-Forwarded-For` from 127.0.0.1). Unknown users take as long as wrong passwords (≈1.5 s minimum), so
+  they can't be told apart. The password of an account outside the admin / viewer groups is never checked: it
+  gets the same 401 as a wrong password (no password oracle, no faillock lock-out through the app). The counters
   live in memory: a restart resets them.
 - **CSRF**: the cookie is `SameSite=Strict`. On top of that, every write made with the cookie must carry the
   `X-VMM-Request` header (the UI adds it; a cross-site form can't), and its `Origin`, if any, must be the
