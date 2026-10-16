@@ -77,6 +77,18 @@ class GitOpsService:
     def _hub_dir(self, hub_name: str) -> Path:
         return self.repo / "clusters" / hub_name
 
+    def _keep_hub_dir(self, hub_name: str) -> None:
+        """git doesn't track empty directories: without a file, a hub with no spoke yet (or whose last spoke was
+        deleted in git) has no clusters/<hub> path and its Application fails with "app path does not exist".
+        A README (not matched by the Application's include filter) keeps the path."""
+        d = self._hub_dir(hub_name)
+        d.mkdir(parents=True, exist_ok=True)
+        readme = d / "README.md"
+        if not readme.is_file():
+            readme.write_text(f"# Hub {hub_name}\n\nSpokes of the ACM hub `{hub_name}`: one directory per spoke "
+                              "(`<spoke>/manifests.yaml`), ClusterImageSets in `imagesets/`. Keep this file: it keeps "
+                              "the directory the hub's Argo CD Application syncs.\n")
+
     def _spoke_dirs(self, hub_name: str) -> List[str]:
         d = self._hub_dir(hub_name)
         return sorted(p.name for p in d.glob("*") if (p / "manifests.yaml").is_file()) if d.is_dir() else []
@@ -372,6 +384,7 @@ class GitOpsService:
         with _lock:
             self._pull()
             self._migrate_layout(db)
+            self._keep_hub_dir(hub.name)
             self._git("add", "-A", "clusters", check=False)
             self._commit(f"Hub {hub.name}: refresh the GitOps index")
             url = self._push()
