@@ -113,8 +113,9 @@ class GitOpsService:
             self._git("mv", f"clusters/{d.name}", f"clusters/{hub_name}/{d.name}")
             moved = True
         for index in [root / "kustomization.yaml"] + list(root.glob("*/kustomization.yaml")):
-            index.unlink()
-            moved = True
+            if index.is_file():
+                index.unlink()
+                moved = True
         if moved:
             self._git("add", "-A", "clusters")
             self._commit("Move spokes under their hub's directory (one Argo CD Application per hub)")

@@ -21,3 +21,16 @@ def test_empty_hub_dir_is_tracked():
     assert svc._spoke_dirs("hub1") == []          # the README is not a spoke
     svc._keep_hub_dir("hub1")                     # idempotent: nothing new to commit
     assert not svc._commit("again")
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git not installed")
+def test_migrate_layout_without_old_index(db):
+    """A repo already in the per-hub layout (no clusters/kustomization.yaml): nothing to migrate, no crash"""
+    svc = GitOpsService()
+    shutil.rmtree(svc.repo, ignore_errors=True)
+    assert svc._ensure_repo()
+    svc._keep_hub_dir("hub1")
+    svc._git("add", "-A", "clusters")
+    svc._commit("Hub hub1")
+    svc._migrate_layout(db)
+    assert not svc._commit("nothing changed")
