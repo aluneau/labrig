@@ -1751,3 +1751,41 @@ export interface HostDnsStatus {
   zones: HostDnsZone[];
   records: HostDnsRecord[];
 }
+
+/** OpenShift ClusterVersion in plain words (GET /clusters/{id}/upgrades) */
+export interface UpgradeRisk { name?: string | null; message?: string | null; url?: string | null }
+export interface ConditionalUpdate {
+  version: string;
+  recommended?: boolean | null; // null: risks not evaluated yet
+  reason?: string | null;
+  message?: string | null;
+  risks: UpgradeRisk[];
+}
+export interface ClusterUpgrades {
+  cluster_id: number;
+  version?: string | null;
+  disconnected: boolean;
+  reachable: boolean;
+  error?: string | null;
+  task_running: boolean;
+  task_id?: number | null;
+  upgrade?: { target?: string; from?: string; state?: string; started?: string; completed?: string; message?: string | null } | null;
+  current?: string | null;
+  desired?: string | null;
+  channel?: string | null;
+  channels: string[];
+  updating: boolean;
+  progress?: number | null;
+  message?: string | null;
+  failing?: string | null;
+  upgradeable: boolean;
+  upgradeable_message?: string | null;
+  retrieved: boolean;
+  retrieved_message?: string | null;
+  available: string[];
+  conditional: ConditionalUpdate[];
+  history: { version?: string | null; state?: string | null; started?: string | null; completed?: string | null }[];
+  operators_total: number;
+  operators_updated: number;
+  operators_pending: string[];
+}

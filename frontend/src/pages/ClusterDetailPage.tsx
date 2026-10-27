@@ -51,6 +51,7 @@ import { AcmHub } from '../components/clusters/AcmHub';
 import { AcmBanner, AcmLabel } from '../components/clusters/AcmRelation';
 import { MirroredImages } from '../components/clusters/MirroredImages';
 import { ClusterLogs } from '../components/logs/ClusterLogs';
+import { AddWorkersModal, UpgradesCard } from '../components/clusters/OpenShiftDay2';
 
 const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
 const STORAGE_NAMES: Record<string, string> = { none: 'none', lvms: 'LVM Storage', odf: 'OpenShift Data Foundation' };
@@ -192,6 +193,7 @@ export const ClusterDetailPage: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toRemove, setToRemove] = useState<string | null>(null);
+  const [addWorkers, setAddWorkers] = useState(false);
   const [params, setParams] = useSearchParams();
   const tab = params.get('tab') || 'overview';
 
@@ -277,6 +279,10 @@ export const ClusterDetailPage: React.FC = () => {
               {!isOpenShift && (
                 <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'}
                   onClick={() => run(() => clusterApi.addWorkers(cluster.id, 1))}>Add worker</Button>
+              )}
+              {isOpenShift && !cluster.spec?.bare_metal && !cluster.spec?.openshift?.provisioner && (
+                <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'} id="os-add-worker"
+                  onClick={() => setAddWorkers(true)}>Add workers</Button>
               )}
               <Button variant="danger" icon={<TrashIcon />} onClick={() => setConfirmDelete(true)}>Delete</Button>
             </Flex>
@@ -445,6 +451,9 @@ export const ClusterDetailPage: React.FC = () => {
             <StackItem><InstallPanel cluster={cluster} status={install.status} error={install.error} /></StackItem>
           )}
           {isOpenShift && <StackItem><ConsoleAccess cluster={cluster} /></StackItem>}
+          {isOpenShift && cluster.has_kubeconfig && !cluster.spec?.bare_metal && (
+            <StackItem><UpgradesCard cluster={cluster} onChanged={reload} /></StackItem>
+          )}
           {cluster.has_kubeconfig && (
             <StackItem>
               <Card>
@@ -482,7 +491,8 @@ export const ClusterDetailPage: React.FC = () => {
                             {isOpenShift && n.vm_id && (
                               <ActionsColumn items={[n.state === 'running'
                                 ? { title: 'Stop node', onClick: () => run(() => vmApi.power(n.vm_id!, 'stop')) }
-                                : { title: 'Start node', onClick: () => run(() => vmApi.power(n.vm_id!, 'start')) }]} />
+                                : { title: 'Start node', onClick: () => run(() => vmApi.power(n.vm_id!, 'start')) },
+                              ...(n.role === 'worker' ? [{ title: 'Remove worker', isDisabled: busy, onClick: () => setToRemove(n.name) }] : [])]} />
                             )}
                           </Flex>
                         </Td>
@@ -509,8 +519,10 @@ export const ClusterDetailPage: React.FC = () => {
       </ConfirmModal>
       <ConfirmModal title={`Remove ${toRemove}?`} isOpen={!!toRemove} confirmLabel="Remove"
         onConfirm={() => run(() => clusterApi.removeNode(cluster.id, toRemove!))} onClose={() => setToRemove(null)}>
-        The node is drained and deleted from Kubernetes, then its VM and disks are deleted.
+        The node is drained and deleted from {isOpenShift ? 'OpenShift' : 'Kubernetes'}, then its VM and disks are deleted
+        {isOpenShift ? ', with its address reservation and DNS names' : ''}.
       </ConfirmModal>
+      {isOpenShift && <AddWorkersModal cluster={cluster} isOpen={addWorkers} onClose={() => setAddWorkers(false)} onStarted={reload} />}
     </>
   );
 };
