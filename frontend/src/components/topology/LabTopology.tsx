@@ -150,6 +150,7 @@ function machineLines(m: TopologyMachine): Line[] {
 function vipLines(v: TopologyVip): Line[] {
   const kind = v.kind === 'metallb-l2' ? 'MetalLB L2 service IP' : v.kind === 'metallb-bgp' ? 'MetalLB BGP service IP' : 'BGP route';
   const lines: Line[] = [{ text: kind, color: v.kind === 'metallb-l2' ? C.arp : C.bgp }];
+  if (v.address6) lines.push({ text: v.address6 });
   if (v.hostname) lines.push({ text: v.hostname });
   lines.push({ text: v.via.length ? `${v.kind === 'metallb-l2' ? 'owned by' : 'via'} ${v.via.join(', ')}` : 'nobody carries it now' });
   return lines;
@@ -454,11 +455,11 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
     if (!v) return null;
     const ip = v.address.replace(/\/32$/, '');
     if (v.kind === 'metallb-l2') {
-      return { title: `${ip}${v.hostname ? ` (${v.hostname})` : ''}`, text: `A MetalLB service IP from the lab network. No machine has it configured: ${v.via[0] || 'one node'} answers ARP for it, so the router delivers its traffic there. If that node stops, another one takes the address over within seconds.` };
+      return { title: `${ip}${v.hostname ? ` (${v.hostname})` : ''}`, text: `A MetalLB service IP from the lab network. No machine has it configured: ${v.via[0] || 'one node'} answers ARP for it, so the router delivers its traffic there. If that node stops, another one takes the address over within seconds.${v.address6 ? ` Dual stack: the Service also has ${v.address6} (neighbor discovery instead of ARP).` : ''}` };
     }
     return {
       title: `${v.address}${v.hostname ? ` (${v.hostname})` : ''}`,
-      text: `${v.kind === 'metallb-bgp' ? 'A MetalLB service IP outside the lab network.' : 'An address announced over BGP.'} ${v.via.length ? `${v.via.join(', ')} announce${v.via.length === 1 ? 's' : ''} it to the router, which ${v.via.length > 1 ? 'spreads the traffic over them (ECMP)' : 'sends its traffic there'}. A stopped machine's route disappears.` : 'Nobody announces it right now: unreachable.'} Your laptop reaches it because the BGP ranges are in its WireGuard config.`,
+      text: `${v.kind === 'metallb-bgp' ? 'A MetalLB service IP outside the lab network.' : 'An address announced over BGP.'} ${v.via.length ? `${v.via.join(', ')} announce${v.via.length === 1 ? 's' : ''} it to the router, which ${v.via.length > 1 ? 'spreads the traffic over them (ECMP)' : 'sends its traffic there'}. A stopped machine's route disappears.` : 'Nobody announces it right now: unreachable.'} Your laptop reaches it because the BGP ranges are in its WireGuard config.${v.address6 ? ` Dual stack: the Service also has ${v.address6}, announced over the IPv6 BGP sessions.` : ''}`,
     };
   }
   if (key === 'tunnel') return { title: 'WireGuard tunnel', text: `Encrypted UDP from your laptop to this PC, port ${wg.host_port ?? '?'} (open in this PC's firewall). Inside: ordinary IP packets for the lab.` };

@@ -1205,6 +1205,7 @@ export interface TopologyMachine {
 
 export interface TopologyVip {
   address: string;
+  address6?: string | null; // dual stack cluster: the Service's IPv6 address
   kind: 'metallb-l2' | 'metallb-bgp' | 'bgp-route' | string;
   name?: string | null;
   hostname?: string | null;

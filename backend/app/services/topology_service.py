@@ -134,6 +134,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         mlb = _metallb(c)
         mode = (mlb.get("mode") or "l2") if mlb.get("enabled") else None
         ip = mlb.get("service_ip")
+        ip6 = mlb.get("service_ip6")  # dual stack clusters: the same Service's IPv6 address
         lb_ports = [lb.port for lb in spec.load_balancers if lb.owner == f"cluster:{c.name}"]
         zone = f"{c.name}.{c.domain}"
         api_port = next((lb.port for lb in spec.load_balancers
@@ -145,7 +146,8 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             "console_url": f"https://console-openshift-console.apps.{zone}" if c.type == "openshift" else None,
             "apps_domain": f"apps.{zone}" if c.type == "openshift" else None,
             "load_balancer_ports": sorted(lb_ports), "metallb_enabled": bool(mlb.get("enabled")),
-            "metallb_mode": mode, "metallb_pool": mlb.get("pool"), "service_ip": ip,
+            "metallb_mode": mode, "metallb_pool": mlb.get("pool"), "service_ip": ip, "service_ip6": ip6,
+            "dual_stack": bool((c.spec or {}).get("dual_stack") or ((c.spec or {}).get("openshift") or {}).get("dual_stack")),
             "service_hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}" if ip else None,
         })
         if not ip:
@@ -153,14 +155,14 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         if mode == "bgp":
             via = sorted({by_ip[h["ip"]]["name"] for r in routes if _in(ip, r["prefix"])
                           for h in r["nexthops"] if h["ip"] in by_ip})
-            covered |= {r["prefix"] for r in routes if r["prefix"] == f"{ip}/32"}
+            covered |= {r["prefix"] for r in routes if r["prefix"] in (f"{ip}/32", f"{ip6}/128")}
         else:
             node = l2.get(c.name)
             target = next((m for m in machines if node and (m["name"] == node or node.startswith(m["name"] + "."))), None)
             via = [target["name"]] if target else []
             if target:
                 target["l2_announces"].append(ip)
-        vips.append({"address": ip, "kind": f"metallb-{mode}", "name": mlb.get("hostname") or "hello",
+        vips.append({"address": ip, "address6": ip6, "kind": f"metallb-{mode}", "name": mlb.get("hostname") or "hello",
                      "hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}", "cluster": c.name, "via": via})
     for r in routes:
         if r["prefix"] in covered:

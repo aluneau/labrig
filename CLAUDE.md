@@ -237,7 +237,15 @@ e2e/                  Playwright browser tests against the real app (see below)
   blocked/proxy reject in forward, `egress: drop` = prerouting drop (no IPv6 uplink: without it the kernel answers "no
   route" at once). FRR: peer group `LAB6` + `address-family ipv6 unicast`, IPv6 announce ranges (`lab6` /64) `le
   128`, `prefer-global`; members need `disable-connected-check` (DHCPv6 /128). WireGuard `subnet6`. Cross-family
-  `overlaps()` is wrong in `ipaddress`: use `nets_overlap`. No IPv6 internet, clusters stay IPv4.
+  `overlaps()` is wrong in `ipaddress`: use `nets_overlap`. No IPv6 internet.
+  **Dual stack clusters** (`kubeadm.dual_stack`, default on in an IPv6 group; `openshift.dual_stack`, default off; true
+  + new group = group with IPv6; `ipv6_service.check_dual_stack`/`is_dual_stack`): IPv4 stays primary (kubeconfig).
+  kubeadm: podSubnet/serviceSubnet "v4,v6" (`pod_cidr6` fd00:10:244::/56, `service_cidr6` fd00:10:96::/112), kubelet
+  `--node-ip v4,v6` via KUBELET_EXTRA_ARGS, ipv6 forwarding sysctl, Flannel `EnableIPv6`; OpenShift: v6 entries in
+  machine/cluster/service networks (fd01::/48, fd02::/112), nodes on DHCPv6. Cluster nodes in IPv6 groups get the
+  members' network-config. `network.publish(paired=True)` adds the paired AAAA (api -> router v6, nodes). MetalLB: pool
+  `+ pool6` (L2: v6 twins of the v4 range; kubeadm BGP: owned `/64` announce range `<c>-metallb6` + BGPPeer
+  `lab-router6` to the router v6 with ebgpMultiHop, no BFD), demo `PreferDualStack`, `service_ip6`. e2e `kubeadm-ipv6.js`.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -410,6 +418,7 @@ node templates.js                                               # templates: gal
 scripts/check-templates.py                                      # validate template files offline
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
 node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
+node kubeadm-ipv6.js                                            # dual stack kubeadm: node/pod/Service v4+v6, pod->pod v6, MetalLB v6 L2 + BGP from a member (REUSE=1 KEEP=1)
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
 node acm.js                                                     # ACM hub (SNO) + import kubeadm / k3s, Available, refused k3s on own NAT, detach (REUSE=1 KEEP=1, ~2 h fresh)
