@@ -147,12 +147,16 @@ const okdOs = (channel, extra) => ({ distribution: 'okd', channel, ...extra });
         openshift: okdOs(channel, { version: okd.version, topology: 'compact', platform: 'baremetal' }) });
       ids.bm = bm.id;
       log(`compact baremetal ${bm.id}: waiting for the agent ISO`);
-      const at = await waitFor(async () => {
+      // poll fast: the cancel must land while the ISO is uploaded (36 %), before "Creating the node VMs" (40 %)
+      let at = null;
+      for (const end = Date.now() + 60 * 60000; !at && Date.now() < end;) {
         const c = await api(`/clusters/${bm.id}`);
-        if (c.status === 'error') return { failed: c.status_message };
-        return (c.task_progress || 0) >= 36 ? c : null;
-      }, 60 * 60000, 'agent ISO built');
-      await post(`/tasks/${at.task_id}/cancel`);
+        if (c.status === 'error') at = { failed: c.status_message };
+        else if ((c.task_progress || 0) >= 36) at = c;
+        else await L.sleep(400);
+      }
+      if (!at) throw new Error('agent ISO not built after 60 min');
+      if (at.task_id) await post(`/tasks/${at.task_id}/cancel`);
       if (at.failed) throw new Error(`bm: ${at.failed}`);
       log(`agent ISO built (${at.status_message}); task cancelled`);
       await waitFor(async () => ['cancelled', 'failed', 'completed'].includes((await api(`/tasks/${at.task_id}`)).status), 10 * 60000, 'bm task stopped');
