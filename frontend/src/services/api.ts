@@ -15,7 +15,7 @@ import {
   AuthStatus, ApiToken, ApiTokenCreated,
   UpdateStatus,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
-  BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo,
+  BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo, IronicImageProxyStatus, IronicImageProxyConfig,
 } from '../types';
 import { Diagnostics, LogParams, LogResult, LogRules, PodList } from '../types/logs';
 
@@ -382,6 +382,9 @@ export const logsApi = {
 };
 
 export const bareMetalApi = {
+  imageProxy: () => request<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy'),
+  configureImageProxy: (data: IronicImageProxyConfig) => request<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy', { method: 'PUT', body: JSON.stringify(data) }),
+  disableImageProxy: () => del<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy'),
   list: () => request<BareMetalHost[]>('/bare-metal-hosts'),
   get: (id: number) => request<BareMetalHost>(`/bare-metal-hosts/${id}`),
   create: (data: BareMetalHostCreate) => post<BareMetalHost>('/bare-metal-hosts', data),

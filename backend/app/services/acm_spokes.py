@@ -158,7 +158,11 @@ class SpokeService:
         runner.log("Hub: metal3 (Provisioning, no provisioning network) for BareMetalHosts")
         runner.apply_retry([{"apiVersion": "metal3.io/v1alpha1", "kind": "Provisioning",
                              "metadata": {"name": "provisioning-configuration"},
-                             "spec": {"provisioningNetwork": "Disabled", "watchAllNamespaces": True}}],
+                             # A physical BMC uses its management/external network for virtual media; without
+                             # this, Metal3 can select an isolated provisioning path even though no provisioning
+                             # network was configured.  This is safe for emulated BMCs too.
+                             "spec": {"provisioningNetwork": "Disabled", "virtualMediaViaExternalNetwork": True,
+                                      "watchAllNamespaces": True}}],
                            "Provisioning", timeout=5 * 60)
         scs = runner.oc_json(["get", "storageclass"], 30).get("items", [])
         if not any((sc.get("metadata", {}).get("annotations") or {}).get("storageclass.kubernetes.io/is-default-class")

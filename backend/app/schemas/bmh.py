@@ -52,3 +52,18 @@ class BareMetalHostNic(BaseModel):
     link: Optional[str] = None
     speed_mbps: Optional[int] = None
     ipv4: List[str] = []
+
+
+class IronicImageProxyConfig(BaseModel):
+    listen_ip: str = Field(..., min_length=7, max_length=45)
+    backend_ip: str = Field(..., min_length=7, max_length=45)
+    sources: List[str] = Field(..., min_length=1, max_length=64)
+
+
+class IronicImageProxyStatus(BaseModel):
+    enabled: bool = False
+    configured: bool = False
+    listen_ip: Optional[str] = None
+    backend_ip: Optional[str] = None
+    port: int = 6180
+    sources: List[str] = []

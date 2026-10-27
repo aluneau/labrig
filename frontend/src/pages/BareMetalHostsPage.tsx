@@ -92,10 +92,14 @@ const inv = (h: BareMetalHost) => h.inventory || {};
 
 export const BareMetalHostsPage: React.FC = () => {
   const { data: hosts, error: loadError, loading, reload } = usePolling(bareMetalApi.list, 15000);
+  const { data: proxy, reload: reloadProxy } = usePolling(bareMetalApi.imageProxy, 15000);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [toDelete, setToDelete] = useState<BareMetalHost | null>(null);
+  const [proxyOpen, setProxyOpen] = useState(false);
+  const [listenIp, setListenIp] = useState('');
+  const [backendIp, setBackendIp] = useState('');
   const navigate = useNavigate();
 
   const run = async (fn: () => Promise<unknown>) => {
@@ -112,6 +116,10 @@ export const BareMetalHostsPage: React.FC = () => {
     <>
       <PageHeader title="Bare-metal hosts" actions={<Button onClick={() => setIsAddOpen(true)}>Add host</Button>} />
       <PageSection>
+        <Alert variant={proxy?.enabled ? 'success' : 'info'} isInline title={proxy?.enabled ? `BMC image proxy: ${proxy.listen_ip}:${proxy.port}` : 'BMC image proxy is not configured'} style={{ marginBottom: 16 }}
+          actionLinks={<Button variant="link" isInline onClick={() => { setListenIp(proxy?.listen_ip || ''); setBackendIp(proxy?.backend_ip || ''); setProxyOpen(true); }}>{proxy?.enabled ? 'Configure' : 'Configure proxy'}</Button>}>
+          {proxy?.enabled ? `Only ${proxy.sources.join(', ')} can fetch Ironic virtual-media images; backend ${proxy.backend_ip}:6180.` : 'Use this when physical BMCs cannot route to a VM-based hub. VM Manager manages HAProxy and source-scoped firewall rules.'}
+        </Alert>
         {(error || loadError) && (
           <Alert variant="danger" isInline title={error || loadError} style={{ marginBottom: 16 }}
             actionClose={error ? <AlertActionCloseButton onClose={() => setError(null)} /> : undefined} />
@@ -199,6 +207,17 @@ export const BareMetalHostsPage: React.FC = () => {
       </PageSection>
 
       <AddHostModal isOpen={isAddOpen} onClose={() => setIsAddOpen(false)} onDone={reload} />
+      <Modal variant={ModalVariant.small} title="Physical BMC image proxy" isOpen={proxyOpen} onClose={() => setProxyOpen(false)} actions={[
+        <Button key="save" onClick={() => run(async () => { await bareMetalApi.configureImageProxy({ listen_ip: listenIp, backend_ip: backendIp, sources: (hosts || []).map(h => h.bmc_address.replace(/^https?:\/\//, '').split(':')[0]).filter(Boolean) }); reloadProxy(); setProxyOpen(false); })} isDisabled={!listenIp || !backendIp}>Save proxy</Button>,
+        <Button key="disable" variant="danger" onClick={() => run(async () => { await bareMetalApi.disableImageProxy(); reloadProxy(); setProxyOpen(false); })} isDisabled={!proxy?.enabled}>Disable</Button>,
+        <Button key="cancel" variant="link" onClick={() => setProxyOpen(false)}>Cancel</Button>,
+      ]}>
+        <Form>
+          <FormGroup label="Host listener IP" isRequired fieldId="proxy-listen"><TextInput id="proxy-listen" value={listenIp} onChange={(_e, v) => setListenIp(v)} placeholder="10.6.76.203" /></FormGroup>
+          <FormGroup label="Hub router backend IP" isRequired fieldId="proxy-backend"><TextInput id="proxy-backend" value={backendIp} onChange={(_e, v) => setBackendIp(v)} placeholder="192.168.122.236" /></FormGroup>
+          <Alert variant="info" isInline title="Access is restricted">All registered BMC addresses are added as source-only firewall rules. The proxy serves HTTP on port 6180.</Alert>
+        </Form>
+      </Modal>
       <ConfirmModal title={`Remove bare-metal host ${toDelete?.name}?`} isOpen={!!toDelete} confirmLabel="Remove"
         onConfirm={() => run(() => bareMetalApi.delete(toDelete!.id))} onClose={() => setToDelete(null)}>
         Removes it from VM Manager (the BMC credentials are deleted) and powers the machine off (its disks are

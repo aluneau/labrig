@@ -6,12 +6,40 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas import (
-    BareMetalHost, BareMetalHostCreate, BareMetalHostNic, BareMetalHostUpdate, BareMetalPower,
+    BareMetalHost, BareMetalHostCreate, BareMetalHostNic, BareMetalHostUpdate, BareMetalPower, IronicImageProxyConfig, IronicImageProxyStatus,
 )
 from app.services.bmc import BMCError
 from app.services.baremetal_service import baremetal_service
+from app.services.helper_service import HelperError
 
 router = APIRouter()
+
+
+@router.get("/image-proxy", response_model=IronicImageProxyStatus)
+def image_proxy_status():
+    from app.services.ironic_proxy_service import ironic_proxy_service
+    try:
+        return ironic_proxy_service.status()
+    except HelperError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.put("/image-proxy", response_model=IronicImageProxyStatus)
+def configure_image_proxy(data: IronicImageProxyConfig):
+    from app.services.ironic_proxy_service import ironic_proxy_service
+    try:
+        return ironic_proxy_service.configure(data.listen_ip, data.backend_ip, data.sources)
+    except HelperError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.delete("/image-proxy", response_model=IronicImageProxyStatus)
+def disable_image_proxy():
+    from app.services.ironic_proxy_service import ironic_proxy_service
+    try:
+        return ironic_proxy_service.disable()
+    except HelperError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.get("", response_model=List[BareMetalHost])

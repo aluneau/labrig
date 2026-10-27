@@ -1720,6 +1720,21 @@ export interface BareMetalHostUpdate {
   boot_mac?: string | null;
 }
 
+export interface IronicImageProxyStatus {
+  enabled: boolean;
+  configured: boolean;
+  listen_ip?: string | null;
+  backend_ip?: string | null;
+  port: number;
+  sources: string[];
+}
+
+export interface IronicImageProxyConfig {
+  listen_ip: string;
+  backend_ip: string;
+  sources: string[];
+}
+
 // Host DNS resolver (dnsmasq) status — resolves api/*.apps of groupless/bare-metal OpenShift clusters
 export interface HostDnsZone {
   cluster: string;
