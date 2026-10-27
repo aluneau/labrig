@@ -5,14 +5,25 @@ Subscription, wait for the CSV, then the operator's CR). Everything goes through
 (openshift_service.oc), with the cluster's host kubeconfig.
 """
 import json
+import logging
+import re
 import time
+import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from app.services.metallb import (DEMO_IMAGE, DEMO_NAME, DEMO_NAMESPACE, NAMESPACE as METALLB_NAMESPACE,  # noqa: F401
                                   MetalLBClient, in_pool, metallb_pool)
 from app.services.openshift_service import openshift_service
 
+logger = logging.getLogger(__name__)
+
 CSV_TIMEOUT = 15 * 60
+# OKD: Red Hat's catalogs need a subscription; the OKD project publishes "OKDerators" (LVMS, MetalLB, NMState...
+# rebuilt without Red Hat branding), one index tag per minor. The add-ons install from it.
+OKD_CATALOG_SOURCE = "okderators"
+OKD_CATALOG_IMAGE = "quay.io/okderators/catalog-index"
+OKD_CATALOG_TAGS = "https://quay.io/v2/okderators/catalog-index/tags/list"
+CATALOG_TIMEOUT = 10 * 60
 CRD_TIMEOUT = 5 * 60
 STORAGE_SERIAL = "vmm-storage"        # libvirt <serial> of the extra disk: /dev/disk/by-id/virtio-vmm-storage
 STORAGE_DEVICE = f"/dev/disk/by-id/virtio-{STORAGE_SERIAL}"
@@ -41,12 +52,20 @@ class AddonRunner(MetalLBClient):
     def oc_json(self, args: List[str], timeout: float = 60) -> Any:
         return openshift_service.oc_json(self.cluster, self.version, args, timeout)
 
-    def package(self, name: str) -> Dict[str, Any]:
-        """packagemanifest -> {source, channel, namespace, all_namespaces_only, csv}"""
+    def package(self, name: str, source: Optional[str] = None) -> Dict[str, Any]:
+        """packagemanifest -> {source, channel, namespace, all_namespaces_only, csv}. source: that catalog's
+        entry (a package name can be in several catalogs)"""
         deadline = time.monotonic() + 10 * 60  # catalogs take a few minutes after install
         while True:
             try:
-                pm = self.oc_json(["get", "packagemanifest", "-n", "openshift-marketplace", name], 60)
+                if source:
+                    items = self.oc_json(["get", "packagemanifest", "-n", "openshift-marketplace",
+                                          "-l", f"catalog={source}"], 60).get("items") or []
+                    pm = next((i for i in items if i["metadata"]["name"] == name), None)
+                    if pm is None:
+                        raise RuntimeError(f"not in catalog {source}")
+                else:
+                    pm = self.oc_json(["get", "packagemanifest", "-n", "openshift-marketplace", name], 60)
                 break
             except RuntimeError as e:
                 if time.monotonic() > deadline:
@@ -72,13 +91,15 @@ class AddonRunner(MetalLBClient):
                          privileged: bool = False) -> str:
         """Namespace + OperatorGroup + Subscription, then wait for the CSV. Returns the namespace."""
         self.log(f"Installing operator {name}")
-        pkg = self.package(name)
+        # disconnected: the mirrored CatalogSource; OKD: OKDerators for the Red Hat operators the add-ons use
+        wanted = self.sources.get(source or "redhat-operators") or (
+            source if source and source != "redhat-operators" else None)
+        pkg = self.package(name, wanted)
         namespace = namespace or pkg["namespace"] or f"openshift-{name.replace('-operator', '')}"
         channel = channel or pkg["channel"]
         if channel and pkg["channels"] and channel not in pkg["channels"]:
             raise ValueError(f"{name} has no channel '{channel}' (available: {', '.join(pkg['channels'])})")
-        mirrored = self.sources.get(source or "redhat-operators")
-        source = mirrored or (source if source and source != "redhat-operators" else pkg["source"])
+        source = wanted or pkg["source"]
         manifests: List[Dict[str, Any]] = []
         if namespace != "openshift-operators":
             labels = {"openshift.io/cluster-monitoring": "true"}
@@ -163,6 +184,36 @@ class AddonRunner(MetalLBClient):
         if name in crs:
             self.log(f"Creating the {crs[name]['kind']} of {name}")
             self.apply_retry([crs[name]], f"{crs[name]['kind']} for {name}")
+
+    def okd_catalog(self) -> str:
+        """OKD: the OKDerators CatalogSource (index tag of the cluster's minor, else the newest one), READY"""
+        minor = ".".join(self.version.split("-")[0].split(".")[:2])
+        try:
+            tags = json.loads(urllib.request.urlopen(OKD_CATALOG_TAGS, timeout=30).read()).get("tags") or []
+        except Exception as e:
+            logger.warning(f"OKDerators tags: {e}")
+            tags = [minor]
+        minors = sorted((t for t in tags if re.match(r"^\d+\.\d+$", t)), key=lambda t: tuple(map(int, t.split("."))))
+        tag = minor if minor in minors else (minors[-1] if minors else minor)
+        image = f"{OKD_CATALOG_IMAGE}:{tag}"
+        current = self.oc(["get", "catalogsource", OKD_CATALOG_SOURCE, "-n", "openshift-marketplace",
+                           "-o", "jsonpath={.spec.image}"], 30)["stdout"].strip()
+        if current != image:
+            self.log(f"Adding the OKDerators catalog ({image}" + (", no index for this minor yet)" if tag != minor else ")"))
+            self.apply([{"apiVersion": "operators.coreos.com/v1alpha1", "kind": "CatalogSource",
+                         "metadata": {"name": OKD_CATALOG_SOURCE, "namespace": "openshift-marketplace"},
+                         "spec": {"sourceType": "grpc", "image": image, "displayName": "OKDerators",
+                                  "publisher": "OKD project", "updateStrategy": {"registryPoll": {"interval": "24h"}}}}])
+        deadline = time.monotonic() + CATALOG_TIMEOUT
+        while True:
+            state = self.oc(["get", "catalogsource", OKD_CATALOG_SOURCE, "-n", "openshift-marketplace", "-o",
+                             "jsonpath={.status.connectionState.lastObservedState}"], 30)["stdout"].strip()
+            if state == "READY":
+                return OKD_CATALOG_SOURCE
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"The OKDerators catalog ({image}) is not READY after {CATALOG_TIMEOUT // 60} min "
+                                   f"(state {state or 'unknown'})")
+            self.sleep(10)
 
     # -------------------------------------------------------------- storage
 

@@ -45,8 +45,8 @@ from app.services.group_service import group_service, network_name as group_netw
 from app.services import acm, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
-from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, managed_by,
-                                            managed_operator_error, openshift_service)
+from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, is_okd,
+                                            managed_by, managed_operator_error, okd_unsupported, openshift_service)
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
 
@@ -177,9 +177,34 @@ class OpenShiftInstaller:
 
     # ------------------------------------------------------------- creating
 
+    @staticmethod
+    def check_distribution(opts: OpenShiftOptions) -> None:
+        """OKD: refuse in plain words what needs Red Hat-only operators / registries; OCP: a pull secret"""
+        if opts.distribution != "okd":
+            openshift_service.pull_secret()  # raises when missing
+            return
+        for kind, wanted in (("odf", opts.storage == "odf"), ("sriov", opts.sriov.enabled), ("acm", opts.acm),
+                             ("disconnected", opts.disconnected)):
+            if wanted:
+                raise ValueError(okd_unsupported(kind))
+
+    @staticmethod
+    def check_platform(opts: OpenShiftOptions, cidr: Optional[str] = None) -> None:
+        if opts.platform != "baremetal":
+            return
+        if opts.topology == "sno":
+            raise ValueError('"platform": "baremetal" needs 3 control planes (topology compact or ha): the '
+                             "installer only accepts a single node with platform none")
+        if cidr:
+            net = ipaddress.IPv4Network(cidr, strict=False)
+            for label, vip in (("api_vip", opts.api_vip), ("ingress_vip", opts.ingress_vip)):
+                if vip and ipaddress.IPv4Address(vip) not in net:
+                    raise ValueError(f"{label} {vip} is not on the group network {net}")
+
     def create(self, db: Session, data: ClusterCreate) -> Cluster:
         opts = data.openshift or OpenShiftOptions()
-        openshift_service.pull_secret()  # raises when missing
+        self.check_distribution(opts)
+        self.check_platform(opts)
         counts = topology_counts(opts, data.workers)
         if opts.storage == "odf" and counts["masters"] + counts["workers"] < 3:
             raise ValueError('ODF needs 3 nodes: set "topology": "compact" (3 masters that also run ODF) or "ha" '
@@ -198,7 +223,7 @@ class OpenShiftInstaller:
             raise ValueError(f"SR-IOV IPAM range: {e}")
 
         sizes = self._sizes(data, opts, counts)
-        version = openshift_service.resolve_version(opts.channel, opts.version)
+        version = openshift_service.resolve_version(opts.channel, opts.version, opts.distribution)
         names = self.svc._node_names(data.name, counts["masters"], counts["workers"])
 
         def check(gspec) -> None:
@@ -208,6 +233,7 @@ class OpenShiftInstaller:
                     raise ValueError(f"Lab group {gspec.name}: router port {port} is used by load balancer "
                                      f"{used[port]} (one OpenShift cluster per group, and no kubeadm cluster)")
             openshift_service.check_cidr(gspec.cidr)
+            self.check_platform(opts, gspec.cidr)
 
         group, gspec, owned, node_subnet = self.svc._resolve_group(db, data, names, RESERVED_CIDRS, check)
         if opts.disconnected:
@@ -231,7 +257,7 @@ class OpenShiftInstaller:
         spec.update(ctlplanes=counts["masters"], workers=counts["workers"], ctlplane=sizes["ctlplane"],
                     worker=sizes["worker"], cidr=str(node_subnet), pod_cidr=POD_CIDR, service_cidr=SERVICE_CIDR,
                     api_port=LB_PORTS["api"], group_task_id=task.id if task else None, addons=[],
-                    image=f"OpenShift {version}")
+                    image=f"{'OKD' if is_okd(version) else 'OpenShift'} {version}")
         cluster = Cluster(
             name=data.name, type="openshift", version=version, network=group_network_name(group.name),
             network_owned=False, group_id=group.id, group_owned=owned, domain=gspec.domain, spec=spec,
@@ -245,12 +271,15 @@ class OpenShiftInstaller:
         self.svc._publish(cluster)
         topo = {"sno": "single node", "compact": "compact (3 masters)",
                 "ha": f"3 masters + {counts['workers']} workers"}[opts.topology]
+        if opts.platform == "baremetal":
+            topo += ", platform baremetal (API / ingress VIPs)"
         where = f"new lab group {group.name}" if owned else f"lab group {group.name}"
         if opts.disconnected:
             where += ", disconnected (mirror registry on the router)"
         task = task_service.start(db, TaskCreate(
-            name=f"Create OpenShift cluster {data.name}", type="cluster_create", target_type="cluster",
-            target_id=cluster.id, target_name=data.name, description=f"OpenShift {version}, {topo}, {where}",
+            name=f"Create {'OKD' if is_okd(version) else 'OpenShift'} cluster {data.name}", type="cluster_create",
+            target_type="cluster", target_id=cluster.id, target_name=data.name,
+            description=f"{'OKD' if is_okd(version) else 'OpenShift'} {version}, {topo}, {where}",
         ), self.provision, cluster.id)
         cluster.task_id = task.id
         db.commit()
@@ -455,11 +484,22 @@ class OpenShiftInstaller:
         for node in nodes:
             network.reserve(node.name, node.mac, node.ip)
             network.publish(node.ip, [f"{node.name}.{zone}", node.name])
-        network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"])
-        network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{ip}:6443" for ip in masters])
-        network.publish_lb(f"{cluster.name}-mcs", LB_PORTS["mcs"], [f"{ip}:22623" for ip in masters])
-        network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ingress])
-        network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{ip}:443" for ip in ingress])
+        if opts.platform == "baremetal":
+            # keepalived in the cluster holds the VIPs (kept out of DHCP / static assignments like a MetalLB pool);
+            # DNS points at them. The router only forwards its uplink :6443 / :80 / :443 to them: the host (and the
+            # kubeconfig) reach the cluster through the router's uplink address, as with platform none.
+            vips = self._assign_vips(db, cluster, network, gspec, [n.ip for n in nodes])
+            network.publish(vips["api"], [f"api.{zone}", f"api-int.{zone}"])
+            network.publish(vips["ingress"], [f"*.apps.{zone}"])
+            network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{vips['api']}:6443"])
+            network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{vips['ingress']}:80"])
+            network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{vips['ingress']}:443"])
+        else:
+            network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"])
+            network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{ip}:6443" for ip in masters])
+            network.publish_lb(f"{cluster.name}-mcs", LB_PORTS["mcs"], [f"{ip}:22623" for ip in masters])
+            network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ingress])
+            network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{ip}:443" for ip in ingress])
         if opts.metallb.enabled and not opts.metallb.pool:
             pool = self._assign_pool(network, gspec, opts.metallb.mode, opts.metallb.addresses, [n.ip for n in nodes],
                                      cluster.name, opts.metallb.bfd)
@@ -477,6 +517,39 @@ class OpenShiftInstaller:
         cluster.api_ip = network.uplink_ip()
         db.commit()
         return nodes
+
+    @staticmethod
+    def vips(cluster: Cluster) -> Optional[Dict[str, str]]:
+        """platform baremetal: {api, ingress} once assigned, else None"""
+        os_spec = (cluster.spec or {}).get("openshift") or {}
+        if os_spec.get("platform") != "baremetal" or not os_spec.get("api_vip"):
+            return None
+        return {"api": os_spec["api_vip"], "ingress": os_spec["ingress_vip"]}
+
+    def _assign_vips(self, db: Session, cluster: Cluster, network: GroupClusterNetwork, gspec,
+                     node_ips: List[str]) -> Dict[str, str]:
+        """platform baremetal: the API / ingress VIPs (the request's, else free addresses of the group network),
+        recorded in spec.openshift and reserved as one-address pools owned by the cluster"""
+        os_spec = dict(cluster.spec.get("openshift") or {})
+        net = ipaddress.IPv4Network(gspec.cidr, strict=False)
+        used = set(node_ips) | {gspec.router.ip}
+        vips: Dict[str, str] = {}
+        for kind in ("api", "ingress"):
+            vip = os_spec.get(f"{kind}_vip")
+            if vip:
+                if ipaddress.IPv4Address(vip) not in net:
+                    raise ValueError(f"{kind}_vip {vip} is not on the group network {net}")
+                if vip in used:
+                    raise ValueError(f"{kind}_vip {vip} is already used by a node or the router")
+            else:
+                vip = network.allocate_ip(list(used))
+            used.add(vip)
+            vips[kind] = vip
+            network.set_address_pool(f"{cluster.name}-{kind}-vip", vip, vip)
+        if os_spec.get("api_vip") != vips["api"] or os_spec.get("ingress_vip") != vips["ingress"]:
+            self._update_spec(db, cluster, openshift={**os_spec, "api_vip": vips["api"],
+                                                      "ingress_vip": vips["ingress"]})
+        return vips
 
     @staticmethod
     def _assign_pool(network: GroupClusterNetwork, gspec, mode: str, size: int, node_ips: List[str],
@@ -592,7 +665,11 @@ class OpenShiftInstaller:
         return data
 
     def catalog_sources(self, cluster: Cluster) -> Dict[str, str]:
-        """OperatorHub source name -> mirrored CatalogSource (e.g. redhat-operators -> cs-redhat-operator-index-v4-20)"""
+        """OperatorHub source name -> mirrored CatalogSource (e.g. redhat-operators -> cs-redhat-operator-index-v4-20).
+        OKD: the Red Hat operators the add-ons install come from the OKDerators catalog"""
+        if is_okd(cluster.version):
+            from app.services.openshift_addons import OKD_CATALOG_SOURCE
+            return {"redhat-operators": OKD_CATALOG_SOURCE}
         mirror = ((cluster.spec or {}).get("openshift") or {}).get("mirror") or {}
         result: Dict[str, str] = {}
         for index, name in (mirror.get("catalog_sources") or {}).items():
@@ -711,8 +788,9 @@ class OpenShiftInstaller:
         install = openshift_service.install_config(
             cluster.name, cluster.domain, spec["cidr"], spec["ctlplanes"], spec["workers"],
             # disconnected: the registry's credentials only (no quay.io / cloud.openshift.com: no telemetry)
-            self.mirror_pull_secret(cluster) if mirror else openshift_service.pull_secret(),
-            ssh_key, self.install_mirror(mirror) if mirror else None)
+            self.mirror_pull_secret(cluster) if mirror else openshift_service.pull_secret_for(cluster.version),
+            ssh_key, self.install_mirror(mirror) if mirror else None,
+            self.vips(cluster))
         agent = openshift_service.agent_config(
             cluster.name, first.ip, network.gateway(),  # NTP: chrony on the router
             [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes])
@@ -795,7 +873,9 @@ class OpenShiftInstaller:
         from app.services.baremetal_service import baremetal_service
 
         opts = data.openshift or OpenShiftOptions()
-        openshift_service.pull_secret()  # raises when missing
+        self.check_distribution(opts)
+        if opts.platform != "none":
+            raise ValueError('Bare-metal hosts install with "platform": "none" (single node)')
         bm = data.bare_metal
         if opts.topology != "sno":
             raise ValueError("Bare-metal OpenShift currently supports single-node (sno) only")
@@ -828,7 +908,7 @@ class OpenShiftInstaller:
         if not host.boot_mac:
             raise ValueError(f"Host '{host.name}' has no known boot MAC: refresh its inventory or set boot_mac")
 
-        version = openshift_service.resolve_version(opts.channel, opts.version)
+        version = openshift_service.resolve_version(opts.channel, opts.version, opts.distribution)
         counts = {"masters": 1, "workers": 0}
         sizes = self._sizes(data, opts, counts)
         spec = data.model_dump()
@@ -918,7 +998,8 @@ class OpenShiftInstaller:
                             + [k.strip() for k in spec.get("ssh_keys") or [] if k.strip()])
         first = next(n for n in nodes if n.role == "ctlplane")
         install = openshift_service.install_config(
-            cluster.name, cluster.domain, spec["cidr"], 1, 0, openshift_service.pull_secret(), ssh_key)
+            cluster.name, cluster.domain, spec["cidr"], 1, 0, openshift_service.pull_secret_for(cluster.version),
+            ssh_key)
         # Prepend the host resolver so the node resolves cluster names (its own, and the hub's for a spoke);
         # the user's DNS stays as a fallback. The resolver forwards everything else upstream.
         node_dns = list(bm["dns"])
@@ -1385,6 +1466,12 @@ class OpenShiftInstaller:
     def run_addon(self, db: Session, cluster: Cluster, runner: AddonRunner, kind: str, name: str,
                   opts: OpenShiftOptions) -> None:
         nodes_by_role = {r: [n.name for n in cluster.nodes if n.role == r] for r in ("ctlplane", "worker")}
+        if is_okd(cluster.version):
+            refused = okd_unsupported(name if kind == "storage" else kind)
+            if refused:
+                raise ValueError(refused)
+            if kind in ("storage", "metallb", "operator"):
+                runner.okd_catalog()
         if kind == "storage":
             if name == "lvms":
                 runner.lvms(bare_metal=self._is_bmh(cluster))
@@ -1443,6 +1530,8 @@ class OpenShiftInstaller:
         refused = request.operator and managed_operator_error(request.operator.name, day2=True)
         if request.kind == "operator" and refused:  # a bare operator without the app's setup (disks, CRs, pools)
             raise ValueError(refused)
+        if is_okd(cluster.version) and okd_unsupported(request.kind):
+            raise ValueError(okd_unsupported(request.kind))
         if request.kind == "odf" and len(cluster.nodes) < 3:
             raise ValueError("ODF needs 3 nodes (Ceph replicates over 3): use LVMS on this cluster")
         if self.svc.to_dict(db, cluster)["status"] != "ready":

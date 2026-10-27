@@ -327,7 +327,9 @@ function failoverFlow(t: GroupTopology, vip: TopologyVip): Flow | null {
 export function buildFlows(t: GroupTopology, focusCluster?: string): Flow[] {
   const flows: Flow[] = [];
   const vips = [...t.vips].sort((a, b) => Number(b.cluster === focusCluster) - Number(a.cluster === focusCluster));
+  const keepalived = (v: TopologyVip) => v.kind.startsWith('vip-');  // cluster API / ingress VIPs: no flow of their own
   vips.forEach((v) => {
+    if (keepalived(v)) return;
     const f = serviceFlow(t, v);
     if (f) flows.push(f);
   });
@@ -341,6 +343,7 @@ export function buildFlows(t: GroupTopology, focusCluster?: string): Flow[] {
   if (puller && t.router.uplink_network) flows.push(internetFlow(t, puller));
   vips.forEach((v) => {
     if (v.address.includes('/') && !v.address.endsWith('/32')) return;
+    if (keepalived(v)) return;
     if (!v.cluster && v.via.length < 2) return;  // plain BGP routes: only the shared (anycast) ones are interesting
     const f = failoverFlow(t, v);
     if (f) flows.push(f);
