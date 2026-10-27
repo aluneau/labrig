@@ -1735,6 +1735,26 @@ export interface IronicImageProxyConfig {
   sources: string[];
 }
 
+export interface BareMetalLinuxInstall {
+  name: string;
+  iso_name: string;
+  target_disk?: string;
+  admin_username?: string;
+  ssh_authorized_key: string;
+  repo_url?: string;
+}
+
+export interface BareMetalInstallStatus {
+  id: number;
+  host_id: number;
+  name: string;
+  target_disk: string;
+  status: string;
+  status_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // Host DNS resolver (dnsmasq) status — resolves api/*.apps of groupless/bare-metal OpenShift clusters
 export interface HostDnsZone {
   cluster: string;

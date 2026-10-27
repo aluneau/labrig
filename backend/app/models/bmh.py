@@ -32,3 +32,21 @@ class BareMetalHost(Base):
     cluster_name = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BareMetalInstall(Base):
+    """One-time Anaconda installation delivered through BMC virtual media."""
+    __tablename__ = "bare_metal_installs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    host_id = Column(Integer, nullable=False, index=True)
+    name = Column(String(64), nullable=False)
+    installer_iso = Column(String(512), nullable=False)
+    target_disk = Column(String(255), nullable=False)
+    status = Column(String(20), default="pending", nullable=False)
+    status_message = Column(Text, nullable=True)
+    # Opaque token for the unauthenticated BMC download URL; never exposed by API.
+    token = Column(String(128), nullable=False, unique=True, index=True)
+    workdir = Column(String(512), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -120,9 +120,10 @@ case "$FAMILY" in
     $SUDO pacman -S --needed --noconfirm "${pkgs[@]}"
     ;;
   rhel)
+    # lorax/mkksiso builds the tokenised Anaconda virtual-media ISO for unattended physical Linux installs.
     # nmstate: openshift-install validates a bare-metal node's static networkConfig with nmstatectl (docs/bmh.md)
     $SUDO dnf install -y libvirt-daemon-kvm libvirt-daemon-config-network libvirt-client python3 python3-libvirt \
-      dnsmasq-utils polkit nmstate
+      dnsmasq-utils polkit nmstate lorax
     ;;
   debian)
     $SUDO apt-get update -qq

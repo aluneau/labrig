@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas import (
-    BareMetalHost, BareMetalHostCreate, BareMetalHostNic, BareMetalHostUpdate, BareMetalPower, IronicImageProxyConfig, IronicImageProxyStatus,
+    BareMetalHost, BareMetalHostCreate, BareMetalHostNic, BareMetalHostUpdate, BareMetalPower, IronicImageProxyConfig, IronicImageProxyStatus, BareMetalLinuxInstall, BareMetalInstallStatus,
 )
 from app.services.bmc import BMCError
 from app.services.baremetal_service import baremetal_service
@@ -145,3 +145,35 @@ def reset_host(bmh_id: int, wipe: bool = True, db: Session = Depends(get_db)):
     if not host:
         raise HTTPException(status_code=404, detail="Bare-metal host not found")
     return host
+
+
+@router.post("/{bmh_id}/linux-install")
+def install_linux(bmh_id: int, data: BareMetalLinuxInstall, db: Session = Depends(get_db)):
+    """Generate a Kickstart installer ISO and boot it once through BMC virtual media."""
+    from app.services.baremetal_install_service import baremetal_install_service
+    host = _host(db, bmh_id)
+    try:
+        return baremetal_install_service.create(db, host, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except BMCError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/{bmh_id}/linux-installs", response_model=List[BareMetalInstallStatus])
+def linux_installs(bmh_id: int, db: Session = Depends(get_db)):
+    from app.models.bmh import BareMetalInstall
+    _host(db, bmh_id)
+    return db.query(BareMetalInstall).filter(BareMetalInstall.host_id == bmh_id).order_by(BareMetalInstall.id.desc()).all()
+
+
+@router.post("/{bmh_id}/linux-installs/{install_id}/cancel", response_model=BareMetalInstallStatus)
+def cancel_linux_install(bmh_id: int, install_id: int, db: Session = Depends(get_db)):
+    from app.models.bmh import BareMetalInstall
+    from app.services.baremetal_install_service import baremetal_install_service
+    _host(db, bmh_id)
+    install = db.get(BareMetalInstall, install_id)
+    if not install or install.host_id != bmh_id:
+        raise HTTPException(status_code=404, detail="Linux install not found")
+    baremetal_install_service.cancel(db, install)
+    return install

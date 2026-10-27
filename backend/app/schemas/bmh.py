@@ -67,3 +67,25 @@ class IronicImageProxyStatus(BaseModel):
     backend_ip: Optional[str] = None
     port: int = 6180
     sources: List[str] = []
+
+
+class BareMetalLinuxInstall(BaseModel):
+    """Anaconda installer request; the ISO must be a known Storage ISO."""
+    name: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    iso_name: str = Field(..., min_length=5, max_length=255)
+    target_disk: str = Field("/dev/sda", min_length=5, max_length=255, pattern=r"^/dev/[A-Za-z0-9._/-]+$")
+    admin_username: str = Field("admin", min_length=1, max_length=32, pattern=r"^[a-z_][a-z0-9_-]*$")
+    ssh_authorized_key: str = Field(..., min_length=20, max_length=16384)
+    repo_url: Optional[str] = Field(None, max_length=2048)
+
+
+class BareMetalInstallStatus(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    host_id: int
+    name: str
+    target_disk: str
+    status: str
+    status_message: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime

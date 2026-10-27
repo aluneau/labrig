@@ -16,12 +16,17 @@ import {
   FlexItem,
   Grid,
   GridItem,
+  FormGroup,
+  FormSelect,
+  FormSelectOption,
+  Modal,
+  ModalVariant,
   PageSection,
   Spinner,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { BareMetalHost } from '../types';
-import { bareMetalApi } from '../services/api';
+import { BareMetalHost, ISOImage } from '../types';
+import { bareMetalApi, storageApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { errorText } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
@@ -41,6 +46,18 @@ export const BareMetalHostDetailPage: React.FC = () => {
   const [auto, setAuto] = useState(false);
   const [consoleError, setConsoleError] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const [isos, setIsos] = useState<ISOImage[]>([]);
+  const [installName, setInstallName] = useState('');
+  const [installIso, setInstallIso] = useState('');
+  const [installDisk, setInstallDisk] = useState('/dev/sda');
+  const [installUser, setInstallUser] = useState('admin');
+  const [installKey, setInstallKey] = useState('');
+
+  const openLinuxInstall = async () => {
+    try { const list = await storageApi.listIsos(); setIsos(list); setInstallIso(list[0]?.name || ''); setInstallOpen(true); }
+    catch (err) { setError(errorText(err)); }
+  };
 
   useEffect(() => {
     if (!auto) return;
@@ -82,6 +99,7 @@ export const BareMetalHostDetailPage: React.FC = () => {
           Install OpenShift (SNO)
         </Button>
       </FlexItem>
+      <FlexItem><Button isDisabled={busy} onClick={openLinuxInstall}>Install Linux</Button></FlexItem>
       <FlexItem>
         <Button variant="danger" isDisabled={busy} onClick={() => setConfirmReset(true)}>Reset</Button>
       </FlexItem>
@@ -194,6 +212,22 @@ export const BareMetalHostDetailPage: React.FC = () => {
         into the Lifecycle Controller), ejects any virtual media and powers the machine off. The host stays
         registered. This cannot be undone.
       </ConfirmModal>
+      <Modal variant={ModalVariant.medium} title={`Install Linux on ${host.name}`} isOpen={installOpen}
+        onClose={() => setInstallOpen(false)}
+        actions={[
+          <Button key="install" isDisabled={!installName || !installIso || !installKey}
+            onClick={() => run(async () => { await bareMetalApi.installLinux(hostId, { name: installName, iso_name: installIso, target_disk: installDisk, admin_username: installUser, ssh_authorized_key: installKey }); setInstallOpen(false); })}>Generate ISO and boot</Button>,
+          <Button key="cancel" variant="link" onClick={() => setInstallOpen(false)}>Cancel</Button>,
+        ]}>
+        <Alert variant="info" isInline title="Anaconda/Kickstart installation">
+          Select an AlmaLinux or CentOS Stream installer ISO from Storage. VM cloud images cannot boot directly on physical hardware. The generated virtual-media ISO erases the selected disk and creates the supplied SSH administrator.
+        </Alert>
+        <FormGroup label="Install name" isRequired fieldId="bmh-linux-name"><input id="bmh-linux-name" value={installName} onChange={(e) => setInstallName(e.target.value)} /></FormGroup>
+        <FormGroup label="Installer ISO" isRequired fieldId="bmh-linux-iso"><FormSelect id="bmh-linux-iso" value={installIso} onChange={(_e, v) => setInstallIso(v)}>{isos.map((iso) => <FormSelectOption key={iso.name} value={iso.name} label={iso.name} />)}</FormSelect></FormGroup>
+        <FormGroup label="Target disk" fieldId="bmh-linux-disk"><input id="bmh-linux-disk" value={installDisk} onChange={(e) => setInstallDisk(e.target.value)} /></FormGroup>
+        <FormGroup label="Administrator" fieldId="bmh-linux-user"><input id="bmh-linux-user" value={installUser} onChange={(e) => setInstallUser(e.target.value)} /></FormGroup>
+        <FormGroup label="SSH public key" isRequired fieldId="bmh-linux-key"><textarea id="bmh-linux-key" value={installKey} onChange={(e) => setInstallKey(e.target.value)} rows={3} style={{ width: '100%' }} /></FormGroup>
+      </Modal>
     </>
   );
 };
