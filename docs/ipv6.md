@@ -172,7 +172,9 @@ nodes' names their own; haproxy listens on IPv4 and IPv6 (`bind :::port v4v6`), 
 
 Verified with `e2e/kubeadm-ipv6.js` (1 control plane + 1 worker, Debian 13): both InternalIPs, podCIDRs and podIPs
 of both families, pod → pod over IPv6 across nodes, the IPv6 ClusterIP, a member resolving `hello` to A + AAAA and
-reaching the IPv6 LB address (L2 and BGP) and the API over IPv6.
+reaching the IPv6 LB address (L2 and BGP) and the API over IPv6. OpenShift 4.20.41 SNO dual stack installed for real
+(InternalIP v4 + v6, cluster / service networks of both families, PreferDualStack MetalLB demo with an IPv6 LB address,
+console and API answering on the router's IPv6 address).
 
 ## Topology, API
 
