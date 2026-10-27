@@ -60,6 +60,45 @@ group needs IPv6 (an auto-created group gets it); install-config adds the group 
     `console-openshift-console.apps.<c>.<d>`, `oauth-openshift.apps.<c>.<d>` (+ any route you use).
 - **SSH** to the nodes as `core` with the key from the cluster page (from the router, or over WireGuard).
 
+## OKD (no Red Hat subscription)
+
+**Distribution: OKD** in the create dialog (`openshift.distribution: "okd"`, OpenTofu `distribution = "okd"`) installs
+OKD, the community distribution on CentOS Stream CoreOS, with the same agent-based flow, group and router:
+
+- **Versions**: the OKD release controller's accepted SCOS releases (`<major>-scos-stable` streams, the same list as
+  the okd-project/okd GitHub releases), one `stable-<minor>` channel per minor (e.g. `4.22.0-okd-scos.10`).
+  `GET /openshift/channels?distribution=okd`, `GET /openshift/versions?channel=stable-4.22&distribution=okd`.
+- **Binaries**: `openshift-install` / `oc` from the GitHub release tarballs (sha256sum.txt checked), cached per
+  release like OpenShift's; fallback `oc adm release extract --command` from `quay.io/okd/scos-release:<ver>`.
+- **No pull secret**: the install-config gets OKD's placeholder `{"auths":{"fake":{"auth":"aWQ6cGFzcwo="}}}`
+  (everything is pulled from public quay.io).
+- **Add-ons**: Red Hat's catalogs need a subscription. The app adds the **OKDerators** catalog
+  (`quay.io/okderators/catalog-index:<minor>`, CatalogSource `okderators`; the newest index when the minor has none
+  yet, e.g. OKD 5.0) before the first add-on: **LVMS** and **MetalLB** come from it, other curated operators from
+  it or from `community-operators`. **ODF, SR-IOV, ACM, GitOps and disconnected installs are refused** in plain
+  words (Red Hat-only operators / mirroring of Red Hat catalogs).
+- Sizes and topologies are OpenShift's (SNO: 16 GiB / 8 vCPU minimum).
+
+## Platform baremetal (API / ingress VIPs)
+
+**Virtual IPs (platform baremetal)** under Topology (`openshift.platform: "baremetal"`, compact or HA only: the
+installer refuses a single node with it) makes the cluster its own load balancer, like a customer's IPI / ABI
+bare-metal cluster: keepalived on the nodes holds an **API VIP** (masters) and an **ingress VIP** (ingress nodes),
+in-cluster haproxy / the router pods serve them.
+
+- `api_vip` / `ingress_vip`: given, or free addresses of the group network picked by the app; kept out of DHCP and
+  static assignments (one-address pools `<cluster>-api-vip` / `-ingress-vip`, like a MetalLB pool), read back in
+  `spec.openshift`. The topology view shows them.
+- Lab DNS: `api` / `api-int.<cluster>.<domain>` -> API VIP, `*.apps.<cluster>.<domain>` -> ingress VIP (not the
+  router). The router keeps only TCP forwards **uplink :6443 -> API VIP** and **:80 / :443 -> ingress VIP** (no
+  22623): the host still has no route to the group network, so the kubeconfig stays
+  `https://<router uplink IP>:6443` and the host's `/etc/hosts` lines keep pointing at the uplink.
+- install-config: `platform.baremetal.apiVIPs` / `ingressVIPs` (no hosts / provisioning network: the agent config
+  carries the hosts).
+
+Verified so far: rendered configs and `openshift-install agent create image` for a compact cluster; a full compact /
+HA install with VIPs is still to be run (3 × 16 GiB masters).
+
 ## Add-ons
 
 Chosen at creation, or later from the cluster's *Operators* tab:
@@ -386,8 +425,7 @@ credentials only, the release comes through `imageDigestSources`, OperatorHub sh
 First mirror: ~20+ GB, 30–90 min before the nodes are created. Details, day-2 operators and limits:
 [disconnected.md](disconnected.md#openshift).
 
-Not yet: OKD, `platform: baremetal` with VIPs,
-adding workers after install, upgrades from the app.
+Not yet: adding workers after install, upgrades from the app, disconnected OKD.
 
 ## OpenTofu
 

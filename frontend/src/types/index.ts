@@ -482,10 +482,19 @@ export interface KubeadmOptions {
 
 export type OdfProfile = 'lab' | 'lean';
 
+export type OpenShiftDistribution = 'ocp' | 'okd';
+export type OpenShiftPlatform = 'none' | 'baremetal';
+
 export interface OpenShiftOptions {
+  // ocp = OpenShift (pull secret), okd = OKD on CentOS Stream CoreOS (no pull secret, community operators)
+  distribution?: OpenShiftDistribution;
   version?: string | null; // null = latest of the channel
   channel: string;
   topology: OpenShiftTopology;
+  // none = router haproxy + DNS; baremetal = in-cluster keepalived VIPs (compact / ha only)
+  platform?: OpenShiftPlatform;
+  api_vip?: string | null; // baremetal: assigned from the group network when empty
+  ingress_vip?: string | null;
   storage: OpenShiftStorage;
   storage_disk_size: number; // GiB per storage node
   odf_profile?: OdfProfile; // lab (default): small Ceph, no object storage; lean: Red Hat sizing

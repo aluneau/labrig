@@ -150,6 +150,12 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             "dual_stack": bool((c.spec or {}).get("dual_stack") or ((c.spec or {}).get("openshift") or {}).get("dual_stack")),
             "service_hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}" if ip else None,
         })
+        os_spec = ((c.spec or {}).get("openshift") or {}) if c.type == "openshift" else {}
+        if os_spec.get("platform") == "baremetal":  # keepalived VIPs inside the cluster (which node holds them: not read)
+            for kind, host in (("api", f"api.{zone}"), ("ingress", f"*.apps.{zone}")):
+                if os_spec.get(f"{kind}_vip"):
+                    vips.append({"address": os_spec[f"{kind}_vip"], "kind": f"vip-{kind}", "name": kind,
+                                 "hostname": host, "cluster": c.name, "via": []})
         if not ip:
             continue
         if mode == "bgp":

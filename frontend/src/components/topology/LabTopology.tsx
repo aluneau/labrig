@@ -148,10 +148,16 @@ function machineLines(m: TopologyMachine): Line[] {
 }
 
 function vipLines(v: TopologyVip): Line[] {
-  const kind = v.kind === 'metallb-l2' ? 'MetalLB L2 service IP' : v.kind === 'metallb-bgp' ? 'MetalLB BGP service IP' : 'BGP route';
-  const lines: Line[] = [{ text: kind, color: v.kind === 'metallb-l2' ? C.arp : C.bgp }];
+  const vip = v.kind === 'vip-api' || v.kind === 'vip-ingress';
+  const kind = vip ? `${v.kind === 'vip-api' ? 'API' : 'Ingress'} VIP (keepalived)`
+    : v.kind === 'metallb-l2' ? 'MetalLB L2 service IP' : v.kind === 'metallb-bgp' ? 'MetalLB BGP service IP' : 'BGP route';
+  const lines: Line[] = [{ text: kind, color: v.kind === 'metallb-l2' || vip ? C.arp : C.bgp }];
   if (v.address6) lines.push({ text: v.address6 });
   if (v.hostname) lines.push({ text: v.hostname });
+  if (vip) {
+    lines.push({ text: `held by a node of ${v.cluster}` });
+    return lines;
+  }
   lines.push({ text: v.via.length ? `${v.kind === 'metallb-l2' ? 'owned by' : 'via'} ${v.via.join(', ')}` : 'nobody carries it now' });
   return lines;
 }
@@ -454,6 +460,9 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
     const v = t.vips.find((x) => `vip:${x.address}` === key);
     if (!v) return null;
     const ip = v.address.replace(/\/32$/, '');
+    if (v.kind === 'vip-api' || v.kind === 'vip-ingress') {
+      return { title: `${ip} (${v.hostname})`, text: `A virtual IP of cluster ${v.cluster} (platform baremetal): keepalived on the ${v.kind === 'vip-api' ? 'control planes holds it for the Kubernetes API' : 'ingress nodes holds it for the routes (*.apps)'}, and moves it to another node when its holder stops. The lab DNS points there directly; the router only forwards its uplink ${v.kind === 'vip-api' ? ':6443' : ':80 / :443'} to it for this PC.` };
+    }
     if (v.kind === 'metallb-l2') {
       return { title: `${ip}${v.hostname ? ` (${v.hostname})` : ''}`, text: `A MetalLB service IP from the lab network. No machine has it configured: ${v.via[0] || 'one node'} answers ARP for it, so the router delivers its traffic there. If that node stops, another one takes the address over within seconds.${v.address6 ? ` Dual stack: the Service also has ${v.address6} (neighbor discovery instead of ARP).` : ''}` };
     }

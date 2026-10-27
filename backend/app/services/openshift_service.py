@@ -39,6 +39,32 @@ logger = logging.getLogger(__name__)
 MIRROR = "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients"
 GRAPH = "https://api.openshift.com/api/upgrades_info/v1/graph"
 MIN_MINOR = (4, 16)          # oldest minor offered (agent-based installer + current operators)
+# OKD (CentOS Stream CoreOS): versions from the OKD release controller (accepted tags of the <major>-scos-stable
+# streams, the same list as the GitHub releases), binaries from the okd-project/okd GitHub releases (fallback:
+# `oc adm release extract --command` from the release image)
+OKD_STREAMS = "https://amd64.origin.releases.ci.openshift.org/api/v1/releasestreams/accepted"
+OKD_TAGS = "https://amd64.origin.releases.ci.openshift.org/api/v1/releasestream/{stream}/tags"
+OKD_DOWNLOADS = "https://github.com/okd-project/okd/releases/download"
+OKD_RELEASE_IMAGE = "quay.io/okd/scos-release"
+# OKD needs no Red Hat pull secret: the documented placeholder (everything comes from public quay.io)
+OKD_PULL_SECRET = '{"auths":{"fake":{"auth":"aWQ6cGFzcwo="}}}'
+# Add-ons that need Red Hat-only operators / registries: refused on OKD in plain words
+OKD_UNSUPPORTED = {
+    "odf": "ODF is a Red Hat product (no community build in OKD's catalogs): use LVMS storage",
+    "sriov": "the SR-IOV Network Operator is not in OKD's community catalog",
+    "acm": "ACM (Red Hat Advanced Cluster Management) is not available on OKD",
+    "gitops": "the GitOps add-on is for ACM hubs, which OKD can't be",
+    "disconnected": "disconnected installs mirror Red Hat's operator catalogs: OpenShift (ocp) only for now",
+}
+
+
+def is_okd(version: Optional[str]) -> bool:
+    return bool(version) and "-okd-" in str(version)
+
+
+def okd_unsupported(kind: str) -> Optional[str]:
+    reason = OKD_UNSUPPORTED.get(kind)
+    return f"Not on OKD: {reason}" if reason else None
 CACHE_TTL = 3600
 HTTP_TIMEOUT = 30
 
@@ -103,6 +129,23 @@ CATALOG_CACHE_TTL = 7 * 24 * 3600
 # Operators the app installs AND configures through an option (CR, disks, pools...): listing them as plain
 # operators would install a bare, unconfigured operator (day 2) or be skipped (create). managed_by ->
 # (create option, day-2 add-on kind)
+# OKD: curated operators of the OKDerators catalog (openshift_addons.OKD_CATALOG_SOURCE, added by the app) and of
+# the community catalog. ODF / SR-IOV / ACM are refused on OKD (OKD_UNSUPPORTED).
+OKD_CATALOG: List[Dict[str, Any]] = [
+    {**next(e for e in CATALOG if e["name"] == name), "source": "okderators"}
+    for name in ("lvms-operator", "metallb-operator", "kubernetes-nmstate-operator", "web-terminal", "nfd",
+                 "cert-manager-operator", "cluster-observability-operator")
+] + [
+    {"name": "community-kubevirt-hyperconverged", "display_name": "KubeVirt HyperConverged", "category": "Virtualization",
+     "source": "community-operators", "description": "VMs on OKD (community build of OpenShift Virtualization)."},
+    {"name": "argocd-operator", "display_name": "Argo CD", "category": "CI/CD", "source": "community-operators",
+     "description": "Argo CD for cluster and application GitOps (community operator)."},
+    {"name": "grafana-operator", "display_name": "Grafana Operator", "category": "Observability",
+     "source": "community-operators", "description": "Grafana instances and dashboards as custom resources."},
+    {"name": "keycloak-operator", "display_name": "Keycloak", "category": "Security", "source": "community-operators",
+     "description": "Identity provider for OAuth / OIDC labs."},
+]
+
 MANAGED_OPTIONS = {
     "storage:lvms": ('"openshift": {"storage": "lvms"}', "lvms"),
     "storage:odf": ('"openshift": {"storage": "odf", "topology": "compact"} (3+ nodes: compact or ha)', "odf"),
@@ -147,6 +190,11 @@ def _version_key(version: str) -> Tuple:
     # releases sort after their rc / ec builds
     if not pre:
         return nums + (2, 0)
+    if pre.startswith("okd-scos."):  # OKD: 5.0.0-okd-scos.3, 5.1.0-okd-scos.ec.0
+        rest = pre[len("okd-scos."):]
+        ec = rest.startswith("ec.")
+        n = rest[3:] if ec else rest
+        return nums + (0 if ec else 2, int(n) if n.isdigit() else 0)
     kind, _, n = pre.partition(".")
     return nums + (1 if kind == "rc" else 0, int(n) if n.isdigit() else 0)
 
@@ -243,6 +291,10 @@ class OpenShiftService:
             (self.root / name).unlink(missing_ok=True)
         return self.pull_secret_status()
 
+    def pull_secret_for(self, version: Optional[str]) -> str:
+        """install-config pullSecret: OKD's placeholder for an OKD release, else the user's"""
+        return OKD_PULL_SECRET if is_okd(version) else self.pull_secret()
+
     def pull_secret(self) -> str:
         """Compact JSON for install-config.yaml"""
         path = self._pull_secret_path
@@ -268,10 +320,31 @@ class OpenShiftService:
             return json.loads(raw).get("nodes") or []
         return self._cached(f"graph:{channel}", fetch)
 
-    def versions(self, channel: str) -> List[Dict[str, Any]]:
+    def _okd_tags(self) -> List[Dict[str, Any]]:
+        """Accepted OKD (SCOS) releases of every <major>-scos-stable stream: [{version, payload}]"""
+        def fetch():
+            streams = json.loads(_http_get(OKD_STREAMS, accept="application/json"))
+            result = []
+            for stream in sorted(k for k in streams if re.match(r"^\d+-scos-stable$", k)):
+                data = json.loads(_http_get(OKD_TAGS.format(stream=stream), accept="application/json"))
+                result += [{"version": t["name"], "payload": t.get("pullSpec")} for t in data.get("tags") or []
+                           if t.get("phase") == "Accepted" and re.match(r"^\d+\.\d+\.\d+-okd-scos\.\d+$", t["name"])]
+            return result
+        try:
+            return self._cached("okd:tags", fetch)
+        except Exception as e:
+            raise RuntimeError(f"Cannot reach the OKD release controller: {e}")
+
+    def versions(self, channel: str, distribution: str = "ocp") -> List[Dict[str, Any]]:
         if not re.match(r"^(stable|fast|candidate|eus)-\d+\.\d+$", channel):
             raise ValueError(f"Invalid channel '{channel}' (e.g. stable-4.20)")
         minor = channel.split("-", 1)[1]
+        if distribution == "okd":
+            result = [dict(t) for t in self._okd_tags() if t["version"].startswith(minor + ".")]
+            result.sort(key=lambda v: _version_key(v["version"]), reverse=True)
+            for v in result:
+                v["cached"] = self.binaries_cached(v["version"])
+            return result
         try:
             nodes = self._graph(channel)
         except Exception as e:
@@ -283,7 +356,16 @@ class OpenShiftService:
             v["cached"] = self.binaries_cached(v["version"])
         return result
 
-    def channels(self) -> List[Dict[str, Any]]:
+    def channels(self, distribution: str = "ocp") -> List[Dict[str, Any]]:
+        if distribution == "okd":  # one "stable-<minor>" per minor with accepted OKD releases
+            by_minor: Dict[Tuple[int, int], List[str]] = {}
+            for t in self._okd_tags():
+                major, minor = (int(x) for x in t["version"].split(".")[:2])
+                if (major, minor) >= MIN_MINOR:
+                    by_minor.setdefault((major, minor), []).append(t["version"])
+            return [{"name": f"stable-{ma}.{mi}", "minor": f"{ma}.{mi}",
+                     "latest": max(by_minor[(ma, mi)], key=_version_key)} for ma, mi in sorted(by_minor, reverse=True)]
+
         def fetch():
             html = _http_get(f"{MIRROR}/ocp/").decode("utf-8", "replace")
             minors = {tuple(int(x) for x in m.split(".")) for m in re.findall(r'href="stable-(\d+\.\d+)/', html)}
@@ -313,12 +395,12 @@ class OpenShiftService:
                     result.append({"name": cand, "minor": f"{major}.{minor}", "latest": versions[0]["version"]})
         return result
 
-    def resolve_version(self, channel: str, version: Optional[str]) -> str:
+    def resolve_version(self, channel: str, version: Optional[str], distribution: str = "ocp") -> str:
         if version:
             return version
-        versions = self.versions(channel)
+        versions = self.versions(channel, distribution)
         if not versions:
-            raise ValueError(f"No release in channel {channel}")
+            raise ValueError(f"No {'OKD ' if distribution == 'okd' else ''}release in channel {channel}")
         return versions[0]["version"]
 
     # ---------------------------------------------------------------- binaries
@@ -339,18 +421,29 @@ class OpenShiftService:
             target = self.bin_dir(version)
             if self.binaries_cached(version):
                 return target
-            base = self._mirror_dir(version)
+            if is_okd(version):
+                base = f"{OKD_DOWNLOADS}/{version}"
+                files = [(f"openshift-install-linux-{version}.tar.gz", ["openshift-install"]),
+                         (f"openshift-client-linux-{version}.tar.gz", ["oc", "kubectl"])]
+            else:
+                base = self._mirror_dir(version)
+                files = [("openshift-install-linux.tar.gz", ["openshift-install"]),
+                         ("openshift-client-linux.tar.gz", ["oc", "kubectl"])]
             sums = {}
-            for line in _http_get(f"{base}/sha256sum.txt").decode().splitlines():
-                parts = line.split()
-                if len(parts) == 2:
-                    sums[parts[1]] = parts[0]
+            try:
+                for line in _http_get(f"{base}/sha256sum.txt").decode().splitlines():
+                    parts = line.split()
+                    if len(parts) == 2:
+                        sums[parts[1].lstrip("*")] = parts[0]
+            except Exception as e:
+                if not is_okd(version):
+                    raise
+                logger.warning(f"OKD {version}: no GitHub release files ({e}): extracting from the release image")
+                return self._okd_extract(version, progress)
             tmp = self.root / "bin" / f".{version}.tmp"
             shutil.rmtree(tmp, ignore_errors=True)
             tmp.mkdir(parents=True)
             try:
-                files = [("openshift-install-linux.tar.gz", ["openshift-install"]),
-                         ("openshift-client-linux.tar.gz", ["oc", "kubectl"])]
                 for i, (archive, members) in enumerate(files):
                     if archive not in sums:
                         raise RuntimeError(f"{archive} is not published for {version}")
@@ -375,6 +468,28 @@ class OpenShiftService:
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
             return target
+
+    def _okd_extract(self, version: str, progress: Callable[[str, int], None]) -> Path:
+        """openshift-install + oc from the OKD release image itself (an oc of any release does it)"""
+        target = self.bin_dir(version)
+        tmp = self.root / "bin" / f".{version}.tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.root)}
+        try:
+            for i, command in enumerate(("openshift-install", "oc")):
+                progress(f"Extracting {command} from {OKD_RELEASE_IMAGE}:{version}", i * 50)
+                proc = subprocess.run([str(self._any_oc()), "adm", "release", "extract", f"--command={command}",
+                                       f"--to={tmp}", f"{OKD_RELEASE_IMAGE}:{version}"],
+                                      capture_output=True, text=True, timeout=30 * 60, env=env)
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Cannot extract {command} of OKD {version}: "
+                                       f"{(proc.stderr or proc.stdout).strip()[-300:]}")
+            shutil.rmtree(target, ignore_errors=True)
+            os.replace(tmp, target)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return target
 
     @staticmethod
     def _download(url: str, path: Path, sha256: str, progress: Callable[[int], None],
@@ -504,7 +619,10 @@ class OpenShiftService:
         return result
 
     @staticmethod
-    def catalog() -> List[Dict[str, Any]]:
+    def catalog(distribution: str = "ocp") -> List[Dict[str, Any]]:
+        if distribution == "okd":
+            return [{"source": "community-operators", "managed_by": None, "min_nodes": 1, **entry}
+                    for entry in OKD_CATALOG]
         return [{"source": "redhat-operators", "managed_by": None, "min_nodes": 1, **entry} for entry in CATALOG]
 
     # ----------------------------------------------------------- install files
@@ -521,10 +639,12 @@ class OpenShiftService:
     @staticmethod
     def install_config(name: str, base_domain: str, machine_cidr: str, masters: int, workers: int,
                        pull_secret: str, ssh_key: str, mirror: Optional[Dict[str, Any]] = None,
+                       vips: Optional[Dict[str, str]] = None,
                        machine_cidr6: Optional[str] = None) -> Dict[str, Any]:
         """mirror (disconnected): {image_digest_sources: [{source, mirrors}], ca_pem}: the release comes
         from the group's mirror registry, whose CA every node trusts (additionalTrustBundlePolicy Always:
-        also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it)"""
+        also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it).
+        vips {api, ingress}: platform baremetal (in-cluster keepalived + haproxy on those addresses)"""
         config = {
             "apiVersion": "v1",
             "baseDomain": base_domain,
@@ -537,7 +657,8 @@ class OpenShiftService:
                 "clusterNetwork": [{"cidr": POD_CIDR, "hostPrefix": 23}],
                 "serviceNetwork": [SERVICE_CIDR],
             },
-            "platform": {"none": {}},
+            "platform": {"baremetal": {"apiVIPs": [vips["api"]], "ingressVIPs": [vips["ingress"]]}}
+            if vips else {"none": {}},
             "pullSecret": pull_secret,
             "sshKey": ssh_key,
         }

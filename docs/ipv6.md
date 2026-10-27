@@ -149,7 +149,7 @@ preflight; networkd / NetworkManager keep handling the RAs: the node keeps its d
 `EnableIPv6` + `IPv6Network` (VXLAN over IPv6 between nodes), kube-proxy dual stack. Cluster nodes in an IPv6 group
 get the members' network-config (DHCPv4 + DHCPv6 + RAs), with or without dual stack.
 
-**OpenShift** (agent-based installer, platform none): `machineNetwork` = group CIDR + group /64, `clusterNetwork` and
+**OpenShift** (agent-based installer, platform none only: `platform: baremetal` + dual stack is refused, its keepalived VIPs would need IPv6 ones too): `machineNetwork` = group CIDR + group /64, `clusterNetwork` and
 `serviceNetwork` with the IPv6 entries above (OVN-Kubernetes). The nodes take their IPv6 address from the group's
 DHCPv6 reservations (RHCOS NetworkManager follows the RA's M flag): no static `networkConfig` in agent-config.
 

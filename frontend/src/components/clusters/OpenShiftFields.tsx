@@ -26,8 +26,8 @@ import {
 } from '@patternfly/react-core';
 import { CheckCircleIcon, ExclamationTriangleIcon } from '@patternfly/react-icons';
 import {
-  CatalogOperator, HostResources, MetalLBOptions, OdfProfile, OpenShiftChannel, OpenShiftOptions, OpenShiftStorage,
-  OpenShiftTopology, OpenShiftVersion, PullSecretStatus, SriovOptions,
+  CatalogOperator, HostResources, MetalLBOptions, OdfProfile, OpenShiftChannel, OpenShiftDistribution, OpenShiftOptions,
+  OpenShiftPlatform, OpenShiftStorage, OpenShiftTopology, OpenShiftVersion, PullSecretStatus, SriovOptions,
 } from '../../types';
 import { hostApi, openshiftApi } from '../../services/api';
 import { errorText } from '../../utils/format';
@@ -36,6 +36,8 @@ import { errorText } from '../../utils/format';
 export interface Role { memory: string; vcpu: string; disk: string }
 
 export interface OsDraft {
+  distribution: OpenShiftDistribution;
+  platform: OpenShiftPlatform; // baremetal: keepalived VIPs in the cluster (compact / ha)
   channel: string;
   version: string; // '' = latest of the channel
   topology: OpenShiftTopology;
@@ -68,6 +70,8 @@ export const ODF_EXTRA: Record<OdfProfile, { vcpu: number; memoryGiB: number }> 
 };
 
 export const defaultOsDraft = (): OsDraft => ({
+  distribution: 'ocp',
+  platform: 'none',
   channel: 'stable-4.20',
   version: '',
   topology: 'sno',
@@ -119,6 +123,11 @@ export const osDraftErrors = (d: OsDraft): string[] => {
   const errors: string[] = [];
   const { workers } = nodeCounts(d);
   if (d.topology === 'ha' && workers < 2) errors.push('HA needs at least 2 workers.');
+  if (d.platform === 'baremetal' && d.topology === 'sno') errors.push('Platform baremetal needs 3 control planes (compact or HA).');
+  if (d.distribution === 'okd') {
+    if (d.storage === 'odf') errors.push('ODF is not available on OKD: use LVMS.');
+    if (d.sriov.enabled || d.acm || d.disconnected) errors.push('SR-IOV, ACM and disconnected installs are OpenShift (OCP) only.');
+  }
   if (d.storage === 'odf' && storageNodes(d) < 3) {
     errors.push('ODF needs at least 3 nodes (not SNO).');
   }
@@ -140,9 +149,11 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[], dualStack = fa
   const source = (name: string) => catalog.find((o) => o.name === name)?.source || 'redhat-operators';
   const names = [...d.operators, ...d.extraOperators.filter((n) => !d.operators.includes(n))];
   const options: OpenShiftOptions = {
+    distribution: d.distribution,
     version: d.version || null,
     channel: d.channel,
     topology: d.topology,
+    platform: d.topology === 'sno' ? 'none' : d.platform,
     storage: d.storage,
     storage_disk_size: Number(d.storageDisk) || 100,
     odf_profile: d.odfProfile,
@@ -289,15 +300,28 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
   const [versions, setVersions] = useState<OpenShiftVersion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const okd = draft.distribution === 'okd';
   useEffect(() => {
-    openshiftApi.channels().then(setChannels).catch((err) => setError(errorText(err)));
-  }, []);
+    let current = true;
+    setChannels([]);
+    openshiftApi.channels(draft.distribution).then((c) => {
+      if (!current) return;
+      setChannels(c);
+      // switching distribution: the channel of the newest minor (OKD minors differ from OpenShift's)
+      if (c.length && !c.some((x) => x.name === draft.channel)) patch({ channel: c[0].name, version: '' });
+    }).catch((err) => { if (current) setError(errorText(err)); });
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.distribution]);
   useEffect(() => {
+    if (!draft.channel) return undefined;
+    let current = true;  // a slower answer for the previous channel / distribution must not win
     setVersions(null);
-    openshiftApi.versions(draft.channel)
-      .then((v) => { setVersions(v); setError(null); })
-      .catch((err) => { setVersions([]); setError(errorText(err)); });
-  }, [draft.channel]);
+    openshiftApi.versions(draft.channel, draft.distribution)
+      .then((v) => { if (current) { setVersions(v); setError(null); } })
+      .catch((err) => { if (current) { setVersions([]); setError(errorText(err)); } });
+    return () => { current = false; };
+  }, [draft.channel, draft.distribution]);
 
   const latest = versions?.[0];
   const picked = draft.version ? versions?.find((v) => v.version === draft.version) : latest;
@@ -305,6 +329,14 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
   return (
     <FormSection title="Version" titleElement="h3">
       <Grid hasGutter md={6}>
+        <GridItem span={12}>
+          <FormGroup role="radiogroup" isInline fieldId="os-distribution" label="Distribution">
+            <Radio id="os-dist-ocp" name="os-distribution" label="OpenShift (OCP)" description="Red Hat OpenShift Container Platform: needs a pull secret"
+              isChecked={!okd} onChange={() => patch({ distribution: 'ocp', channel: '', version: '' })} />
+            <Radio id="os-dist-okd" name="os-distribution" label="OKD" description="Community distribution on CentOS Stream CoreOS: no subscription, community operators"
+              isChecked={okd} onChange={() => patch({ distribution: 'okd', channel: '', version: '', storage: draft.storage === 'odf' ? 'lvms' : draft.storage, sriov: { ...draft.sriov, enabled: false }, acm: false, disconnected: false })} />
+          </FormGroup>
+        </GridItem>
         <GridItem>
           <FormGroup label="Channel" fieldId="os-channel">
             <FormSelect id="os-channel" value={draft.channel} onChange={(_e, v) => patch({ channel: v, version: '' })}>
@@ -327,7 +359,8 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
             </Flex>
             {hint(picked && !picked.cached
               ? 'openshift-install and oc for this version are downloaded first (about 500 MB, cached for the next clusters).'
-              : 'Installer binaries come from mirror.openshift.com; the release images are pulled by the nodes.')}
+              : okd ? 'OKD releases (quay.io/okd/scos-release); installer binaries from the okd-project GitHub releases.'
+                : 'Installer binaries come from mirror.openshift.com; the release images are pulled by the nodes.')}
           </FormGroup>
         </GridItem>
       </Grid>
@@ -341,6 +374,7 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
 export const TopologySection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => {
   const setTopology = (topology: OpenShiftTopology) => patch({
     topology, ...(draft.acm ? withAcmSizes({ ...draft, ...TOPOLOGY_SIZES[topology] }, topology) : TOPOLOGY_SIZES[topology]),
+    ...(topology === 'sno' ? { platform: 'none' as OpenShiftPlatform } : {}),
     // ODF is not possible on SNO
     ...(topology === 'sno' && draft.storage === 'odf' ? { storage: 'lvms' as OpenShiftStorage } : {}),
   });
@@ -355,6 +389,16 @@ export const TopologySection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDr
         <Radio id="os-topo-ha" name="os-topology" label="HA (3 + workers)" description="3 control planes + 2 or more workers"
           isChecked={draft.topology === 'ha'} onChange={() => setTopology('ha')} />
       </FormGroup>
+      {draft.topology !== 'sno' && (
+        <FormGroup role="radiogroup" isInline fieldId="os-platform" label="API and ingress load balancing">
+          <Radio id="os-platform-none" name="os-platform" label="Router (platform none)"
+            description="The group router's DNS and haproxy front the API and *.apps, like a customer's external load balancer."
+            isChecked={draft.platform === 'none'} onChange={() => patch({ platform: 'none' })} />
+          <Radio id="os-platform-baremetal" name="os-platform" label="Virtual IPs (platform baremetal)"
+            description="keepalived in the cluster holds an API VIP and an ingress VIP of the group network; DNS points at them."
+            isChecked={draft.platform === 'baremetal'} onChange={() => patch({ platform: 'baremetal' })} />
+        </FormGroup>
+      )}
       {draft.topology === 'ha' && (
         <FormGroup label="Workers" fieldId="os-workers">
           <TextInput id="os-workers" type="number" min={2} max={20} value={draft.workers} style={{ maxWidth: 120 }}
@@ -374,7 +418,7 @@ export const TopologySection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDr
 
 export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDraft>) => void }> = ({ draft, patch }) => {
   const nodes = storageNodes(draft);
-  const odfPossible = draft.topology !== 'sno';
+  const odfPossible = draft.topology !== 'sno' && draft.distribution !== 'okd';
   const where = storageOnWorkers(draft) ? 'worker' : draft.topology === 'ha' ? 'control plane' : 'node';
   return (
     <FormSection title="Storage" titleElement="h3">
@@ -388,7 +432,7 @@ export const StorageSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
           description={odfPossible
             ? `Ceph on an extra disk per ${where}, replicated 3 times: block and file storage `
               + '(+ object storage with the Red Hat sizing).'
-            : 'Needs at least 3 nodes: not available on SNO.'}
+            : draft.distribution === 'okd' ? 'Not available on OKD (Red Hat product).' : 'Needs at least 3 nodes: not available on SNO.'}
           isChecked={draft.storage === 'odf'} onChange={() => patch({ storage: 'odf' })} />
       </FormGroup>
       {draft.storage !== 'none' && (

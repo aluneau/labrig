@@ -74,8 +74,12 @@ type clusterModel struct {
 }
 
 type openshiftModel struct {
+	Distribution    types.String `tfsdk:"distribution"`
 	Channel         types.String `tfsdk:"channel"`
 	Topology        types.String `tfsdk:"topology"`
+	Platform        types.String `tfsdk:"platform"`
+	APIVIP          types.String `tfsdk:"api_vip"`
+	IngressVIP      types.String `tfsdk:"ingress_vip"`
 	Storage         types.String `tfsdk:"storage"`
 	StorageDiskSize types.Int64  `tfsdk:"storage_disk_size"`
 	OdfProfile      types.String `tfsdk:"odf_profile"`
@@ -251,8 +255,12 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"server defaults. Changed in place on an installed cluster: adding `operators`, enabling `metallb` / " +
 					"`metallb_demo`, switching `metallb_mode`; anything else recreates the cluster.",
 				Attributes: map[string]schema.Attribute{
-					"channel":           osStr("e.g. stable-4.20 (default)."),
+					"distribution":      osStr("ocp (default: OpenShift, needs the pull secret) or okd (OKD on CentOS Stream CoreOS, no pull secret; no ODF / SR-IOV / ACM / disconnected)."),
+					"channel":           osStr("e.g. stable-4.20 (default). okd: stable-<minor> of the OKD releases, e.g. stable-4.22."),
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
+					"platform":          osStr("none (default: the group router fronts api / *.apps) or baremetal (keepalived API + ingress VIPs in the cluster; compact / ha only)."),
+					"api_vip":           osStr("platform baremetal: API virtual IP on the group network (default: assigned, read back)."),
+					"ingress_vip":       osStr("platform baremetal: ingress virtual IP on the group network (default: assigned, read back)."),
 					"storage":           osStr("none (default), lvms or odf (>= 3 nodes); adds a disk per storage node."),
 					"storage_disk_size": osInt("GiB (default 100)."),
 					"odf_profile":       osStr("ODF footprint: lab (default: small Ceph, no object storage, about +2 vCPU / +6 GiB per storage node) or lean (Red Hat sizing, +8 vCPU / +24 GiB)."),
@@ -392,6 +400,12 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 	if os := plan.OpenShift; os != nil || plan.Type.ValueString() == "openshift" {
 		opts := map[string]any{}
 		if os != nil {
+			for key, val := range map[string]types.String{"distribution": os.Distribution, "platform": os.Platform,
+				"api_vip": os.APIVIP, "ingress_vip": os.IngressVIP} {
+				if v := strPtr(val); v != nil {
+					opts[key] = *v
+				}
+			}
 			if v := strPtr(os.Channel); v != nil {
 				opts["channel"] = *v
 			}
@@ -867,6 +881,14 @@ func fillOpenShift(ctx context.Context, m *openshiftModel, spec map[string]any) 
 	sriov, _ := o["sriov"].(map[string]any)
 	mlb, _ := o["metallb"].(map[string]any)
 	m.Channel, m.Topology, m.Storage = str(o["channel"]), str(o["topology"]), str(o["storage"])
+	m.Distribution, m.Platform = str(o["distribution"]), str(o["platform"])
+	if m.Distribution.IsNull() {
+		m.Distribution = types.StringValue("ocp") // clusters created before OKD support
+	}
+	if m.Platform.IsNull() {
+		m.Platform = types.StringValue("none")
+	}
+	m.APIVIP, m.IngressVIP = str(o["api_vip"]), str(o["ingress_vip"])
 	m.StorageDiskSize = num(o["storage_disk_size"])
 	m.OdfProfile = str(o["odf_profile"])
 	m.SRIOV, m.SRIOVNics, m.SRIOVVFs, m.SRIOVDeviceType = flag(sriov["enabled"]), num(sriov["nics"]), num(sriov["vfs"]), str(sriov["device_type"])

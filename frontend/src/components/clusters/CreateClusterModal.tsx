@@ -162,10 +162,10 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
   const isOpenShift = type === 'openshift';
   useEffect(() => {
-    if (!isOpen || !isOpenShift || catalog.length) return;
-    openshiftApi.catalog().then((c) => { setCatalog(c); setCatalogError(null); })
+    if (!isOpen || !isOpenShift) return;
+    openshiftApi.catalog(os.distribution).then((c) => { setCatalog(c); setCatalogError(null); })
       .catch((err) => setCatalogError(errorText(err)));
-  }, [isOpen, isOpenShift, catalog.length]);
+  }, [isOpen, isOpenShift, os.distribution]);
 
   // OpenShift on a physical host (BMC), standalone — no lab group
   const bareMetal = isOpenShift && placement === 'bmh';
@@ -175,14 +175,15 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const pickedGroup = groups.find((g) => String(g.id) === groupId);
   const groupHasV6 = !!pickedGroup?.spec?.network?.ipv6?.enabled;
   // shown for a new group (gets IPv6 when on) or a group with IPv6
-  const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6);
+  const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6)
+    && !(isOpenShift && os.platform === 'baremetal' && os.topology !== 'sno'); // baremetal VIPs: IPv4 only
   const dualStackOn = dualStackShown && (dualStack ?? (type === 'kubeadm' && groupHasV6));
   const osErrors = isOpenShift ? osDraftErrors(os) : [];
   const groupTaken = inGroup && !!pickedGroup && hasOpenShift(pickedGroup);
   const bmhValid = !!bmhId && !!bmhIp.trim() && !!bmhGateway.trim() && !!bmhDns.trim()
     && Number(bmhPrefix) >= 1 && Number(bmhPrefix) <= 32;
   const canSubmit = isOpenShift
-    ? nameValid && pullSecretOk && !osErrors.length && !groupTaken && (!bareMetal || bmhValid)
+    ? nameValid && (pullSecretOk || os.distribution === 'okd') && !osErrors.length && !groupTaken && (!bareMetal || bmhValid)
     : nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
 
   const openshiftData = (): ClusterCreate => ({
@@ -253,7 +254,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}>
         {error && <Alert variant="danger" isInline title="Could not create the cluster">{error}</Alert>}
-        {isOpenShift && <PullSecretSection onStatus={setPullSecretOk} />}
+        {isOpenShift && os.distribution !== 'okd' && <PullSecretSection onStatus={setPullSecretOk} />}
         <Grid hasGutter md={6}>
           <GridItem>
             <FormGroup label="Name" isRequired fieldId="cl-name">
@@ -484,10 +485,10 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
             {!bareMetal && <>
               <TopologySection draft={os} patch={patchOs} />
               <StorageSection draft={os} patch={patchOs} />
-              <SriovSection draft={os} patch={patchOs} />
+              {os.distribution !== 'okd' && <SriovSection draft={os} patch={patchOs} />}
               <MetalLBSection draft={os} patch={patchOs} />
-              <AcmSection draft={os} patch={patchOs} />
-              <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />
+              {os.distribution !== 'okd' && <AcmSection draft={os} patch={patchOs} />}
+              {os.distribution !== 'okd' && <DisconnectedSection draft={os} patch={patchOs} autoGroup={autoGroup} />}
               <OperatorsSection draft={os} patch={patchOs} catalog={catalog} catalogError={catalogError} />
               <ResourceSummary draft={os} autoGroup={autoGroup} />
             </>}
@@ -498,7 +499,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
               </Alert>
             )}
             {osErrors.map((e) => <Alert key={e} variant="danger" isInline isPlain title={e} />)}
-            {!pullSecretOk && <Alert variant="warning" isInline isPlain title="Save a pull secret first (top of this form)." />}
+            {!pullSecretOk && os.distribution !== 'okd' && <Alert variant="warning" isInline isPlain title="Save a pull secret first (top of this form)." />}
           </>
         )}
 

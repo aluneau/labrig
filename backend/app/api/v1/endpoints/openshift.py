@@ -53,21 +53,25 @@ def delete_pull_secret():
     return openshift_service.delete_pull_secret()
 
 
+DISTRIBUTION = Query("ocp", pattern="^(ocp|okd)$", description="ocp = OpenShift, okd = OKD (SCOS releases)")
+
+
 @router.get("/channels", response_model=List[OpenShiftChannel])
-def channels():
-    """Minors on mirror.openshift.com with their stable (or candidate) channel and latest release"""
-    return _bad_request(openshift_service.channels)
+def channels(distribution: str = DISTRIBUTION):
+    """Minors with their stable (or candidate) channel and latest release: mirror.openshift.com for OpenShift,
+    the OKD release controller's accepted SCOS releases for OKD"""
+    return _bad_request(openshift_service.channels, distribution)
 
 
 @router.get("/versions", response_model=List[OpenShiftVersion])
-def versions(channel: str = Query("stable-4.20")):
-    """Releases of a channel (upgrade graph), newest first"""
-    return _bad_request(openshift_service.versions, channel)
+def versions(channel: str = Query("stable-4.20"), distribution: str = DISTRIBUTION):
+    """Releases of a channel (upgrade graph; OKD: accepted releases of that minor), newest first"""
+    return _bad_request(openshift_service.versions, channel, distribution)
 
 
 @router.get("/catalog", response_model=List[CatalogOperator])
-def catalog():
-    return openshift_service.catalog()
+def catalog(distribution: str = DISTRIBUTION):
+    return openshift_service.catalog(distribution)
 
 
 @cluster_router.get("/install-status", response_model=InstallStatus)

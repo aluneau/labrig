@@ -139,10 +139,11 @@ var _ datasource.DataSourceWithConfigure = &releaseDataSource{}
 type releaseDataSource struct{ client *Client }
 
 type releaseModel struct {
-	Channel  types.String `tfsdk:"channel"`
-	Version  types.String `tfsdk:"version"`
-	Payload  types.String `tfsdk:"payload"`
-	Versions types.List   `tfsdk:"versions"`
+	Channel      types.String `tfsdk:"channel"`
+	Distribution types.String `tfsdk:"distribution"`
+	Version      types.String `tfsdk:"version"`
+	Payload      types.String `tfsdk:"payload"`
+	Versions     types.List   `tfsdk:"versions"`
 }
 
 type apiRelease struct {
@@ -160,7 +161,9 @@ func (d *releaseDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 	resp.Schema = dschema.Schema{
 		Description: "OpenShift releases of an update channel (the server asks the upgrade graph): pin a cluster's version.",
 		Attributes: map[string]dschema.Attribute{
-			"channel":  dschema.StringAttribute{Required: true, Description: "e.g. stable-4.20, fast-4.21, candidate-4.22."},
+			"channel": dschema.StringAttribute{Required: true, Description: "e.g. stable-4.20, fast-4.21, candidate-4.22."},
+			"distribution": dschema.StringAttribute{Optional: true, Description: "ocp (default) or okd: OKD releases of the " +
+				"minor (accepted SCOS releases, e.g. 4.22.0-okd-scos.10); give the cluster openshift.distribution = \"okd\" too."},
 			"version":  dschema.StringAttribute{Computed: true, Description: "Latest release of the channel."},
 			"payload":  dschema.StringAttribute{Computed: true, Description: "Release image of `version`."},
 			"versions": dschema.ListAttribute{Computed: true, ElementType: types.StringType, Description: "All releases, newest first."},
@@ -187,7 +190,11 @@ func (d *releaseDataSource) Read(ctx context.Context, req datasource.ReadRequest
 		return
 	}
 	var out []apiRelease
-	if err := d.client.Do(ctx, "GET", "/openshift/versions?channel="+m.Channel.ValueString(), nil, &out); err != nil {
+	dist := "ocp"
+	if v := m.Distribution.ValueString(); v != "" {
+		dist = v
+	}
+	if err := d.client.Do(ctx, "GET", "/openshift/versions?channel="+m.Channel.ValueString()+"&distribution="+dist, nil, &out); err != nil {
 		resp.Diagnostics.AddError("Cannot list OpenShift releases", err.Error())
 		return
 	}
