@@ -20,6 +20,7 @@ from app.models.bmh import BareMetalHost, BareMetalInstall
 from app.schemas.bmh import BareMetalLinuxInstall
 from app.schemas.task import TaskCreate
 from app.services.baremetal_service import baremetal_service
+from app.services.helper_service import HelperError, run_helper
 from app.services.storage_service import storage_service
 from app.services.task_service import task_service
 
@@ -93,10 +94,16 @@ class BareMetalInstallService:
         ks, output = workdir / "ks.cfg", workdir / "installer.iso"
         ks.write_text(self._ks(data)); os.chmod(ks, 0o600)
         task_service.update_progress(db, task.id, 20)
-        result = subprocess.run(["mkksiso", "--ks", str(ks), install.installer_iso, str(output)],
-                                text=True, capture_output=True, timeout=20 * 60)
-        if result.returncode or not output.is_file():
-            raise RuntimeError("mkksiso failed: " + (result.stderr or result.stdout)[-500:])
+        try:
+            run_helper(["build-bmh-iso", install.installer_iso, str(ks), str(output), str(os.getuid())],
+                       timeout=30 * 60)
+        except HelperError as e:
+            install.status, install.status_message = "error", e.detail
+            host.status, host.status_message = "error", e.detail
+            db.commit()
+            raise RuntimeError(e.detail) from e
+        if not output.is_file():
+            raise RuntimeError("The privileged ISO build completed without an installer ISO")
         task_service.update_progress(db, task.id, 70)
         url = f"http://{self._host_address(host)}/bmh-install/{install.token}/installer.iso"
         baremetal_service.client(db, host).boot_iso_once(url)

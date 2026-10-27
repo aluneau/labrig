@@ -60,6 +60,32 @@ SRIOV_UNIT = "vm-manager-sriov.service"
 SRIOV_UNIT_PATH = "/etc/systemd/system/" + SRIOV_UNIT
 IRONIC_PROXY_CONF = "/etc/vm-manager/ironic-image-proxy.json"
 IRONIC_PROXY_HAPROXY = "/etc/haproxy/conf.d/vm-manager-ironic-image-proxy.cfg"
+BMH_INSTALL_ROOT = "/var/lib/vm-manager/bmh-installs"
+LIBVIRT_ISO_ROOT = "/var/lib/libvirt/images"
+
+
+def build_bmh_iso(args):
+    """Build one generated Anaconda ISO without granting the app arbitrary root commands."""
+    if len(args) != 4 or not args[3].isdigit():
+        fail(2, "usage: build-bmh-iso <source.iso> <ks.cfg> <output.iso> <uid>")
+    source, ks, output = (os.path.realpath(a) for a in args[:3])
+    uid = int(args[3])
+    root = os.path.realpath(BMH_INSTALL_ROOT)
+    iso_root = os.path.realpath(LIBVIRT_ISO_ROOT)
+    if not (source.startswith(iso_root + os.sep) and source.endswith(".iso") and os.path.isfile(source)):
+        fail(2, "source must be a Storage ISO")
+    if not (ks.startswith(root + os.sep) and output.startswith(root + os.sep)
+            and ks.endswith("/ks.cfg") and output.endswith("/installer.iso") and os.path.isfile(ks)):
+        fail(2, "invalid generated installer paths")
+    if os.path.exists(output):
+        fail(2, "generated installer already exists")
+    result = subprocess.run(["mkksiso", "--ks", ks, source, output], capture_output=True, text=True,
+                            env={"PATH": PATH, "LC_ALL": "C"}, timeout=30 * 60)
+    if result.returncode or not os.path.isfile(output):
+        fail(5, "mkksiso failed: " + (result.stderr or result.stdout).strip()[-500:])
+    os.chown(output, uid, uid)
+    os.chmod(output, 0o600)
+    print(output)
 
 
 def ironic_proxy(args):
@@ -630,6 +656,7 @@ def self_update(args):
 
 
 COMMANDS = {
+    "build-bmh-iso": build_bmh_iso,
     "self-update": self_update,
     "version": lambda args: print(VERSION),
     "dhcp-release": dhcp_release,
