@@ -199,6 +199,7 @@ PKGVER=@PKGVER@
 ROLE=@ROLE@
 DISCONNECTED=@DISCONNECTED@
 PAUSE=@PAUSE@
+NODEIP=@NODEIP@
 mkdir -p "$STATE"
 rm -f "$STATE/prereqs-done" "$STATE/prereqs-failed"
 fail() { echo "$1 (see /var/log/vmm-k8s-prereqs.log)" > "$STATE/prereqs-failed"; exit 1; }
@@ -287,6 +288,11 @@ fi
 systemctl enable containerd
 systemctl restart containerd || fail "containerd start"
 echo "runtime-endpoint: unix:///run/containerd/containerd.sock" > /etc/crictl.yaml
+if [ -n "$NODEIP" ]; then  # dual stack: the kubelet reports both addresses (InternalIP v4 + v6)
+    KENV=/etc/default/kubelet
+    [ -d /etc/sysconfig ] && KENV=/etc/sysconfig/kubelet
+    echo "KUBELET_EXTRA_ARGS=--node-ip=$NODEIP" > "$KENV"
+fi
 systemctl enable kubelet
 if [ "$ROLE" = ctlplane ] && [ "$DISCONNECTED" != 1 ]; then  # disconnected: kubeadm init pulls from the mirror
     retry kubeadm config images pull --kubernetes-version "$(kubeadm version -o short)" || fail "control plane images"
@@ -327,18 +333,25 @@ class KubeadmDriver(ClusterDriver):
 
     def node_cloud_config(self, ctx: Dict[str, Any], node: Dict[str, Any]) -> Dict[str, Any]:
         """ctx: name, zone, api_hostname, api_port, api_sans, token, certificate_key, version,
-        pod_cidr, service_cidr, el. node: name, role, ip, first."""
+        pod_cidr, service_cidr, el (+ dual_stack, pod_cidr6, service_cidr6). node: name, role, ip, first
+        (+ ip6 when dual stack)."""
         ver = kubeadm_version(ctx.get("version"))
         mirror = ctx.get("mirror")  # disconnected: {"registry", "images", "pause", ...}; ctx["mirror_ca"]
         script = (_PREREQS.replace("@STATE@", K8S_STATE).replace("@MINOR@", ver["minor"])
                   .replace("@PKGVER@", ver["patch"] or "").replace("@ROLE@", node["role"])
                   .replace("@DISCONNECTED@", "1" if mirror else "0")
-                  .replace("@PAUSE@", shlex.quote(mirror.get("pause") or "") if mirror else "''"))
+                  .replace("@PAUSE@", shlex.quote(mirror.get("pause") or "") if mirror else "''")
+                  .replace("@NODEIP@", f"{node['ip']},{node['ip6']}" if ctx.get("dual_stack") and node.get("ip6") else "''"))
+        sysctl = ("net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\n"
+                  "net.ipv4.ip_forward = 1\n")
+        if ctx.get("dual_stack"):
+            # kubeadm's preflight wants IPv6 forwarding for a dual stack cluster. The node keeps its DHCPv6
+            # address and RA default route: networkd / NetworkManager handle RAs themselves (accept-ra)
+            sysctl += "net.ipv6.conf.all.forwarding = 1\nnet.ipv6.conf.default.forwarding = 1\n"
         files = [
             {"path": "/etc/modules-load.d/k8s.conf", "permissions": "0644", "content": "overlay\nbr_netfilter\nnf_conntrack\n"},
             {"path": "/etc/sysctl.d/99-kubernetes.conf", "permissions": "0644",
-             "content": "net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\n"
-                        "net.ipv4.ip_forward = 1\n"},
+             "content": sysctl},
             {"path": PREREQS_SCRIPT, "permissions": "0755", "content": script},
         ]
         if node["role"] == "ctlplane" and node["first"]:
@@ -374,6 +387,12 @@ class KubeadmDriver(ClusterDriver):
             "networking": {"podSubnet": ctx["pod_cidr"], "serviceSubnet": ctx["service_cidr"]},
             "apiServer": {"certSANs": ctx["api_sans"]},
         }
+        if ctx.get("dual_stack"):
+            # IPv4 first: the primary family (kubeconfig, API advertise address, single stack Services)
+            cluster["networking"] = {"podSubnet": f"{ctx['pod_cidr']},{ctx['pod_cidr6']}",
+                                     "serviceSubnet": f"{ctx['service_cidr']},{ctx['service_cidr6']}"}
+            if node.get("ip6"):
+                init["nodeRegistration"]["kubeletExtraArgs"] = [{"name": "node-ip", "value": f"{node['ip']},{node['ip6']}"}]
         return yaml.safe_dump(init, sort_keys=False) + "---\n" + yaml.safe_dump(cluster, sort_keys=False)
 
     # ---- orchestration (through the guest agent)
@@ -406,6 +425,10 @@ class KubeadmDriver(ClusterDriver):
             self._sh(ops, first["name"], (
                 get +
                 f"sed -i 's#10.244.0.0/16#{ctx['pod_cidr']}#' /root/kube-flannel.yml && "
+                + (  # dual stack: Flannel gives each node an IPv6 /64 of the pod network too (VXLAN over IPv6)
+                    f"sed -i 's#\"Network\": \"#\"EnableIPv6\": true, \"IPv6Network\": \"{ctx['pod_cidr6']}\", \"Network\": \"#' "
+                    "/root/kube-flannel.yml && grep -q EnableIPv6 /root/kube-flannel.yml && "
+                    if ctx.get("dual_stack") else "") +
                 f"kubectl --kubeconfig {ADMIN_CONF} apply -f /root/kube-flannel.yml"), 600, "Flannel")
 
         api = ops.api_node()

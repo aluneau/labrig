@@ -18,6 +18,7 @@ from app.schemas.openshift import MetalLBOptions
 from app.services import metallb
 from app.services.cluster_drivers import ADMIN_CONF
 from app.services.cluster_network import GroupClusterNetwork
+from app.services.ipv6_service import is_dual_stack
 
 logger = logging.getLogger(__name__)
 
@@ -128,32 +129,56 @@ def apply(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
             else:
                 start, end = mlb["pool"].split("-")
                 network.set_address_pool(name, start, end)
+        dual = is_dual_stack(cluster)
+        range6 = _range6(db, network, gspec, cluster.name, mlb, mode) if dual else None
+        if not dual or mode != "bgp":
+            network.remove_bgp_range(f"{cluster.name}-metallb6")
         network.commit()
-        _save(db, cluster, pool=mlb["pool"])
         gspec = network.spec()
+        pool6 = metallb.pool6_for(gspec, mode, mlb["pool"], range6) if dual else None
+        _save(db, cluster, pool=mlb["pool"], pool6=pool6, range6=range6)
         client = _client(cluster, task, db)
         client.install()
-        client.configure(mlb["pool"], mode, metallb.bgp_params(gspec) if mode == "bgp" else None)
+        client.configure(mlb["pool"], mode, metallb.bgp_params(gspec) if mode == "bgp" else None, pool6)
         if mlb.get("demo", True):
-            ip = client.deploy_demo(mlb["pool"], mode)
+            ip = client.deploy_demo(mlb["pool"], mode, dual_stack=dual)
+            ip6 = client.service_ip6() if dual else None
             hostname = mlb.get("hostname") or metallb.demo_hostname(gspec, cluster.name)
             old = mlb.get("service_ip")
             if old and old != ip:
                 network.unpublish(old)
-            network.publish(ip, [f"{hostname}.{gspec.domain}"])
+            network.publish(ip, [f"{hostname}.{gspec.domain}"], ip6=ip6)
             network.commit()
-            _save(db, cluster, service_ip=ip, hostname=hostname)
+            _save(db, cluster, service_ip=ip, service_ip6=ip6, hostname=hostname)
         elif mlb.get("service_ip"):
             client.remove_demo()
             network.unpublish(mlb["service_ip"])
             network.commit()
-            _save(db, cluster, service_ip=None)
+            _save(db, cluster, service_ip=None, service_ip6=None)
     except Exception as e:
         db.rollback()
         _save(db, cluster, state="error", message=str(e)[-500:])
         raise
     final = _save(db, cluster, state="done", message=None)
-    return {"metallb": {k: final.get(k) for k in ("mode", "pool", "service_ip", "hostname")}}
+    return {"metallb": {k: final.get(k) for k in ("mode", "pool", "pool6", "service_ip", "service_ip6", "hostname")}}
+
+
+def _range6(db: Session, network: GroupClusterNetwork, gspec: Any, cluster_name: str, mlb: Dict[str, Any],
+            mode: str) -> Optional[str]:
+    """Dual stack, bgp mode: the cluster's IPv6 announce range (a /64 of IPV6_ULA_POOL, owned by the cluster,
+    kept across applies). l2: None (the IPv6 pool is paired with the IPv4 one, on the group network)."""
+    if mode != "bgp":
+        return None
+    from app.services import ipv6_service
+    name = f"{cluster_name}-metallb6"
+    owner = f"cluster:{cluster_name}"
+    bgp = gspec.router.bgp
+    current = next((r.prefix for r in (bgp.announce_ranges if bgp else []) if r.owner == owner and r.name == name),
+                   None) or mlb.get("range6")
+    if not current:
+        current = ipv6_service.free_64(ipv6_service.used_v6(db, None, ""))
+    network.set_bgp_range(name, current)
+    return current
 
 
 def remove(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
@@ -166,10 +191,12 @@ def remove(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
     network = _network(cluster)
     network.remove_address_pool(f"{cluster.name}-metallb")
     network.remove_bgp_range(f"{cluster.name}-metallb")
+    network.remove_bgp_range(f"{cluster.name}-metallb6")
     if mlb.get("service_ip"):
         network.unpublish(mlb["service_ip"])
     network.commit()
-    _save(db, cluster, enabled=False, pool=None, service_ip=None, state=None, message=None)
+    _save(db, cluster, enabled=False, pool=None, pool6=None, range6=None, service_ip=None, service_ip6=None,
+          state=None, message=None)
     return {"metallb": "removed"}
 
 

@@ -20,6 +20,10 @@ class KubeadmOptions(BaseModel):
     """type "kubeadm": MetalLB installed by the app (upstream manifests, FRR mode), same lab as OpenShift's:
     pool from the group (l2) or a BGP announce range of the router (bgp, + BFD), hello demo"""
     metallb: MetalLBOptions = MetalLBOptions()
+    # IPv6 dual stack (docs/ipv6.md): pods and services get an IPv4 and an IPv6 address, nodes both families,
+    # MetalLB an IPv6 pool too. Needs a group with IPv6 (network.ipv6); None = on when the group has IPv6.
+    # true without group_id: the auto-created group gets IPv6.
+    dual_stack: Optional[bool] = None
 
 
 class BareMetalNode(BaseModel):
@@ -72,6 +76,10 @@ class ClusterCreate(BaseModel):
     # Kubernetes pod / service networks: must not overlap the node network
     pod_cidr: str = "10.244.0.0/16"
     service_cidr: str = "10.96.0.0/16"
+    # Dual stack (kubeadm.dual_stack): the IPv6 pod / service networks (outside the group's IPv6 networks).
+    # Pods: one /64 per node out of it (/48 to /64); services: /108 to /120 (kube-apiserver limit)
+    pod_cidr6: str = "fd00:10:244::/56"
+    service_cidr6: str = "fd00:10:96::/112"
     # Extra server flags appended to INSTALL_K3S_EXEC (e.g. "--disable traefik")
     extra_args: Optional[str] = Field(None, max_length=1000)
     # Login on the nodes (console / SSH)
@@ -108,6 +116,7 @@ class ClusterNodeOut(BaseModel):
     name: str
     role: str
     ip: Optional[str] = None
+    ip6: Optional[str] = None  # dual stack groups: the node's IPv6 address (DHCPv6 reservation)
     mac: Optional[str] = None
     vm_id: Optional[int] = None
     state: str = "missing"  # libvirt domain state, "missing" if the VM is gone
@@ -144,6 +153,8 @@ class Cluster(BaseModel):
     registry: Optional[Dict[str, Any]] = None
     ctlplanes: int = 0
     workers: int = 0
+    # IPv6 dual stack cluster (pods / services of both families)
+    dual_stack: bool = False
     spec: Optional[Dict[str, Any]] = None
     # ACM: {role: hub | managed | spoke, hub_id, hub_name, state} (GET /clusters/{hub_id}/acm for the details)
     acm: Optional[Dict[str, Any]] = None

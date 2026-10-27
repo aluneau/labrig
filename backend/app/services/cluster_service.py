@@ -36,7 +36,10 @@ from app.schemas import ClusterCreate, TaskCreate, VMCreate
 from app.services.cloud_image_service import cloud_image_service
 from app.services.cluster_drivers import EL_DISTRIBUTIONS, ClusterDriver, get_driver, kubeadm_token
 from app.services.cluster_network import ClusterNetwork, GroupClusterNetwork, LibvirtClusterNetwork, free_subnet
+from app.schemas.group import IPv6Spec, ip6_for
+from app.services import ipv6_service
 from app.services.group_service import group_service, network_name as group_network_name
+from app.services.ipv6_service import group_ip6, is_dual_stack
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
 
@@ -184,6 +187,8 @@ class ClusterService:
         spec: Dict[str, Any] = {
             "cidr": attrs.get("cidr") or None, "pod_cidr": attrs.get("pod_cidr") or "10.244.0.0/16",
             "service_cidr": attrs.get("service_cidr") or "10.96.0.0/16", "el": attrs.get("el") == "yes",
+            "dual_stack": attrs.get("dual_stack") == "yes",
+            "pod_cidr6": attrs.get("pod_cidr6") or None, "service_cidr6": attrs.get("service_cidr6") or None,
             "cloud_image_id": int(attrs["image"]) if attrs.get("image", "").isdigit() else None,
             "ctlplanes": sum(1 for _, a in nodes if a.get("role") == "ctlplane"),
             "workers": sum(1 for _, a in nodes if a.get("role") == "worker"),
@@ -232,8 +237,11 @@ class ClusterService:
         # Bare-metal nodes are physical hosts (no libvirt VM): derive their state from the cluster status
         bmh_state = {"ready": "running", "starting": "running", "stopping": "running",
                      "stopped": "shutoff"}.get(cluster.status, "missing")
+        group = db.query(Group).filter(Group.id == cluster.group_id).first() if cluster.group_id else None
+        v6 = group_ip6(group.spec if group is not None else None)
         nodes = [{
             "name": n.name, "role": n.role, "ip": n.ip, "mac": n.mac, "vm_id": vm_ids.get(n.name),
+            "ip6": ip6_for(n.ip, *v6) if v6 else None,
             "state": bmh_state if bmh else states.get(n.name, "missing"), "fqdn": f"{n.name}.{zone}",
         } for n in cluster.nodes]
 
@@ -254,7 +262,6 @@ class ClusterService:
         if isinstance(spec.get("mirror"), dict):  # disconnected kubeadm: the Flannel manifest is internal
             spec["mirror"] = {k: v for k, v in spec["mirror"].items() if k != "flannel"}
         port = self._api_port(cluster)
-        group = db.query(Group).filter(Group.id == cluster.group_id).first() if cluster.group_id else None
         lb = None
         if group is not None:
             gspec = group.spec or {}
@@ -296,6 +303,7 @@ class ClusterService:
             "registry": registry,
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
+            "dual_stack": is_dual_stack(cluster),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
             "acm": self._acm(db, cluster),
         }
@@ -458,6 +466,11 @@ class ClusterService:
         """kubeadm: nodes in an existing lab group, or in a group created for (and deleted with) the cluster"""
         names = self._node_names(data.name, data.ctlplanes, data.workers)
         group, gspec, owned, node_subnet = self._resolve_group(db, data, names, [data.pod_cidr, data.service_cidr])
+        wanted = data.kubeadm.dual_stack if data.kubeadm is not None else None
+        if group is None and wanted:
+            gspec.network.ipv6 = IPv6Spec(enabled=True)  # the auto-created group gets IPv6 (prefix assigned)
+        dual_stack = ipv6_service.check_dual_stack(gspec, wanted, {"pod_cidr6": data.pod_cidr6,
+                                                                   "service_cidr6": data.service_cidr6})
         if data.disconnected and group is None:
             # the router is created with the mirror registry's RAM / disk (no restart later)
             from app.services.k8s_mirror import REGISTRY_SIZES
@@ -471,7 +484,7 @@ class ClusterService:
 
         spec = data.model_dump()
         spec.update(cloud_image_id=image.id, image=f"{image.distribution} {image.version}",
-                    el=image.distribution in EL_DISTRIBUTIONS, cidr=str(node_subnet),
+                    el=image.distribution in EL_DISTRIBUTIONS, cidr=str(node_subnet), dual_stack=dual_stack,
                     certificate_key=secrets.token_hex(32), group_task_id=task.id if task else None)
         spec.pop("network", None)
         cluster = Cluster(
@@ -686,7 +699,7 @@ class ClusterService:
             hostnames = [f"{node.name}.{zone}", node.name]
             if node is first and not network.fronts_api:
                 hostnames += [api_hostname, f"api-int.{zone}"]
-            network.publish(node.ip, hostnames)
+            network.publish(node.ip, hostnames, paired=True)
         if spec.get("disconnected") and isinstance(network, GroupClusterNetwork):
             # egress blocked before any node boots; each new node may go out until its packages are in
             # (the customer's golden image / package repo), never once kubeadm pulls images
@@ -822,11 +835,14 @@ class ClusterService:
             "ctlplanes": spec["ctlplanes"], "pod_cidr": spec["pod_cidr"], "service_cidr": spec["service_cidr"],
             "extra_args": spec.get("extra_args"), "el": spec.get("el"),
             "certificate_key": spec.get("certificate_key"),
+            "dual_stack": bool(spec.get("dual_stack")), "pod_cidr6": spec.get("pod_cidr6"),
+            "service_cidr6": spec.get("service_cidr6"),
         }
         if cluster.group_id:
             network = network_for(cluster)
             router_ip = network.gateway()
-            ctx["api_sans"] = [n for n in (api_hostname, f"api-int.{zone}", cluster.api_ip, router_ip) if n]
+            ctx["api_sans"] = [n for n in (api_hostname, f"api-int.{zone}", cluster.api_ip, router_ip,
+                                           network.ip6_of(router_ip)) if n]
             mirror = spec.get("mirror") if spec.get("disconnected") else None
             if mirror and mirror.get("registry"):
                 ctx["mirror"] = mirror
@@ -840,7 +856,9 @@ class ClusterService:
     def _node_dicts(cluster: Cluster, nodes: List[ClusterNode]) -> List[Dict[str, Any]]:
         first = next((n for n in cluster.nodes if n.role == "ctlplane"), None)
         ordered = sorted(nodes, key=lambda n: (n.role != "ctlplane", _node_index(n.name)))
-        return [{"name": n.name, "role": n.role, "ip": n.ip, "first": n is first} for n in ordered]
+        network = network_for(cluster) if cluster.group_id else None
+        return [{"name": n.name, "role": n.role, "ip": n.ip, "first": n is first,
+                 "ip6": network.ip6_of(n.ip) if network is not None else None} for n in ordered]
 
     def _ops(self, db: Session, task: Task, cluster: Cluster) -> Any:
         """What a driver's bootstrap() may do: run commands in nodes, wait, report progress"""
@@ -898,7 +916,10 @@ class ClusterService:
             fqdn=fqdn,
         )
         # The driver's additions: lists (packages, runcmd, write_files) are appended
-        extra = driver.node_cloud_config(ctx, {"name": node.name, "role": node.role, "ip": node.ip, "first": first})
+        network = network_for(cluster) if cluster.group_id else None
+        ip6 = network.ip6_of(node.ip) if network is not None else None
+        extra = driver.node_cloud_config(ctx, {"name": node.name, "role": node.role, "ip": node.ip, "first": first,
+                                               "ip6": ip6})
         for key, value in extra.items():
             config[key] = config[key] + value if isinstance(value, list) and isinstance(config.get(key), list) else value
         attrs = {"name": cluster.name, "type": cluster.type, "role": node.role, "ip": node.ip,
@@ -906,6 +927,8 @@ class ClusterService:
                  "owned": "yes" if cluster.network_owned else "no", "cidr": spec.get("cidr") or "",
                  "image": spec.get("cloud_image_id") or "", "el": "yes" if spec.get("el") else "no",
                  "pod_cidr": spec.get("pod_cidr") or "", "service_cidr": spec.get("service_cidr") or "",
+                 "dual_stack": "yes" if spec.get("dual_stack") else "no",
+                 "pod_cidr6": spec.get("pod_cidr6") or "", "service_cidr6": spec.get("service_cidr6") or "",
                  "version": cluster.version or ""}
         if cluster.group_id:
             group = db.query(Group).filter(Group.id == cluster.group_id).first()
@@ -921,6 +944,8 @@ class ClusterService:
                 os_type=spec.get("image"), start=False,
             ),
             fqdn=fqdn, user_data="#cloud-config\n" + yaml.safe_dump(config, sort_keys=False), metadata_xml=metadata,
+            # IPv6 group: DHCPv6 + RAs like the members (the node gets its reserved <prefix>::<n>)
+            network_config=ipv6_service.member_network_config(node.mac, (spec.get("image") or "debian").split()[0]) if ip6 else None,
         )
 
     def _sleep(self, task: Task, seconds: float) -> None:

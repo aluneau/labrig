@@ -49,8 +49,13 @@ class ClusterNetwork(ABC):
         """Drop the reservation of mac (no error if there is none)"""
 
     @abstractmethod
-    def publish(self, ip: str, hostnames: List[str]) -> None:
-        """Make hostnames resolve to ip for the nodes (replaces the names of ip)"""
+    def publish(self, ip: str, hostnames: List[str], ip6: Optional[str] = None, paired: bool = False) -> None:
+        """Make hostnames resolve to ip for the nodes (replaces the names of ip). Dual stack groups: + AAAA
+        ip6, or with `paired` the IPv6 address paired with ip (a machine of the group: node, router)"""
+
+    def ip6_of(self, ip: Optional[str]) -> Optional[str]:
+        """The IPv6 address paired with a node address (dual stack lab groups), None otherwise"""
+        return None
 
     @abstractmethod
     def unpublish(self, ip: str) -> None:
@@ -220,7 +225,7 @@ class LibvirtClusterNetwork(ClusterNetwork):
 
     # names
 
-    def publish(self, ip: str, hostnames: List[str]) -> None:
+    def publish(self, ip: str, hostnames: List[str], ip6: Optional[str] = None, paired: bool = False) -> None:
         self.unpublish(ip)
         libvirt_client.update_dns_host(self.name, "add", ip, hostnames)
 
@@ -341,17 +346,22 @@ class GroupClusterNetwork(ClusterNetwork):
             spec.reservations = [r for r in spec.reservations if not (r.owner == self.owner and r.mac == mac.lower())]
         self._ops.append(op)
 
-    def publish(self, ip: str, hostnames: List[str]) -> None:
+    def ip6_of(self, ip: Optional[str]) -> Optional[str]:
+        return self.spec().ip6_of(ip)
+
+    def publish(self, ip: str, hostnames: List[str], ip6: Optional[str] = None, paired: bool = False) -> None:
         from app.schemas.group import DNSRecord
 
         def op(spec):
+            aaaa = ip6 or (spec.ip6_of(ip) if paired else None)
             names = [n for n in (self._relative(h, spec.domain) for h in hostnames) if n]
             records = [r for r in spec.router.dns.records
                        if not (r.owner == self.owner and (r.a == ip or r.name in names))]
             if any(r.name in names for r in records):
                 clash = next(r.name for r in records if r.name in names)
                 raise ValueError(f"DNS record '{clash}' already exists in group {spec.name}")
-            spec.router.dns.records = records + [DNSRecord(name=n, a=ip, owner=self.owner) for n in names]
+            spec.router.dns.records = records + [DNSRecord(name=n, a=ip, aaaa=aaaa, owner=self.owner)
+                                                       for n in names]
         self._ops.append(op)
 
     def unpublish(self, ip: str) -> None:
@@ -363,7 +373,7 @@ class GroupClusterNetwork(ClusterNetwork):
     def publish_api(self, hostnames: List[str], ctlplane_ips: List[str], port: int) -> str:
         from app.schemas.group import LoadBalancerSpec
         spec = self.spec()
-        self.publish(spec.router.ip, hostnames)
+        self.publish(spec.router.ip, hostnames, paired=True)  # haproxy listens on IPv6 too (dual stack group)
         lb_name = f"{self.cluster_name}-api"
 
         def op(spec):
