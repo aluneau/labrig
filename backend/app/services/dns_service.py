@@ -118,7 +118,13 @@ class DNSService:
             out.append({"cluster": c.name, "zone": zone, "ip": c.api_ip, "apps_ip": apps_ip})
         for c in self._vm_hub_zones(db):
             zone = f"{c.name}.{c.domain}"
-            out.append({"cluster": c.name, "zone": zone, "ip": c.api_ip, "apps_ip": c.api_ip})
+            # A physical spoke is outside the hub's libvirt network.  Publishing the hub/router's
+            # private uplink address here makes discovery resolve successfully but time out on HTTPS.
+            # The vm-manager host fronts hub API/ingress on its LAN address, which is the address a
+            # real BMC and its discovery ISO can route to.
+            host_ip = self.host_ip()
+            out.append({"cluster": c.name, "zone": zone, "ip": host_ip or c.api_ip,
+                        "apps_ip": host_ip or c.api_ip})
         return out
 
     # ------------------------------------------------------------------ custom records
