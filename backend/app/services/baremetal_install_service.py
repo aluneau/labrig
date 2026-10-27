@@ -62,7 +62,9 @@ class BareMetalInstallService:
             sock.close()
         if not ip or ip.startswith("127."):
             raise ValueError("Could not determine a BMC-reachable VM Manager address")
-        return f"{ip}:{settings.PORT}"
+        # Physical BMCs fetch virtual media through the source-restricted proxy.
+        # Direct application port 8000 is not universally reachable from iDRAC.
+        return f"{ip}:6180"
 
     def create(self, db: Session, host: BareMetalHost, data: BareMetalLinuxInstall):
         if host.cluster_name or host.status not in ("available", "error"):
