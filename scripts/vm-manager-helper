@@ -60,6 +60,12 @@ SRIOV_UNIT = "vm-manager-sriov.service"
 SRIOV_UNIT_PATH = "/etc/systemd/system/" + SRIOV_UNIT
 IRONIC_PROXY_CONF = "/etc/vm-manager/ironic-image-proxy.json"
 IRONIC_PROXY_HAPROXY = "/etc/haproxy/conf.d/vm-manager-ironic-image-proxy.cfg"
+# This was a one-off recovery configuration predating the managed proxy.  It
+# binds the same address/port, so leaving it in place makes HAProxy distribute
+# connections between two unrelated frontends.  Keep the migration narrowly
+# scoped to the file and marker we created rather than removing user config.
+LEGACY_IRONIC_PROXY_HAPROXY = "/etc/haproxy/conf.d/labrig-ironic-bmc.cfg"
+LEGACY_IRONIC_PROXY_MARKER = "# Temporary lab recovery: publish the VM hub's Ironic HTTP image service"
 BMH_INSTALL_ROOT = "/var/lib/vm-manager/bmh-installs"
 LIBVIRT_ISO_ROOT = "/var/lib/libvirt/images"
 
@@ -168,9 +174,16 @@ def ironic_proxy(args):
             "backend vm_manager_bmh_installer_backend\n"
             "    server vm_manager 127.0.0.1:8000 check\n")
     old_conf = open(IRONIC_PROXY_HAPROXY).read() if os.path.isfile(IRONIC_PROXY_HAPROXY) else None
+    legacy_conf = None
+    if os.path.isfile(LEGACY_IRONIC_PROXY_HAPROXY):
+        candidate = open(LEGACY_IRONIC_PROXY_HAPROXY).read()
+        if LEGACY_IRONIC_PROXY_MARKER in candidate:
+            legacy_conf = candidate
     os.makedirs(os.path.dirname(IRONIC_PROXY_HAPROXY), mode=0o755, exist_ok=True)
     with open(IRONIC_PROXY_HAPROXY, "w") as f:
         f.write(conf)
+    if legacy_conf is not None:
+        os.unlink(LEGACY_IRONIC_PROXY_HAPROXY)
     check = subprocess.run(["haproxy", "-c", "-f", "/etc/haproxy/haproxy.cfg", "-f", "/etc/haproxy/conf.d"],
                            capture_output=True, text=True, env={"PATH": PATH})
     if check.returncode:
@@ -179,6 +192,9 @@ def ironic_proxy(args):
         else:
             with open(IRONIC_PROXY_HAPROXY, "w") as f:
                 f.write(old_conf)
+        if legacy_conf is not None:
+            with open(LEGACY_IRONIC_PROXY_HAPROXY, "w") as f:
+                f.write(legacy_conf)
         fail(5, "HAProxy rejected the generated image-proxy configuration")
     reload = subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, text=True, env={"PATH": PATH})
     if reload.returncode:
@@ -187,7 +203,10 @@ def ironic_proxy(args):
         else:
             with open(IRONIC_PROXY_HAPROXY, "w") as f:
                 f.write(old_conf)
-            subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, text=True, env={"PATH": PATH})
+        if legacy_conf is not None:
+            with open(LEGACY_IRONIC_PROXY_HAPROXY, "w") as f:
+                f.write(legacy_conf)
+        subprocess.run(["systemctl", "reload", "haproxy"], capture_output=True, text=True, env={"PATH": PATH})
         fail(5, "could not reload HAProxy")
     firewall = which("firewall-cmd")
     if firewall:
