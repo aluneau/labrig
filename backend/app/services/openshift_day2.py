@@ -134,6 +134,16 @@ class OpenShiftDay2:
                 network.publish(node.ip, [f"{node.name}.{zone}", node.name])
             self._publish_ingress(network, cluster, opts.topology)
             network.commit()
+            try:
+                return finish(cluster, network, opts, added, names)
+            except Exception:
+                db.rollback()
+                self._drop_unbuilt(db, cluster, network, opts.topology, added)
+                raise
+
+        def finish(cluster: Cluster, network: GroupClusterNetwork, opts, added: List[ClusterNode],
+                   names: List[str]) -> Dict[str, Any]:
+            inst = self.inst
 
             def bin_progress(message: str, pct: int) -> None:
                 svc._check(task, cluster, db, 5 + pct * 5 // 100, message)
@@ -166,6 +176,26 @@ class OpenShiftDay2:
         # a failed add leaves a working cluster: back to ready, with the error as its message
         return svc._guarded(db, task, cluster_id, body, failed_status="ready")
 
+    def _drop_unbuilt(self, db: Session, cluster: Cluster, network: GroupClusterNetwork, topology: str,
+                      added: List[ClusterNode]) -> None:
+        """A failed add: forget the new nodes whose VM was never created (their reservation, names, LB backends);
+        nodes with a VM stay listed, to be removed like any worker"""
+        try:
+            db.refresh(cluster)
+            gone = [n for n in cluster.nodes if n.name in {a.name for a in added}
+                    and libvirt_client.get_vm(n.name) is None]
+            if not gone:
+                return
+            for node in gone:
+                network.release(node.mac)
+                network.unpublish(node.ip)
+                cluster.nodes.remove(node)
+            self._publish_ingress(network, cluster, topology)
+            network.commit()
+            db.commit()
+        except Exception:  # noqa: BLE001 - never hide the original error
+            logger.exception(f"Could not clean up the new workers of {cluster.name}")
+
     def _publish_ingress(self, network: GroupClusterNetwork, cluster: Cluster, topology: str) -> None:
         from app.services.openshift_installer import LB_PORTS
         ips = ingress_ips(topology, list(cluster.nodes))
@@ -189,7 +219,7 @@ class OpenShiftDay2:
         out = openshift_service.oc(
             cluster.name, cluster.version,
             ["adm", "node-image", "create", "--dir", str(outdir), "--report",
-             "-a", str(openshift_service._pull_secret_path())],
+             "-a", str(openshift_service._pull_secret_path)],
             NODE_IMAGE_TIMEOUT, cwd=outdir, cancelled=lambda: task_service.is_cancelled(task.id))
         isos = sorted(outdir.glob("*.iso"))
         if out["exitcode"] != 0 or not isos:

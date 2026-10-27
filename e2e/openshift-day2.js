@@ -77,7 +77,8 @@ function consoleThroughRouter(uplink, c) {
       if (JSON.stringify(out[`${NAME}-https`]) !== JSON.stringify([`${master.ip}:443`])) {
         throw new Error(`https LB before: ${JSON.stringify(out[`${NAME}-https`])}`);
       }
-      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'networkidle' });
+      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#os-add-worker:not([disabled])');
       await page.click('#os-add-worker');
       await page.fill('#os-add-count', '1');
       await page.fill('#os-add-memory', '8');
@@ -111,7 +112,7 @@ function consoleThroughRouter(uplink, c) {
         return all;
       });
       if (vols.some((v) => v.startsWith(`${NAME}-node-`))) throw new Error('node ISO volume left behind');
-      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'networkidle' });
+      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'domcontentloaded' });
       await page.screenshot({ path: 'openshift-day2-worker.png', fullPage: true });
 
       // 3. remove it
@@ -134,7 +135,7 @@ function consoleThroughRouter(uplink, c) {
       let u = await api(`/clusters/${id}/upgrades`);
       if (!u.reachable) throw new Error(`upgrades: ${u.error}`);
       log(`version ${u.current}, channel '${u.channel}'`);
-      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'networkidle' });
+      await page.goto(`${BASE}/clusters/${id}`, { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#os-upgrade-channel');
       if (u.channel !== CHANNEL) {
         await page.fill('#os-upgrade-channel', CHANNEL);
@@ -145,7 +146,7 @@ function consoleThroughRouter(uplink, c) {
         return x.channel === CHANNEL && x.available.length ? x : null;
       }, 3 * 60e3, 'updates offered');
       log(`offered: ${u.available.join(', ')}; conditional: ${u.conditional.map((x) => `${x.version}${x.recommended ? '' : ' (risks)'}`).join(', ') || '-'}`);
-      await page.reload({ waitUntil: 'networkidle' });
+      await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#os-upgrade-target');
       await page.locator('#os-upgrades').screenshot({ path: 'openshift-day2-updates.png' });
       const target = process.env.TARGET || [...u.available].sort((a, b) =>
@@ -157,7 +158,7 @@ function consoleThroughRouter(uplink, c) {
       const started = await post(`/clusters/${id}/upgrades`, { version: target });
       log(`upgrading to ${target}, task ${started.task_id}`);
       await waitFor(async () => (await api(`/clusters/${id}/upgrades`)).updating, 10 * 60e3, 'upgrade progressing');
-      await page.reload({ waitUntil: 'networkidle' });
+      await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#os-upgrade-progress');
       await page.locator('#os-upgrades').screenshot({ path: 'openshift-day2-upgrading.png' });
       await waitTask(started.task_id, 4 * 3600e3, 'upgrade');
@@ -167,7 +168,7 @@ function consoleThroughRouter(uplink, c) {
         throw new Error(`after upgrade: cv ${u.current}, app ${c.version}, state ${u.upgrade && u.upgrade.state}`);
       }
       log(`upgraded: ${u.history.map((h) => `${h.version} ${h.state}`).join(' <- ')}`);
-      await page.reload({ waitUntil: 'networkidle' });
+      await page.reload({ waitUntil: 'domcontentloaded' });
       await page.locator('#os-upgrades').screenshot({ path: 'openshift-day2-upgraded.png' });
     }
   } catch (e) {
