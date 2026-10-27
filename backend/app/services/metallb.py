@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 NAMESPACE = "metallb-system"
 POOL_NAME = "lab-pool"
 PEER_NAME = "lab-router"
+PEER6_NAME = "lab-router6"
 BFD_PROFILE = "lab-bfd"
 DEMO_NAMESPACE = "metallb-demo"
 DEMO_NAME = "hello"
@@ -37,16 +38,22 @@ def bgp_params(gspec: Any) -> Dict[str, Any]:
         raise ValueError("BGP is not enabled on the group router")
     bfd = bgp.bfd_on()
     return {"router_ip": gspec.router.ip, "my_asn": bgp.peer_asn or BGP_PEER_ASN, "peer_asn": bgp.asn,
-            "bfd": bfd.model_dump(exclude={"enabled"}) if bfd is not None else None}
+            "bfd": bfd.model_dump(exclude={"enabled"}) if bfd is not None else None,
+            # dual stack groups: the router's LAN IPv6 address (IPv6 sessions, MP-BGP)
+            "router_ip6": gspec.ip6_of(gspec.router.ip)}
 
 
-def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], List[List[str]]]:
+def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None,
+                     pool6: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[List[str]]]:
     """IPAddressPool + L2Advertisement (l2) or BGPPeer (+ BFDProfile) + BGPAdvertisement (bgp).
+    pool6 (dual stack): the pool's IPv6 range too; in bgp mode a second BGPPeer to the router's IPv6
+    address (IPv6 routes over an IPv6 session; ebgpMultiHop: the nodes' DHCPv6 address is a /128, so FRR
+    wouldn't see the router as directly connected; no BFD on it: the router runs BFD on IPv4 sessions only).
     Returns (manifests to apply, [kind, name] of the other mode's objects to delete afterwards)."""
     meta = lambda name: {"name": name, "namespace": NAMESPACE}  # noqa: E731
     manifests: List[Dict[str, Any]] = [
         {"apiVersion": "metallb.io/v1beta1", "kind": "IPAddressPool", "metadata": meta(POOL_NAME),
-         "spec": {"addresses": [pool], "autoAssign": True, "avoidBuggyIPs": True}},
+         "spec": {"addresses": [pool] + ([pool6] if pool6 else []), "autoAssign": True, "avoidBuggyIPs": True}},
     ]
     if mode == "bgp":
         if not bgp:
@@ -64,6 +71,13 @@ def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None)
             peer["bfdProfile"] = BFD_PROFILE
         else:
             stale.append(["bfdprofiles.metallb.io", BFD_PROFILE])  # after the peer stopped using it
+        if pool6 and bgp.get("router_ip6"):
+            peer6 = {k: v for k, v in peer.items() if k != "bfdProfile"}
+            peer6.update(peerAddress=bgp["router_ip6"], ebgpMultiHop=True)
+            manifests.append({"apiVersion": "metallb.io/v1beta2", "kind": "BGPPeer", "metadata": meta(PEER6_NAME),
+                              "spec": peer6})
+        else:
+            stale.append(["bgppeers.metallb.io", PEER6_NAME])
         manifests += [
             {"apiVersion": "metallb.io/v1beta2", "kind": "BGPPeer", "metadata": meta(PEER_NAME), "spec": peer},
             {"apiVersion": "metallb.io/v1beta1", "kind": "BGPAdvertisement", "metadata": meta("lab-bgp"),
@@ -73,12 +87,13 @@ def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None)
         manifests.append({"apiVersion": "metallb.io/v1beta1", "kind": "L2Advertisement", "metadata": meta("lab-l2"),
                           "spec": {"ipAddressPools": [POOL_NAME]}})
         stale = [["bgpadvertisement", "lab-bgp"], ["bgppeers.metallb.io", PEER_NAME],
-                 ["bfdprofiles.metallb.io", BFD_PROFILE]]
+                 ["bgppeers.metallb.io", PEER6_NAME], ["bfdprofiles.metallb.io", BFD_PROFILE]]
     return manifests, stale
 
 
-def demo_manifests(mode: str, image: str = DEMO_IMAGE) -> List[Dict[str, Any]]:
-    """hello Deployment (2 replicas) + LoadBalancer Service of the pool"""
+def demo_manifests(mode: str, image: str = DEMO_IMAGE, dual_stack: bool = False) -> List[Dict[str, Any]]:
+    """hello Deployment (2 replicas) + LoadBalancer Service of the pool (dual stack: PreferDualStack, an
+    IPv4 and an IPv6 ClusterIP and external IP)"""
     # the image's docroot isn't writable by OpenShift's random UID: serve the page from an emptyDir
     script = (f'echo "Hello from pod $POD_NAME on node $NODE_NAME (MetalLB {mode.upper()} lab)" '
               "> /var/www/html/index.html; exec run-httpd")
@@ -102,22 +117,37 @@ def demo_manifests(mode: str, image: str = DEMO_IMAGE) -> List[Dict[str, Any]]:
          "metadata": {"name": DEMO_NAME, "namespace": DEMO_NAMESPACE,
                       "annotations": {"metallb.io/address-pool": POOL_NAME}},
          "spec": {"type": "LoadBalancer", "selector": {"app": DEMO_NAME},
-                  "ports": [{"name": "http", "port": 80, "targetPort": 8080}]}},
+                  "ports": [{"name": "http", "port": 80, "targetPort": 8080}],
+                  **({"ipFamilyPolicy": "PreferDualStack", "ipFamilies": ["IPv4", "IPv6"]} if dual_stack else {})}},
     ]
 
 
 # ---------------------------------------------------------------- address pools
 
 def in_pool(ip: str, pool: str) -> bool:
-    """pool: "a-b" range or a CIDR"""
+    """pool: "a-b" range or a CIDR (IPv4 or IPv6)"""
     try:
-        addr = ipaddress.IPv4Address(ip)
+        addr = ipaddress.ip_address(ip)
         if "/" in pool:
-            return addr in ipaddress.IPv4Network(pool, strict=False)
+            return addr in ipaddress.ip_network(pool, strict=False)
         start, _, end = pool.partition("-")
-        return ipaddress.IPv4Address(start.strip()) <= addr <= ipaddress.IPv4Address((end or start).strip())
-    except ValueError:
+        return ipaddress.ip_address(start.strip()) <= addr <= ipaddress.ip_address((end or start).strip())
+    except (ValueError, TypeError):  # TypeError: families differ
         return False
+
+
+def pool6_for(gspec: Any, mode: str, pool: str, range6: Optional[str] = None) -> Optional[str]:
+    """IPv6 range of a dual stack MetalLB pool: l2 = the addresses paired with the IPv4 range (kept free
+    with it: 10.42.7.230-.245 -> <prefix>::230-<prefix>::245); bgp = a range of the cluster's IPv6 announce
+    range /64 (range6)"""
+    if mode == "bgp":
+        if not range6:
+            return None
+        net = ipaddress.IPv6Network(range6)
+        return f"{net.network_address + 0x10}-{net.network_address + 0xff}"
+    start, _, end = pool.partition("-")
+    a, b = gspec.ip6_of(start.strip()), gspec.ip6_of((end or start).strip())
+    return f"{a}-{b}" if a and b else None
 
 
 def metallb_pool(cidr: str, dhcp_end: str, size: int, taken: List[str]) -> str:
@@ -209,29 +239,35 @@ class MetalLBClient:
                     raise RuntimeError(f"{what}: {e}")
                 self.sleep(10)
 
-    def configure(self, pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None) -> None:
+    def configure(self, pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None,
+                  pool6: Optional[str] = None) -> None:
         """Pool + advertisement of `mode`; the other mode's objects are removed"""
         bfd = (bgp or {}).get("bfd") if mode == "bgp" else None
-        self.log(f"Configuring MetalLB ({mode.upper()}, pool {pool}"
+        self.log(f"Configuring MetalLB ({mode.upper()}, pool {pool}" + (f" + {pool6}" if pool6 else "")
                  + (f", BFD {bfd['detect_multiplier']} x {bfd['receive_interval']} ms" if bfd else "") + ")")
-        manifests, stale = config_manifests(pool, mode, bgp)
+        manifests, stale = config_manifests(pool, mode, bgp, pool6)
         self.apply_retry(manifests, "IPAddressPool / advertisement")
         for kind, name in stale:
             self.kube(["delete", kind, name, "-n", NAMESPACE, "--ignore-not-found"], 60)
 
-    def deploy_demo(self, pool: Optional[str], mode: str, image: str = DEMO_IMAGE, timeout: float = 10 * 60) -> str:
+    def deploy_demo(self, pool: Optional[str], mode: str, image: str = DEMO_IMAGE, timeout: float = 10 * 60,
+                    dual_stack: bool = False) -> str:
         """hello Deployment + Service; returns the service's external IP. An existing Service whose IP is
         outside `pool` (the pool changed with the mode) is re-created to get an address of the new pool."""
         self.log("Deploying the MetalLB demo (hello)")
         current = self.service_ip()
-        if current and pool and not in_pool(current, pool):
+        families = self.kube(["get", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "-o", "jsonpath={.spec.ipFamilies}"], 30)
+        if families["exitcode"] == 0 and families["stdout"].strip() and ("IPv6" in families["stdout"]) != dual_stack:
+            # ipFamilies can't be changed on an existing Service
+            self.kube(["delete", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "--ignore-not-found"], 60)
+        elif current and pool and not in_pool(current, pool):
             self.log(f"Re-creating the hello Service: {current} is not in the new pool {pool}")
             self.kube(["delete", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "--ignore-not-found"], 60)
-        self.apply(demo_manifests(mode, image))
+        self.apply(demo_manifests(mode, image, dual_stack))
         deadline = time.monotonic() + timeout
         while True:
             ip = self.service_ip()
-            if ip:
+            if ip and (not dual_stack or self.service_ip6() or time.monotonic() > deadline - timeout / 2):
                 return ip
             if time.monotonic() > deadline:
                 raise TimeoutError("The hello Service got no external IP from MetalLB")
@@ -240,11 +276,18 @@ class MetalLBClient:
     def remove_demo(self) -> None:
         self.kube(["delete", "namespace", DEMO_NAMESPACE, "--ignore-not-found", "--wait=false"], 60)
 
-    def service_ip(self) -> Optional[str]:
+    def service_ips(self) -> List[str]:
         out = self.kube(["get", "svc", DEMO_NAME, "-n", DEMO_NAMESPACE, "-o",
-                         "jsonpath={.status.loadBalancer.ingress[0].ip}"], 30)
-        ip = out["stdout"].strip() if out["exitcode"] == 0 else ""
-        return ip or None
+                         "jsonpath={.status.loadBalancer.ingress[*].ip}"], 30)
+        return out["stdout"].split() if out["exitcode"] == 0 else []
+
+    def service_ip(self) -> Optional[str]:
+        """The demo's IPv4 external IP"""
+        return next((ip for ip in self.service_ips() if ":" not in ip), None)
+
+    def service_ip6(self) -> Optional[str]:
+        """The demo's IPv6 external IP (dual stack)"""
+        return next((ip for ip in self.service_ips() if ":" in ip), None)
 
     def announcing_node(self) -> Optional[str]:
         """Node whose speaker answers ARP for the demo IP: ServiceL2Status (MetalLB >= 0.14), else the
@@ -306,6 +349,7 @@ def scenario(cluster: Any, group: Any, mlb: Dict[str, Any], client: Optional[Met
     bfd = bgp.get("bfd") or {}
     result: Dict[str, Any] = {
         "enabled": bool(mlb.get("enabled")), "mode": mode, "pool": mlb.get("pool"), "service_ip": mlb.get("service_ip"),
+        "pool6": mlb.get("pool6"), "service_ip6": mlb.get("service_ip6"),
         "hostname": f"{hostname}.{domain}" if mlb.get("service_ip") and domain else None,
         "announcing_node": None, "endpoints": [], "router_ip": router.get("ip"), "group_cidr": gspec.get("cidr"),
         "wireguard": bool(wg.get("enabled")), "wireguard_port": wg.get("host_port") if wg.get("enabled") else None,
@@ -344,6 +388,22 @@ def scenario(cluster: Any, group: Any, mlb: Dict[str, Any], client: Optional[Met
     except Exception as e:  # libvirtError, TimeoutError: router down
         ok, detail = False, str(e)[:200]
     checks.append({"name": f"The router reaches http://{ip}/", "ok": ok, "detail": detail})
+    if mlb.get("pool6"):  # dual stack: the IPv6 side of the same Service
+        try:
+            ip6 = client.service_ip6()
+        except (RuntimeError, ValueError):
+            ip6 = None
+        result["service_ip6"] = ip6
+        checks.append({"name": "Service got an IPv6 address from the pool", "ok": bool(ip6),
+                       "detail": f"{ip6} in {mlb['pool6']}" if ip6 else "no IPv6 external IP (PreferDualStack Service?)"})
+        if ip6:
+            try:
+                out = router_exec(f"curl -s -g -6 -m 5 'http://[{ip6}]/'", 15)
+                ok = out["exitcode"] == 0 and "Hello" in out["stdout"]
+                detail = (out["stdout"] if ok else (out["stderr"] or out["stdout"] or "no answer")).strip()[:200]
+            except Exception as e:
+                ok, detail = False, str(e)[:200]
+            checks.append({"name": f"The router reaches http://[{ip6}]/", "ok": ok, "detail": detail})
     records = (router.get("dns") or {}).get("records") or []
     has_record = any(r.get("name") == hostname and r.get("a") == ip for r in records)
     checks.append({"name": f"DNS {hostname}.{domain} -> {ip}", "ok": has_record,
@@ -368,17 +428,26 @@ def _bgp_checks(cluster: Any, group: Any, ip: str, result: Dict[str, Any], clien
     peers = [{"node": n.name, "ip": n.ip, "state": (sessions.get(n.ip) or {}).get("state", "no session"),
               "bfd": (bfd_peers.get(n.ip) or {}).get("status") if result.get("bfd") else None}
              for n in cluster.nodes]
+    if result.get("pool6"):  # dual stack: one IPv6 session per node too
+        from app.schemas.group import ip6_for
+        from app.services.ipv6_service import group_ip6
+        v6 = group_ip6(group.spec)
+        for n in cluster.nodes:
+            ip6 = ip6_for(n.ip, *v6) if v6 else None
+            peers.append({"node": n.name, "ip": ip6, "afi": "ipv6", "bfd": None,
+                          "state": (sessions.get(ip6) or {}).get("state", "no session")})
     result["bgp_peers"] = peers
     up = [p for p in peers if p["state"] == "Established"]
     checks.append({"name": "Every node has a BGP session with the router", "ok": len(up) == len(peers) and bool(peers),
                    "detail": f"{len(up)}/{len(peers)} Established"
                    + "".join(f"; {p['node']}: {p['state']}" for p in peers if p["state"] != "Established")})
     if result.get("bfd"):
-        bfd_up = [p for p in peers if p["bfd"] == "up"]
+        v4_peers = [p for p in peers if p.get("afi") != "ipv6"]
+        bfd_up = [p for p in v4_peers if p["bfd"] == "up"]
         profile = client.bfd_profile()
         detect = [p.get("detect_ms") for p in bfd_peers.values() if p.get("detect_ms")]
-        checks.append({"name": "BFD watches every session (fast failover)", "ok": len(bfd_up) == len(peers) and bool(profile),
-                       "detail": (f"{len(bfd_up)}/{len(peers)} up" + (f", a dead node is detected in {max(detect)} ms" if detect else "")
+        checks.append({"name": "BFD watches every session (fast failover)", "ok": len(bfd_up) == len(v4_peers) and bool(profile),
+                       "detail": (f"{len(bfd_up)}/{len(v4_peers)} up" + (f", a dead node is detected in {max(detect)} ms" if detect else "")
                                   + ("" if profile else "; the BGPPeer has no BFD profile: switch the mode again to apply it"))})
     route = next((r for r in status.get("routes") or [] if r["prefix"] == f"{ip}/32"), None)
     names = {n.ip: n.name for n in cluster.nodes}

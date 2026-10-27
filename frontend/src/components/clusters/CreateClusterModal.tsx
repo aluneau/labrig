@@ -15,6 +15,7 @@ import {
   HelperTextItem,
   Modal,
   ModalVariant,
+  Switch,
   TextArea,
   TextInput,
   Title,
@@ -121,6 +122,8 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const [k8sMetallb, setK8sMetallb] = useState<MetalLBOptions>({ enabled: false, mode: 'l2', addresses: 16, demo: true, bfd: false });
   // kubeadm air gap
   const [disconnected, setDisconnected] = useState(false);
+  // IPv6 dual stack: null = the default (kubeadm: on in an IPv6 group; OpenShift: off)
+  const [dualStack, setDualStack] = useState<boolean | null>(null);
   const [mirrorImages, setMirrorImages] = useState('');
   // OpenShift
   const [os, setOs] = useState<OsDraft>(defaultOsDraft);
@@ -170,6 +173,11 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const autoGroup = inGroup && groupId === AUTO_GROUP;
   const nameValid = NAME_RE.test(name) && name.length <= (autoGroup ? 32 : 40);
   const pickedGroup = groups.find((g) => String(g.id) === groupId);
+  const groupHasV6 = !!pickedGroup?.spec?.network?.ipv6?.enabled;
+  // shown for a new group (gets IPv6 when on) or a group with IPv6
+  const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6)
+    && !(isOpenShift && os.platform === 'baremetal' && os.topology !== 'sno'); // baremetal VIPs: IPv4 only
+  const dualStackOn = dualStackShown && (dualStack ?? (type === 'kubeadm' && groupHasV6));
   const osErrors = isOpenShift ? osDraftErrors(os) : [];
   const groupTaken = inGroup && !!pickedGroup && hasOpenShift(pickedGroup);
   const bmhValid = !!bmhId && !!bmhIp.trim() && !!bmhGateway.trim() && !!bmhDns.trim()
@@ -185,7 +193,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     group_id: bareMetal ? null : (groupId ? Number(groupId) : null),
     cidr: !bareMetal && autoGroup ? cidr.trim() || null : null,
     ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
-    ...osRequest(os, catalog),
+    ...osRequest(os, catalog, dualStackOn),
     ...(bareMetal ? {
       bare_metal: {
         hosts: [{ host_id: Number(bmhId), ip: bmhIp.trim() }],
@@ -216,7 +224,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
       password: password || null,
       ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
       keyboard: defaultKeyboard(),
-      kubeadm: type === 'kubeadm' ? { metallb: k8sMetallb } : null,
+      kubeadm: type === 'kubeadm' ? { metallb: k8sMetallb, dual_stack: dualStackShown ? dualStackOn : false } : null,
       disconnected: type === 'kubeadm' && disconnected,
       mirror_images: type === 'kubeadm' && disconnected
         ? mirrorImages.split('\n').map((i) => i.trim()).filter(Boolean) : [],
@@ -358,7 +366,20 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                       + 'deleting the cluster removes only them.'}
                 </HelperTextItem></HelperText></FormHelperText>
               </FormGroup>
-            ) : (
+            ) : null}
+            {dualStackShown && (
+              <FormGroup fieldId="cl-dual-stack" style={{ marginTop: 8 }}>
+                <Switch id="cl-dual-stack" label="IPv6 dual stack" isChecked={dualStackOn}
+                  onChange={(_e, v) => setDualStack(v)} />
+                <FormHelperText><HelperText><HelperTextItem>
+                  {autoGroup ? 'The new group gets IPv6 (a /64, DHCPv6 reservations); ' : 'The group has IPv6: '}
+                  pods and services get an IPv4 and an IPv6 address, nodes both families
+                  {isOpenShift ? ' (machine / cluster / service networks of both families)' : ' (Flannel, kube-proxy)'},
+                  MetalLB an IPv6 pool too. The kubeconfig stays on IPv4.
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            )}
+            {!inGroup && !bareMetal && (
               <FormGroup label="Network" fieldId="cl-network">
                 <FormSelect id="cl-network" value={network} onChange={(_e, v) => setNetwork(v)}>
                   <FormSelectOption value={OWN_NETWORK} label={`New NAT network vmm-k-${name || '<name>'}`} />

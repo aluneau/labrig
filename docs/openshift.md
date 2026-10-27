@@ -44,6 +44,11 @@ cluster whose RAM doesn't fit next to the running VMs (no overcommit: an OOM-kil
 Typical times on a desktop: ISO 3–5 min (first time per release: + base ISO extraction), SNO install
 40–60 min, add-ons 5–15 min.
 
+**IPv6 dual stack** (`openshift.dual_stack: true`, create only; UI switch *IPv6 dual stack*, OpenTofu `dual_stack`): the
+group needs IPv6 (an auto-created group gets it); install-config adds the group /64 to `machineNetwork`, `fd01::/48`
+(hostPrefix 64) and `fd02::/112`; `api` / `*.apps` get AAAA records; MetalLB L2 an IPv6 range. See docs/ipv6.md
+"Dual stack clusters".
+
 ## Reaching the cluster
 
 - **kubeconfig** (cluster page): `server: https://<router uplink IP>:6443` with

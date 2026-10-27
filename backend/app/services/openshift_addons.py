@@ -362,13 +362,14 @@ class AddonRunner(MetalLBClient):
 
     # -------------------------------------------------------------- MetalLB
 
-    def metallb(self, pool: str, mode: str = "l2", bgp: Optional[Dict[str, Any]] = None) -> None:
+    def metallb(self, pool: str, mode: str = "l2", bgp: Optional[Dict[str, Any]] = None,
+                pool6: Optional[str] = None) -> None:
         """Operator + MetalLB CR, then the shared configuration (metallb.MetalLBClient.configure: pool,
         L2Advertisement or BGPPeer (+ BFDProfile) + BGPAdvertisement; the other mode's objects removed)"""
         self.install_operator("metallb-operator", namespace=METALLB_NAMESPACE)
         self.apply_retry([{"apiVersion": "metallb.io/v1beta1", "kind": "MetalLB",
                            "metadata": {"name": "metallb", "namespace": METALLB_NAMESPACE}}], "MetalLB")
-        self.configure(pool, mode, bgp)
+        self.configure(pool, mode, bgp, pool6)
 
     # ------------------------------------------------------------------ ACM
 
@@ -377,6 +378,7 @@ class AddonRunner(MetalLBClient):
         from app.services import acm
         return acm.install_hub(self, pull_secret, mce_source)
 
-    def metallb_demo(self, timeout: float = 10 * 60, pool: Optional[str] = None, mode: str = "l2") -> str:
+    def metallb_demo(self, timeout: float = 10 * 60, pool: Optional[str] = None, mode: str = "l2",
+                     dual_stack: bool = False) -> str:
         """hello Deployment (2 replicas) + LoadBalancer Service, returns its external IP"""
-        return self.deploy_demo(pool, mode, DEMO_IMAGE, timeout)
+        return self.deploy_demo(pool, mode, DEMO_IMAGE, timeout, dual_stack=dual_stack)

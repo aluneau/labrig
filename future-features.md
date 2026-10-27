@@ -23,7 +23,7 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | Disconnected kubeadm (`disconnected: true`: images mirrored with skopeo, containerd `hosts.toml` mirrors, egress blocked, per-node exemption for packages, day-2 "Mirror more images"; template `disconnected-kubeadm`) | ✅ done (2026-10-09); k3s air gap open: needs k3s in a lab group first (no router today) |
 | Router primitives for customer cases: split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole + templates `split-dns`, `proxy-only-egress`, `mtu-1400` (docs/router-cases.md) | ✅ done (2026-10-09) |
 | Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
-| IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); cluster dual stack next |
+| IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); dual stack kubeadm / OpenShift clusters (2026-10-27) |
 | Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
 | CI, per-group resource budget | open (§4) |
 
@@ -363,7 +363,9 @@ idea as the live DHCP reservations, but with the router as the target.
 > machine and `aaaa` on records, DHCPv6 leases (DUID), `ipv6.egress` reject|drop + egress blocked/proxy for IPv6,
 > WireGuard tunnel /64, MP-BGP (`address-family ipv6 unicast`, `lab6` announce range), UI (create / Network & DNS
 > switch, addresses everywhere, BGP tab, topology), `vmmanager_group.ipv6`, template `ipv6-dual-stack`, `e2e/ipv6.js`.
-> Next: Kubernetes / OpenShift dual stack (pod/service CIDRs, `machineNetwork` v6, MetalLB IPv6 pools), NAT66 /
+> Dual stack clusters done (2026-10, docs/ipv6.md "Dual stack clusters"): kubeadm (`kubeadm.dual_stack`, Flannel
+> IPv6, MetalLB IPv6 pools L2 + BGP, `e2e/kubeadm-ipv6.js`), OpenShift (`openshift.dual_stack`, v6 machine / cluster /
+> service networks). Next: NAT66 /
 > NPTv6 when an uplink has IPv6, IPv6-only groups.
 
 > **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the

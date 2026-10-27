@@ -163,3 +163,47 @@ def parse_v6_leases(text: str, spec: GroupSpec) -> List[Dict[str, Any]]:
                        "hostname": None if parts[3] == "*" else parts[3], "duid": duid,
                        "mac": by_ip6.get(ip) or (_duid_mac(duid) if duid else None) or ""})
     return leases
+
+
+# Dual stack clusters (kubeadm, OpenShift): pods / services of both families, nodes on the group's /64
+
+def group_ip6(gspec: Optional[Dict[str, Any]]) -> Optional[tuple]:
+    """(group cidr, IPv6 prefix) of a stored group spec with IPv6 on, for ip6_for(); None otherwise"""
+    v6 = ((gspec or {}).get("network") or {}).get("ipv6") or {}
+    if not v6.get("enabled") or not v6.get("prefix"):
+        return None
+    return gspec.get("cidr"), v6["prefix"]
+
+
+def is_dual_stack(cluster: Any) -> bool:
+    spec = cluster.spec or {}
+    return bool(spec.get("dual_stack") or (spec.get("openshift") or {}).get("dual_stack"))
+
+
+def check_dual_stack(spec: GroupSpec, wanted: Optional[bool], cidrs: Dict[str, str],
+                     pod_prefix: tuple = (48, 64), service_prefix: tuple = (108, 120)) -> bool:
+    """Whether a new cluster in the group `spec` is dual stack: `wanted` (None = when the group has IPv6),
+    and its IPv6 in-cluster networks `cidrs` ({label: cidr}, pods first then services) are valid: inside
+    their prefix length limits, not overlapping each other, the group's IPv6 networks or IPV6_ULA_POOL
+    (where the app takes every group /64)."""
+    has_v6 = spec.network.ipv6 is not None and spec.network.ipv6.enabled
+    if wanted and not has_v6:
+        raise ValueError(f"Lab group {spec.name} has no IPv6: switch on IPv6 (dual stack) on the group first "
+                         "(Network & DNS tab) or create the cluster single stack")
+    if not (has_v6 if wanted is None else wanted):
+        return False
+    taken = [(f"the group's IPv6 network {n}", n) for n in _v6_nets_of(spec.model_dump())]
+    taken.append((f"IPV6_ULA_POOL {settings.IPV6_ULA_POOL} (the lab groups' IPv6 networks)",
+                  ipaddress.IPv6Network(settings.IPV6_ULA_POOL)))
+    for (label, cidr), (lo, hi) in zip(cidrs.items(), (pod_prefix, service_prefix)):
+        try:
+            net = ipaddress.IPv6Network(cidr)
+        except ValueError as e:
+            raise ValueError(f"Invalid IPv6 {label} {cidr}: {e}")
+        if not lo <= net.prefixlen <= hi:
+            raise ValueError(f"{label} {cidr}: the prefix length must be between /{lo} and /{hi}")
+        clash = next((t for t in taken if nets_overlap(net, t[1])), None)
+        if clash is not None:
+            raise ValueError(f"{label} {cidr} overlaps {clash[0]}")
+        taken.append((f"{label} {cidr}", net))
+    return True

@@ -121,6 +121,61 @@ router bgp 64513
 connected" and otherwise keeps the eBGP session in `Active` ("No path to specified Neighbor"). The same applies to
 MetalLB / other speakers on DHCPv6 addresses (use `ebgp-multihop 2` where there is no such knob).
 
+## Dual stack clusters (kubeadm, OpenShift)
+
+A cluster in an IPv6 group can run **dual stack**: nodes, pods and Services get an IPv4 and an IPv6 address
+(IPv4 is the primary family: the kubeconfig, the API advertise address and single stack Services stay IPv4).
+
+- **kubeadm**: `kubeadm.dual_stack` (default: on when the group has IPv6). **OpenShift**: `openshift.dual_stack`
+  (default off). `true` with no `group_id`: the auto-created group gets IPv6. UI: *Create cluster* → *IPv6 dual
+  stack* switch (shown for a new group or a group with IPv6). OpenTofu: `dual_stack = true` on `vmmanager_cluster`.
+  Create time only. `GET /clusters/{id}`: `dual_stack`, `nodes[].ip6`.
+
+```
+                     IPv4                     IPv6
+nodes                10.43.4.10 (DHCP)        fd00:564d:4d00:1::10 (DHCPv6 reservation, the group /64)
+pods (kubeadm)       pod_cidr 10.244.0.0/16   pod_cidr6 fd00:10:244::/56 (a /64 per node)
+services (kubeadm)   service_cidr 10.96/16    service_cidr6 fd00:10:96::/112
+pods (OpenShift)     10.128.0.0/14 /23        fd01::/48, hostPrefix 64
+services (OpenShift) 172.30.0.0/16            fd02::/112
+```
+
+The IPv6 in-cluster networks must stay outside the group's IPv6 networks and `IPV6_ULA_POOL` (checked at create;
+pods /48–/64, services /108–/120).
+
+**kubeadm**: `podSubnet` / `serviceSubnet` "v4,v6" in the v1beta4 config, kubelet `--node-ip=<v4>,<v6>` (in
+`/etc/default/kubelet` or `/etc/sysconfig/kubelet`, written by the prerequisites script), IPv6 forwarding on (kubeadm's
+preflight; networkd / NetworkManager keep handling the RAs: the node keeps its default route), Flannel with
+`EnableIPv6` + `IPv6Network` (VXLAN over IPv6 between nodes), kube-proxy dual stack. Cluster nodes in an IPv6 group
+get the members' network-config (DHCPv4 + DHCPv6 + RAs), with or without dual stack.
+
+**OpenShift** (agent-based installer, platform none only: `platform: baremetal` + dual stack is refused, its keepalived VIPs would need IPv6 ones too): `machineNetwork` = group CIDR + group /64, `clusterNetwork` and
+`serviceNetwork` with the IPv6 entries above (OVN-Kubernetes). The nodes take their IPv6 address from the group's
+DHCPv6 reservations (RHCOS NetworkManager follows the RA's M flag): no static `networkConfig` in agent-config.
+
+**DNS, API**: `api` / `api-int` (and `*.apps` for OpenShift) get an AAAA record = the router's IPv6 address, the
+nodes' names their own; haproxy listens on IPv4 and IPv6 (`bind :::port v4v6`), backends stay IPv4.
+
+**MetalLB** (`kubeadm.metallb`, OpenShift's MetalLB add-on): the `IPAddressPool` has an IPv6 range too and the demo
+`hello` Service is `PreferDualStack` (two ClusterIPs, two external IPs); `hello.<domain>` gets A + AAAA.
+
+- **L2**: the IPv6 range is *paired* with the IPv4 one (`10.43.4.200-.207` → `<prefix>::200-<prefix>::207`): those
+  IPv4 addresses are kept out of DHCP, so their IPv6 twins are free too. A node answers neighbor discovery (NDP)
+  for the IPv6 address like ARP for the IPv4 one.
+- **BGP** (kubeadm): the cluster gets its own IPv6 announce range (a /64 of `IPV6_ULA_POOL`, `<cluster>-metallb6`,
+  released when MetalLB goes back to L2 or off), the pool is `<range>::10-<range>::ff`; a second `BGPPeer`
+  (`lab-router6`) peers with the router's LAN IPv6 address with `ebgpMultiHop` (a DHCPv6 address is a /128: FRR
+  wouldn't see the router as directly connected), the router installs the /128 routes with the node's global next
+  hop. No BFD on the IPv6 sessions (the router runs BFD on IPv4 sessions). OpenShift BGP mode stays IPv4.
+- The *MetalLB lab* tab adds the IPv6 checks (address from the pool, router `curl -6`), the BGP checks list the IPv6
+  sessions; the topology shows the IPv6 service address in the virtual IP box.
+
+Verified with `e2e/kubeadm-ipv6.js` (1 control plane + 1 worker, Debian 13): both InternalIPs, podCIDRs and podIPs
+of both families, pod → pod over IPv6 across nodes, the IPv6 ClusterIP, a member resolving `hello` to A + AAAA and
+reaching the IPv6 LB address (L2 and BGP) and the API over IPv6. OpenShift 4.20.41 SNO dual stack installed for real
+(InternalIP v4 + v6, cluster / service networks of both families, PreferDualStack MetalLB demo with an IPv6 LB address,
+console and API answering on the router's IPv6 address).
+
 ## Topology, API
 
 - `GET /groups/{id}`: `ip6` on the router, members and hosts; `spec.network.ipv6`.
@@ -152,6 +207,6 @@ grep -i 'routeradv\|routersol' /proc/net/snmp6
 ## Not done (next steps)
 
 - Internet over IPv6 (NAT66 / NPTv6) when the uplink network has IPv6; IPv6-only groups (no IPv4).
-- kubeadm / k3s / OpenShift dual stack (pod / service CIDRs, `machineNetwork` v6, MetalLB IPv6 pools): clusters
-  in an IPv6 group keep running IPv4 only.
+- k3s dual stack (its own NAT network has no IPv6); IPv6 primary family / IPv6-only clusters; BFD on IPv6 BGP
+  sessions; OpenShift MetalLB BGP over IPv6.
 - IPv6 NTP (`chrony allow`), IPv6 DNS forwarders, IPv6 load balancer backends.
