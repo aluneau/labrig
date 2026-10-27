@@ -301,20 +301,25 @@ export const VersionSection: React.FC<{ draft: OsDraft; patch: (p: Partial<OsDra
 
   const okd = draft.distribution === 'okd';
   useEffect(() => {
+    let current = true;
     setChannels([]);
     openshiftApi.channels(draft.distribution).then((c) => {
+      if (!current) return;
       setChannels(c);
       // switching distribution: the channel of the newest minor (OKD minors differ from OpenShift's)
       if (c.length && !c.some((x) => x.name === draft.channel)) patch({ channel: c[0].name, version: '' });
-    }).catch((err) => setError(errorText(err)));
+    }).catch((err) => { if (current) setError(errorText(err)); });
+    return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.distribution]);
   useEffect(() => {
-    if (!draft.channel) return;
+    if (!draft.channel) return undefined;
+    let current = true;  // a slower answer for the previous channel / distribution must not win
     setVersions(null);
     openshiftApi.versions(draft.channel, draft.distribution)
-      .then((v) => { setVersions(v); setError(null); })
-      .catch((err) => { setVersions([]); setError(errorText(err)); });
+      .then((v) => { if (current) { setVersions(v); setError(null); } })
+      .catch((err) => { if (current) { setVersions([]); setError(errorText(err)); } });
+    return () => { current = false; };
   }, [draft.channel, draft.distribution]);
 
   const latest = versions?.[0];
