@@ -1067,6 +1067,9 @@ class ClusterService:
                 logger.warning(f"Cluster {cluster.name} was interrupted by a server restart")
                 self._set_status(db, cluster, "error", f"Interrupted by a server restart{note}: "
                                  "delete the cluster and create it again")
+        # OpenShift upgrades go on in the cluster: follow them again
+        from app.services.openshift_day2 import openshift_day2
+        openshift_day2.recover(db)
 
     def start_cluster(self, db: Session, cluster: Cluster) -> Task:
         def run(db: Session, task: Task, cluster_id: int) -> Dict[str, Any]:
@@ -1151,9 +1154,10 @@ class ClusterService:
             cluster.status_message = None
         db.commit()
 
-    def add_workers(self, db: Session, cluster: Cluster, count: int) -> Task:
+    def add_workers(self, db: Session, cluster: Cluster, count: int, worker: Optional[Dict[str, int]] = None) -> Task:
         if cluster.type == "openshift":
-            raise ValueError("Adding workers to an OpenShift cluster is not supported yet")
+            from app.services.openshift_day2 import openshift_day2
+            return openshift_day2.add_workers(db, cluster, count, worker)
         if self.to_dict(db, cluster)["status"] != "ready":
             raise ValueError("Start the cluster first")
         if not cluster.token:
@@ -1191,7 +1195,8 @@ class ClusterService:
         if node.role != "worker":
             raise ValueError("Only workers can be removed")
         if cluster.type == "openshift":
-            raise ValueError("Removing OpenShift nodes is not supported yet")
+            from app.services.openshift_day2 import openshift_day2
+            return openshift_day2.remove_worker(db, cluster, node_name)
 
         def run(db: Session, task: Task, cluster_id: int, node_name: str) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:

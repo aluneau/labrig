@@ -448,8 +448,8 @@ class OpenShiftInstaller:
             db.commit()
         nodes = list(cluster.nodes)
         masters = [n.ip for n in nodes if n.role == "ctlplane"]
-        workers = [n.ip for n in nodes if n.role == "worker"]
-        ingress = workers or masters
+        from app.services.openshift_day2 import ingress_ips
+        ingress = ingress_ips(opts.topology, nodes)
         gspec = network.spec()
         router_ip = gspec.router.ip
         for node in nodes:

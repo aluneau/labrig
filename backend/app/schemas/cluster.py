@@ -97,6 +97,66 @@ class ClusterCreate(BaseModel):
 
 class ClusterScale(BaseModel):
     count: int = Field(1, ge=1, le=10)  # workers to add
+    # OpenShift: size of the new workers (default: the cluster's worker size, or the OpenShift worker defaults)
+    worker: Optional[NodeResources] = None
+
+
+class ClusterUpgradeRequest(BaseModel):
+    """OpenShift: channel (e.g. stable-4.18; "" = none: no updates offered) and/or version to upgrade to"""
+    channel: Optional[str] = Field(None, max_length=40)
+    version: Optional[str] = Field(None, max_length=40)
+    # a conditional update whose known risks apply to this cluster (Recommended=False)
+    accept_risks: bool = False
+
+
+class UpgradeRisk(BaseModel):
+    name: Optional[str] = None
+    message: Optional[str] = None
+    url: Optional[str] = None
+
+
+class ConditionalUpdate(BaseModel):
+    version: str
+    recommended: Optional[bool] = None  # None: risks not evaluated yet
+    reason: Optional[str] = None
+    message: Optional[str] = None
+    risks: List[UpgradeRisk] = []
+
+
+class UpgradeHistory(BaseModel):
+    version: Optional[str] = None
+    state: Optional[str] = None
+    started: Optional[str] = None
+    completed: Optional[str] = None
+
+
+class ClusterUpgrades(BaseModel):
+    cluster_id: int
+    version: Optional[str] = None           # the app's view (updated when an upgrade completes)
+    disconnected: bool = False
+    reachable: bool = False
+    error: Optional[str] = None
+    task_running: bool = False
+    task_id: Optional[int] = None           # POST: the upgrade task
+    upgrade: Optional[Dict[str, Any]] = None  # last upgrade run by the app: target, from, state, started, message
+    current: Optional[str] = None
+    desired: Optional[str] = None
+    channel: Optional[str] = None
+    channels: List[str] = []
+    updating: bool = False
+    progress: Optional[int] = None
+    message: Optional[str] = None
+    failing: Optional[str] = None
+    upgradeable: bool = True
+    upgradeable_message: Optional[str] = None
+    retrieved: bool = False
+    retrieved_message: Optional[str] = None
+    available: List[str] = []
+    conditional: List[ConditionalUpdate] = []
+    history: List[UpgradeHistory] = []
+    operators_total: int = 0
+    operators_updated: int = 0
+    operators_pending: List[str] = []
 
 
 class ClusterMirrorRequest(BaseModel):
