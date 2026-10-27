@@ -127,10 +127,14 @@ class BareMetalInstallService:
     def cancel(self, db: Session, install: BareMetalInstall):
         host = db.get(BareMetalHost, install.host_id)
         if host:
-            try:
-                bmc = baremetal_service.client(db, host); bmc.eject_media(); bmc.clear_boot_override(); bmc.power_off()
-            except Exception:
-                pass
+            bmc = baremetal_service.client(db, host)
+            bmc.eject_media()
+            bmc.clear_boot_override()
+            bmc.power_off()
+            # iDRAC may acknowledge a reset before its asynchronous power
+            # transition is complete.  Do not let a new virtual-media boot
+            # race a delayed ForceOff from the cancelled install.
+            bmc.wait_power("Off")
             host.status, host.status_message = "available", None
         install.status, install.status_message = "cancelled", "Cancelled; virtual media ejected and host powered off"
         db.commit()
