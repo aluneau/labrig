@@ -268,6 +268,12 @@ e2e/                  Playwright browser tests against the real app (see below)
   adds (`AddonRunner.okd_catalog`, `catalog_sources` maps redhat-operators -> okderators); ODF / SR-IOV / ACM / GitOps /
   disconnected refused (`okd_unsupported`). **`platform: baremetal`** (compact / ha): `api_vip` / `ingress_vip` assigned
   in `_allocate` (one-address `address_pools`), DNS -> VIPs, router LBs only uplink 6443 / 80 / 443 -> VIPs (host path).
+  **Day 2** (`openshift_day2`): add workers (4.17+, not disconnected / bare metal / spokes) = `oc adm node-image create`
+  (nodes-config.yaml in `<install dir>/node-image/`) -> node ISO -> VMs via `_create_vms`, CSRs approved until Ready,
+  ISO ejected; ingress LBs = `ingress_ips` (SNO / compact: masters + workers, HA: workers); remove = drain + delete
+  Node + VM + owned entries. Upgrades: `GET/POST /clusters/{id}/upgrades` (ClusterVersion summary, channel,
+  `oc adm upgrade --to`), task `cluster_upgrade` follows to Completed; `spec.openshift.upgrade.state=running` is
+  re-followed at startup (`recover`, from `recover_interrupted`). Failed scale / upgrade tasks leave the cluster `ready`.
 - **Disconnected OpenShift** (docs/disconnected.md, `openshift.disconnected`, create only): owned group change
   `registry.enabled` -> `registry_service.ensure_mirrored(request, task, window)` (release + add-on packages: deps
   from `redhat-operator-index` `/configs` extracted on the host, `olm.package.required` + ODF's runtime

@@ -195,7 +195,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt,
 				Description: "Control planes: 1, or 3/5 with embedded etcd (default 1). openshift: set by openshift.topology."},
 			"workers": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
-				Description: "Workers (default 2; openshift: HA topology only); changed in place for k3s / kubeadm (added / drained and removed)."},
+				Description: "Workers (default 2; openshift: 0 for sno / compact at create, 2+ for ha); changed in place: added / drained and removed (openshift 4.17+: node ISO from `oc adm node-image create`)."},
 			"ctlplane_memory":    intAttr("MiB."),
 			"ctlplane_vcpu":      intAttr(""),
 			"ctlplane_disk_size": intAttr("GiB."),

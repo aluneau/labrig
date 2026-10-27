@@ -425,7 +425,40 @@ credentials only, the release comes through `imageDigestSources`, OperatorHub sh
 First mirror: ~20+ GB, 30–90 min before the nodes are created. Details, day-2 operators and limits:
 [disconnected.md](disconnected.md#openshift).
 
-Not yet: adding workers after install, upgrades from the app, disconnected OKD.
+## Day 2: add / remove workers, upgrades
+
+**Add workers** (cluster page *Add workers*, `POST /clusters/{id}/workers {count, worker: {memory, vcpu, disk_size}}`,
+OpenTofu: raise `workers`) — any topology, OpenShift **4.17+**, VM clusters in a lab group (not bare-metal hosts, not
+ACM spokes, not disconnected yet):
+
+1. new node rows: a MAC + an address reserved in the group, `<node>.<cluster>.<domain>` records; the router's ingress
+   load balancers (80 / 443) get the new workers (SNO / compact: masters + workers, since the masters keep their
+   router pod; HA: workers; haproxy health checks skip nodes without a router pod);
+2. `oc adm node-image create` with a `nodes-config.yaml` (hostname, MAC, `rootDeviceHints: /dev/vda`, the cluster's
+   SSH key) in `<install dir>/node-image/`: a pod in the cluster builds the node ISO (failure details: `report.json`
+   there);
+3. the ISO goes to the default pool (`<cluster>-node-<ts>.iso`), the VMs are made like the install's (empty 120 GiB
+   disk first, ISO second; LVMS / SR-IOV extras too), the node writes RHCOS, reboots and joins;
+4. the app approves the node's CSRs (platform none has no machine approver) until it is `Ready` (15–30 min), ejects
+   and deletes the ISO.
+
+A failure leaves the cluster `ready` with the error as its message; remove the half-added worker to clean up.
+**Remove a worker** (node menu *Remove worker*, `DELETE /clusters/{id}/nodes/{name}`): `oc adm drain`, delete the
+Node, the VM and its disks, its reservation / records, and its ingress backends.
+
+**Upgrades** (*Updates* card, `GET` / `POST /clusters/{id}/upgrades`): the ClusterVersion in plain words: version,
+channel, recommended updates, conditional updates with their risks (Red Hat's text + link, and whether they apply
+to this cluster), `Upgradeable=False` (minor upgrades blocked) and the history. New clusters have **no channel**
+(`disable_updates`, the default, clears it so a lab stays on its version): set one first
+(`{"channel": "stable-4.18"}`), then `{"version": "4.18.55"}` (+ `"accept_risks": true` for a conditional update whose
+risks apply; both in one request also works: the task waits for the update service to offer the version). The
+upgrade is `oc adm upgrade --to=<version>`; a task follows the ClusterVersion (CVO percentage, cluster operators
+updated) until the version is `Completed`, approving CSRs after the reboots; then `cluster.version` follows.
+`spec.openshift.upgrade` records the run (`target`, `from`, `state` running / completed / failed / unfollowed): after a
+server restart the app follows a running upgrade again (it goes on in the cluster by itself). SNO reboots once:
+the API is away a few minutes. Disconnected clusters: refused for now (the new release must be mirrored first).
+
+Not yet: disconnected OKD, day-2 workers / upgrades on disconnected clusters.
 
 ## OpenTofu
 

@@ -7,7 +7,7 @@ import {
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
   Cluster, ClusterCreate, ClusterCommandOutput,
   PullSecretIn, PullSecretStatus, OpenShiftChannel, OpenShiftVersion, CatalogOperator, ClusterCredentials,
-  InstallStatus, InstalledOperator, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmSpokeNode, AcmGitops, AcmGitCredentials, BmcStatus,
+  InstallStatus, InstalledOperator, ClusterUpgrades, NodeResources, PackageManifest, AddonRequest, MetalLBScenario, MetalLBOptions, AcmStatus, AcmSpokeNet, AcmSpokeNode, AcmGitops, AcmGitCredentials, BmcStatus,
   Group, GroupDetail, GroupSpec, MemberSpec, DNSRecord, RouterConfig, GroupDHCPHost, GroupLease,
   WireGuardStatus, WireGuardPeerCreated, BGPStatus, BGPSettings, GroupTopology, RegistryStatus, MirrorRequest,
   ImageCopyRequest, RegistryImages, RegistryCredentials,
@@ -238,7 +238,12 @@ export const clusterApi = {
   delete: (id: number) => del(`/clusters/${id}`),
   start: (id: number) => post<Task>(`/clusters/${id}/start`),
   stop: (id: number) => post<Task>(`/clusters/${id}/stop`),
-  addWorkers: (id: number, count = 1) => post<Task>(`/clusters/${id}/workers`, { count }),
+  addWorkers: (id: number, count = 1, worker?: NodeResources) =>
+    post<Task>(`/clusters/${id}/workers`, worker ? { count, worker } : { count }),
+  /** OpenShift: ClusterVersion view (channel, updates, conditional risks, progress) */
+  upgrades: (id: number) => request<ClusterUpgrades>(`/clusters/${id}/upgrades`),
+  setUpgrade: (id: number, data: { channel?: string; version?: string; accept_risks?: boolean }) =>
+    post<ClusterUpgrades>(`/clusters/${id}/upgrades`, data),
   removeNode: (id: number, node: string) => del<Task>(`/clusters/${id}/nodes/${encodeURIComponent(node)}`),
   kubectl: (id: number, view: 'nodes' | 'pods') => request<ClusterCommandOutput>(`/clusters/${id}/kubectl/${view}`),
   /** Plain link: the backend sends it as an attachment named <cluster>-kubeconfig.yaml */

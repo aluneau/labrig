@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models import Cluster as ClusterModel
 from app.schemas import Cluster, ClusterCommandOutput, ClusterCreate, ClusterScale, Task
 from app.schemas.openshift import AcmImportRequest, AcmSpokeRequest, AcmStatus, AddonRequest, MetalLBOptions, MetalLBScenario
-from app.schemas.cluster import ClusterMirrorRequest
+from app.schemas.cluster import ClusterMirrorRequest, ClusterUpgradeRequest, ClusterUpgrades
 from app.services import kube_exec
 from app.services.acm import acm_service
 from app.services.cluster_service import cluster_service
@@ -62,13 +62,34 @@ def delete_cluster(cluster_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{cluster_id}/workers", response_model=Task)
 def add_workers(cluster_id: int, data: ClusterScale, db: Session = Depends(get_db)):
-    return _bad_request(cluster_service.add_workers, db, _get(db, cluster_id), data.count)
+    """Add `count` workers (task). OpenShift (4.17+, VMs in a lab group): `oc adm node-image create` -> node ISO ->
+    new VMs, CSRs approved until Ready; `worker` sizes them (default: the cluster's worker size)."""
+    worker = data.worker.model_dump() if data.worker is not None else None
+    return _bad_request(cluster_service.add_workers, db, _get(db, cluster_id), data.count, worker)
 
 
 @router.delete("/{cluster_id}/nodes/{node_name}", response_model=Task)
 def remove_node(cluster_id: int, node_name: str, db: Session = Depends(get_db)):
     """Drain and delete a worker from Kubernetes, then delete its VM"""
     return _bad_request(cluster_service.remove_node, db, _get(db, cluster_id), node_name)
+
+
+@router.get("/{cluster_id}/upgrades", response_model=ClusterUpgrades)
+def get_upgrades(cluster_id: int, db: Session = Depends(get_db)):
+    """OpenShift: the ClusterVersion in plain words: current version, channel, recommended updates, conditional
+    updates with their risks, whether an upgrade runs (progress, cluster operators updated), history"""
+    from app.services.openshift_day2 import openshift_day2
+    return _bad_request(openshift_day2.upgrades, db, _get(db, cluster_id))
+
+
+@router.post("/{cluster_id}/upgrades", response_model=ClusterUpgrades)
+def set_upgrades(cluster_id: int, data: ClusterUpgradeRequest, db: Session = Depends(get_db)):
+    """OpenShift: set the update channel and/or start an upgrade to `version` (a task that follows the
+    ClusterVersion until the version is Completed; re-attached after a server restart). A conditional update whose
+    risks apply needs `accept_risks`. Not for disconnected clusters yet."""
+    from app.services.openshift_day2 import openshift_day2
+    return _bad_request(openshift_day2.set_upgrade, db, _get(db, cluster_id), data.channel, data.version,
+                        data.accept_risks)
 
 
 @router.post("/{cluster_id}/mirror", response_model=Task)

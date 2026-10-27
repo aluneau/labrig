@@ -484,8 +484,8 @@ class OpenShiftInstaller:
             db.commit()
         nodes = list(cluster.nodes)
         masters = [n.ip for n in nodes if n.role == "ctlplane"]
-        workers = [n.ip for n in nodes if n.role == "worker"]
-        ingress = workers or masters
+        from app.services.openshift_day2 import ingress_ips
+        ingress = ingress_ips(opts.topology, nodes)
         gspec = network.spec()
         router_ip = gspec.router.ip
         dual = bool(opts.dual_stack)  # AAAA records too (haproxy listens on the router's IPv6 address)
@@ -1749,6 +1749,13 @@ class OpenShiftInstaller:
         task = db.query(Task).filter(Task.id == cluster.task_id).first() if cluster.task_id else None
         day2 = bool(task_service.is_running(cluster.task_id) and task is not None
                     and task.type not in ("cluster_create", "cluster_resume"))
+        # adding / removing workers, upgrades: their own cards (nodes, upgrades) show them; the cluster is installed
+        if task is not None and task.type in ("cluster_scale", "cluster_upgrade") and cluster.kubeconfig \
+                and status in ("provisioning", "ready"):
+            ops = self.cluster_operators(cluster)
+            cv = self.clusterversion(cluster) if ops is not None else None
+            return {"phase": "ready", "version": (cv or {}).get("version") or cluster.version,
+                    "cluster_operators": ops or [], "addons": addons, "hosts": []}
         if status == "provisioning" or task_service.is_running(cluster.task_id):
             return {"phase": "addons" if day2 else (live.get("phase") or "preparing"), "day2": day2,
                     "assisted_status": live.get("assisted_status"),
