@@ -324,8 +324,15 @@ class RedfishBMC:
         """Insert the ISO, set a one-time CD boot and (re)start the host into it — the whole provisioning
         kick in one call."""
         self.insert_media(image_url)
+        # Dell iDRAC can defer a ForceRestart and issue the power-off phase after a caller has already
+        # observed the system back on.  That leaves virtual-media installs switching themselves off.
+        # Use an ordered cold cycle instead, and only set the one-time override after the system is off.
+        if (self.power_state() or "").lower() == "on":
+            self.power_off()
+            self.wait_power("Off")
         self.set_boot_once("Cd")
-        self.power_cycle()
+        self.power_on()
+        self.wait_power("On")
 
     def erase_disks(self) -> None:
         """Wipe the host's physical disks (decommission). Dell iDRAC only, via the OEM SystemErase action
