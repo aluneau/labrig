@@ -44,6 +44,9 @@ HTTP_TIMEOUT = 30
 
 POD_CIDR = "10.128.0.0/14"
 SERVICE_CIDR = "172.30.0.0/16"
+# Dual stack: OpenShift's documented IPv6 defaults (cluster network /48, one /64 per node; services /112)
+POD_CIDR6 = "fd01::/48"
+SERVICE_CIDR6 = "fd02::/112"
 # Networks OpenShift / OVN-Kubernetes use internally: node networks must not overlap them
 RESERVED_CIDRS = [POD_CIDR, SERVICE_CIDR, "100.64.0.0/16", "100.88.0.0/16", "169.254.0.0/17", "10.88.0.0/16"]
 
@@ -517,7 +520,8 @@ class OpenShiftService:
 
     @staticmethod
     def install_config(name: str, base_domain: str, machine_cidr: str, masters: int, workers: int,
-                       pull_secret: str, ssh_key: str, mirror: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       pull_secret: str, ssh_key: str, mirror: Optional[Dict[str, Any]] = None,
+                       machine_cidr6: Optional[str] = None) -> Dict[str, Any]:
         """mirror (disconnected): {image_digest_sources: [{source, mirrors}], ca_pem}: the release comes
         from the group's mirror registry, whose CA every node trusts (additionalTrustBundlePolicy Always:
         also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it)"""
@@ -537,6 +541,12 @@ class OpenShiftService:
             "pullSecret": pull_secret,
             "sshKey": ssh_key,
         }
+        if machine_cidr6:
+            # dual stack, IPv4 first (primary family): the nodes' IPv6 addresses come from DHCPv6 (group /64)
+            net = config["networking"]
+            net["machineNetwork"].append({"cidr": machine_cidr6})
+            net["clusterNetwork"].append({"cidr": POD_CIDR6, "hostPrefix": 64})
+            net["serviceNetwork"].append(SERVICE_CIDR6)
         if mirror:
             config["imageDigestSources"] = mirror["image_digest_sources"]
             config["additionalTrustBundle"] = mirror["ca_pem"].strip() + "\n"

@@ -135,7 +135,7 @@ const toResources = (r: Role, odf: OdfProfile | null = null) => ({
 });
 
 /** The request parts the draft drives: counts, sizes and the `openshift` options */
-export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
+export const osRequest = (d: OsDraft, catalog: CatalogOperator[], dualStack = false) => {
   const { ctlplanes, workers } = nodeCounts(d);
   const source = (name: string) => catalog.find((o) => o.name === name)?.source || 'redhat-operators';
   const names = [...d.operators, ...d.extraOperators.filter((n) => !d.operators.includes(n))];
@@ -153,6 +153,7 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[]) => {
       bfd: d.metallb.mode === 'bgp' && !!d.metallb.bfd,
     },
     acm: d.acm,
+    dual_stack: dualStack,
     disable_updates: d.disableUpdates,
     disconnected: d.disconnected,
   };

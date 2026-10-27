@@ -72,6 +72,10 @@ class OpenShiftOptions(BaseModel):
     # multicluster engine) + a MultiClusterHub (availabilityConfig Basic); other clusters of the app are imported
     # with POST /clusters/{id}/acm/managed
     acm: bool = False
+    # IPv6 dual stack (docs/ipv6.md, create only): machine / cluster / service networks of both families (OVN-
+    # Kubernetes), api / *.apps AAAA records, MetalLB L2 IPv6 pool. Needs a group with IPv6 (an auto-created
+    # group gets it). Nodes take their IPv6 address from the group's DHCPv6 reservations.
+    dual_stack: bool = False
     # Stop offering updates (clusterversion channel cleared)
     disable_updates: bool = True
     # Disconnected install (create time only, docs/disconnected.md): the group router runs a mirror

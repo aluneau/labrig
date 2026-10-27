@@ -42,10 +42,11 @@ from app.schemas.registry import MirrorRequest, OperatorCatalog, OperatorPackage
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
-from app.services import acm, metallb
+from app.services import acm, ipv6_service, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
-from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, RESERVED_CIDRS, SERVICE_CIDR, managed_by,
+from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, POD_CIDR6, RESERVED_CIDRS, SERVICE_CIDR,
+                                            SERVICE_CIDR6, managed_by,
                                             managed_operator_error, openshift_service)
 from app.services.task_service import task_service
 from app.services.vm_service import vm_service
@@ -210,6 +211,11 @@ class OpenShiftInstaller:
             openshift_service.check_cidr(gspec.cidr)
 
         group, gspec, owned, node_subnet = self.svc._resolve_group(db, data, names, RESERVED_CIDRS, check)
+        if opts.dual_stack and group is None:
+            from app.schemas.group import IPv6Spec
+            gspec.network.ipv6 = IPv6Spec(enabled=True)  # the auto-created group gets IPv6
+        ipv6_service.check_dual_stack(gspec, opts.dual_stack, {"cluster network": POD_CIDR6,
+                                                               "service network": SERVICE_CIDR6})
         if opts.disconnected:
             # the router becomes the lab's bastion: mirror registry (more RAM + a registry disk)
             if not version.startswith("4."):
@@ -230,6 +236,7 @@ class OpenShiftInstaller:
         spec["openshift"] = {**opts.model_dump(), "version": version}
         spec.update(ctlplanes=counts["masters"], workers=counts["workers"], ctlplane=sizes["ctlplane"],
                     worker=sizes["worker"], cidr=str(node_subnet), pod_cidr=POD_CIDR, service_cidr=SERVICE_CIDR,
+                    **({"pod_cidr6": POD_CIDR6, "service_cidr6": SERVICE_CIDR6} if opts.dual_stack else {}),
                     api_port=LB_PORTS["api"], group_task_id=task.id if task else None, addons=[],
                     image=f"OpenShift {version}")
         cluster = Cluster(
@@ -452,10 +459,11 @@ class OpenShiftInstaller:
         ingress = workers or masters
         gspec = network.spec()
         router_ip = gspec.router.ip
+        dual = bool(opts.dual_stack)  # AAAA records too (haproxy listens on the router's IPv6 address)
         for node in nodes:
             network.reserve(node.name, node.mac, node.ip)
-            network.publish(node.ip, [f"{node.name}.{zone}", node.name])
-        network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"])
+            network.publish(node.ip, [f"{node.name}.{zone}", node.name], paired=dual)
+        network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"], paired=dual)
         network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{ip}:6443" for ip in masters])
         network.publish_lb(f"{cluster.name}-mcs", LB_PORTS["mcs"], [f"{ip}:22623" for ip in masters])
         network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ingress])
@@ -477,6 +485,14 @@ class OpenShiftInstaller:
         cluster.api_ip = network.uplink_ip()
         db.commit()
         return nodes
+
+    @staticmethod
+    def _metallb_pool6(cluster: Cluster, mode: str, pool: str) -> Optional[str]:
+        """Dual stack, L2: the IPv6 addresses paired with the IPv4 pool (BGP stays IPv4 on OpenShift)"""
+        if not ipv6_service.is_dual_stack(cluster) or mode != "l2" or not pool:
+            return None
+        gspec = GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).spec()
+        return metallb.pool6_for(gspec, mode, pool)
 
     @staticmethod
     def _assign_pool(network: GroupClusterNetwork, gspec, mode: str, size: int, node_ips: List[str],
@@ -712,7 +728,8 @@ class OpenShiftInstaller:
             cluster.name, cluster.domain, spec["cidr"], spec["ctlplanes"], spec["workers"],
             # disconnected: the registry's credentials only (no quay.io / cloud.openshift.com: no telemetry)
             self.mirror_pull_secret(cluster) if mirror else openshift_service.pull_secret(),
-            ssh_key, self.install_mirror(mirror) if mirror else None)
+            ssh_key, self.install_mirror(mirror) if mirror else None,
+            network.spec().ipv6_prefix() if opts.dual_stack else None)
         agent = openshift_service.agent_config(
             cluster.name, first.ip, network.gateway(),  # NTP: chrony on the router
             [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes])
@@ -1401,23 +1418,26 @@ class OpenShiftInstaller:
             bgp = None
             if mode == "bgp":
                 bgp = metallb.bgp_params(GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).spec())
-            runner.metallb(pool, mode, bgp)
+            runner.metallb(pool, mode, bgp, self._metallb_pool6(cluster, mode, pool))
             if mlb.get("service_ip"):  # day 2 (e.g. L2 -> BGP): the demo moves to the new pool
                 self.run_addon(db, cluster, runner, "metallb-demo", "hello", opts)
         elif kind == "metallb-demo":
             mlb = (cluster.spec.get("openshift") or {}).get("metallb", {})
             old_ip = mlb.get("service_ip")
-            ip = runner.metallb_demo(pool=mlb.get("pool"), mode=mlb.get("mode") or "l2")
+            dual = self._metallb_pool6(cluster, mlb.get("mode") or "l2", mlb.get("pool") or "") is not None
+            ip = runner.metallb_demo(pool=mlb.get("pool"), mode=mlb.get("mode") or "l2", dual_stack=dual)
+            ip6 = runner.service_ip6() if dual else None
             network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
             gspec = network.spec()
             hostname = mlb.get("hostname") or metallb.demo_hostname(gspec, cluster.name)
             if old_ip and old_ip != ip:
                 network.unpublish(old_ip)
-            network.publish(ip, [f"{hostname}.{gspec.domain}"])
+            network.publish(ip, [f"{hostname}.{gspec.domain}"], ip6=ip6)
             network.commit()
             os_spec = cluster.spec.get("openshift") or {}
             self._update_spec(db, cluster, openshift={**os_spec, "metallb": {**os_spec.get("metallb", {}),
                                                                                "demo": True, "service_ip": ip,
+                                                                               "service_ip6": ip6,
                                                                                "hostname": hostname}})
         elif kind == "acm":
             # non-OpenShift managed clusters pull the klusterlet from registry.redhat.io with the hub's pull

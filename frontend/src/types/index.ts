@@ -349,6 +349,8 @@ export interface ClusterCreate {
   cidr?: string | null;
   pod_cidr?: string;
   service_cidr?: string;
+  pod_cidr6?: string; // dual stack: IPv6 pod network (/48-/64), default fd00:10:244::/56
+  service_cidr6?: string; // dual stack: IPv6 service network (/108-/120), default fd00:10:96::/112
   extra_args?: string | null;
   username?: string | null;
   password?: string | null;
@@ -398,6 +400,7 @@ export interface ClusterNode {
   name: string;
   role: 'ctlplane' | 'worker' | string;
   ip?: string | null;
+  ip6?: string | null; // dual stack groups: the node's IPv6 address (DHCPv6 reservation)
   mac?: string | null;
   vm_id?: number | null;
   state: string; // libvirt state, or 'missing'
@@ -432,6 +435,7 @@ export interface Cluster {
   registry?: ClusterRegistry | null;
   ctlplanes: number;
   workers: number;
+  dual_stack?: boolean; // IPv6 dual stack (pods / services of both families)
   spec?: Record<string, any> | null;
   nodes: ClusterNode[];
   created_at: string;
@@ -472,6 +476,8 @@ export interface MetalLBOptions {
 /** type 'kubeadm': MetalLB installed by the app */
 export interface KubeadmOptions {
   metallb: MetalLBOptions;
+  // IPv6 dual stack (group with IPv6); null/absent = on when the group has IPv6; true + new group = group with IPv6
+  dual_stack?: boolean | null;
 }
 
 export type OdfProfile = 'lab' | 'lean';
@@ -487,6 +493,7 @@ export interface OpenShiftOptions {
   sriov: SriovOptions;
   metallb: MetalLBOptions;
   acm?: boolean; // Advanced Cluster Management hub (operator + MultiClusterHub)
+  dual_stack?: boolean; // IPv6 dual stack (create only; the group needs IPv6, a new group gets it)
   disable_updates: boolean;
   // Disconnected install (create time only): mirror registry on the group router, group egress blocked
   disconnected?: boolean;
