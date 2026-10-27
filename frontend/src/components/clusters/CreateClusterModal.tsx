@@ -149,11 +149,18 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
 
   // Deep link from the Bare-metal hosts page: open on OpenShift + this host
   useEffect(() => {
-    if (isOpen && initialBmhId) {
+    if (!isOpen) return;
+    if (initialBmhId) {
       setType('openshift');
       setPlacement('bmh');
       setBmhId(String(initialBmhId));
       patchOs({ topology: 'sno' });
+    } else {
+      // The dialog component stays mounted between opens.  Without clearing this deep-link state, opening
+      // it normally after "Install OpenShift" from a physical host silently retains BMH placement and hides
+      // the lab-group VM path (including VM SNO).
+      setPlacement('vm');
+      setBmhId('');
     }
   }, [isOpen, initialBmhId, patchOs]);
 
