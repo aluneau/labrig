@@ -3,8 +3,9 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# 4.20.39, 4.21.0-rc.2, 5.0.0-ec.1
-OCP_VERSION = r"^\d+\.\d+\.\d+(-(rc|ec)\.\d+)?$"
+# 4.20.39, 4.21.0-rc.2, 5.0.0-ec.1; OKD: 5.0.0-okd-scos.3, 5.1.0-okd-scos.ec.0
+OCP_VERSION = r"^\d+\.\d+\.\d+(-(rc|ec)\.\d+|-okd-scos(\.ec)?\.\d+)?$"
+IPV4 = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
 OCP_CHANNEL = r"^(stable|fast|candidate|eus)-\d+\.\d+$"
 PACKAGE = r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$"
 
@@ -49,8 +50,20 @@ class MetalLBOptions(BaseModel):
 
 
 class OpenShiftOptions(BaseModel):
+    distribution: Literal["ocp", "okd"] = Field("ocp", description=(
+        "ocp = OpenShift Container Platform (needs a Red Hat pull secret); okd = OKD, the community distribution "
+        "on CentOS Stream CoreOS (quay.io/okd/scos-release, no pull secret). OKD: community operators only, no "
+        "ODF / SR-IOV / ACM / disconnected"))
     version: Optional[str] = Field(None, pattern=OCP_VERSION)  # None = latest of the channel
     channel: str = Field("stable-4.20", pattern=OCP_CHANNEL)
+    platform: Literal["none", "baremetal"] = Field("none", description=(
+        "none = the group router is the external DNS + load balancer (api / *.apps -> router haproxy); baremetal = "
+        "the cluster runs its own keepalived + haproxy on two virtual IPs of the group network (api_vip, "
+        "ingress_vip; DNS points at them; the router only forwards its uplink :6443 / :80 / :443 to them for the "
+        "host). baremetal needs 3 control planes (compact or ha): the installer refuses it for single node"))
+    # baremetal: virtual IPs on the group network (kept out of DHCP); None = picked by the app
+    api_vip: Optional[str] = Field(None, pattern=IPV4)
+    ingress_vip: Optional[str] = Field(None, pattern=IPV4)
     topology: Literal["sno", "compact", "ha"] = Field("sno", description=(
         "sno = 1 node; compact = 3 masters that also run workloads (and ODF); ha = 3 masters + `workers` workers"))
     storage: Literal["none", "lvms", "odf"] = Field("none", description=(
@@ -78,6 +91,18 @@ class OpenShiftOptions(BaseModel):
     # registry filled by oc-mirror (release + the add-ons' operators + demo images), the group's egress is
     # blocked before the nodes boot, the cluster pulls everything from the mirror (registry-only pull secret)
     disconnected: bool = False
+
+    @model_validator(mode="after")
+    def _distribution(self) -> "OpenShiftOptions":
+        if self.version and ("-okd-" in self.version) != (self.distribution == "okd"):
+            raise ValueError(f"Version {self.version} is not an {self.distribution.upper()} release "
+                             + ("(OKD versions look like 5.0.0-okd-scos.3)" if self.distribution == "okd"
+                                else '(set "distribution": "okd" for an OKD release)'))
+        if self.platform == "none" and (self.api_vip or self.ingress_vip):
+            raise ValueError('api_vip / ingress_vip only apply to "platform": "baremetal"')
+        if self.api_vip and self.api_vip == self.ingress_vip:
+            raise ValueError("api_vip and ingress_vip must differ")
+        return self
 
     @field_validator("operators")
     @classmethod

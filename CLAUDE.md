@@ -255,6 +255,11 @@ e2e/                  Playwright browser tests against the real app (see below)
   MetalLB pool out of DHCP / static IPs. Every router serves NTP (chrony `allow <cidr>` + DHCP option): the
   installer validates node clocks. The SR-IOV policy must be created only after the config daemon reported the
   NICs (the controller skips nodes with empty status and doesn't retry).
+  **OKD** (`openshift.distribution: okd`, versions = accepted `<major>-scos-stable` tags of the OKD release controller,
+  binaries from okd-project/okd GitHub releases, fake pull secret): add-ons from the OKDerators CatalogSource the app
+  adds (`AddonRunner.okd_catalog`, `catalog_sources` maps redhat-operators -> okderators); ODF / SR-IOV / ACM / GitOps /
+  disconnected refused (`okd_unsupported`). **`platform: baremetal`** (compact / ha): `api_vip` / `ingress_vip` assigned
+  in `_allocate` (one-address `address_pools`), DNS -> VIPs, router LBs only uplink 6443 / 80 / 443 -> VIPs (host path).
 - **Disconnected OpenShift** (docs/disconnected.md, `openshift.disconnected`, create only): owned group change
   `registry.enabled` -> `registry_service.ensure_mirrored(request, task, window)` (release + add-on packages: deps
   from `redhat-operator-index` `/configs` extracted on the host, `olm.package.required` + ODF's runtime

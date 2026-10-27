@@ -300,9 +300,10 @@ export const openshiftApi = {
   setPullSecret: (data: PullSecretIn) =>
     request<PullSecretStatus>('/openshift/pull-secret', { method: 'PUT', body: JSON.stringify(data) }),
   deletePullSecret: () => del<PullSecretStatus>('/openshift/pull-secret'),
-  channels: () => request<OpenShiftChannel[]>('/openshift/channels'),
-  versions: (channel: string) => request<OpenShiftVersion[]>(`/openshift/versions?channel=${encodeURIComponent(channel)}`),
-  catalog: () => request<CatalogOperator[]>('/openshift/catalog'),
+  channels: (distribution = 'ocp') => request<OpenShiftChannel[]>(`/openshift/channels?distribution=${distribution}`),
+  versions: (channel: string, distribution = 'ocp') =>
+    request<OpenShiftVersion[]>(`/openshift/versions?channel=${encodeURIComponent(channel)}&distribution=${distribution}`),
+  catalog: (distribution = 'ocp') => request<CatalogOperator[]>(`/openshift/catalog?distribution=${distribution}`),
 };
 
 export const hostApi = {

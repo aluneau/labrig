@@ -531,8 +531,8 @@ summary; cluster page: install progress (Assisted stages, cluster operators), co
 Operators tab, MetalLB lab tab with the diagram. OpenTofu: `vmmanager_cluster` `type = "openshift"` +
 `openshift` block. e2e: `openshift.js` (SNO + LVMS + MetalLB demo; long). Disconnected: ✅ done (2026-10,
 `openshift.disconnected`: mirror registry + oc-mirror on the group router, egress blocked, docs/disconnected.md;
-the router keeps its uplink, so no uplink-less group is needed). Not in v1: OKD,
-`platform: baremetal` with VIPs, BGP, add workers, upgrades, FIPS.
+the router keeps its uplink, so no uplink-less group is needed). Not in v1 (OKD and `platform: baremetal` with VIPs: built since, docs/openshift.md):
+BGP, add workers, upgrades, FIPS.
 
 ---
 
