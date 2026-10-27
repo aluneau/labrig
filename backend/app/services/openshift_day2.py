@@ -37,7 +37,7 @@ JOIN_TIMEOUT = 60 * 60         # node ISO boot -> RHCOS on disk -> reboot -> kub
 UPGRADE_TIMEOUT = 5 * 3600     # z-stream on SNO ~1 h; minor upgrades / nested rigs take longer
 RETRIEVE_TIMEOUT = 2 * 60      # new channel -> CVO fetched its updates
 SETTLE_TIMEOUT = 15 * 60       # oc adm upgrade refused while an operator is degraded (transient after node changes)
-CHANNEL_RE = re.compile(r"^(stable|fast|candidate|eus)-\d+\.\d+$")
+CHANNEL_RE = re.compile(r"^[a-z]+-\d+(\.\d+)?$")  # stable-4.18, eus-4.18, OKD stable-4
 PERCENT_RE = re.compile(r"(\d+)% complete")
 
 
@@ -199,6 +199,8 @@ class OpenShiftDay2:
 
     def _publish_ingress(self, network: GroupClusterNetwork, cluster: Cluster, topology: str) -> None:
         from app.services.openshift_installer import LB_PORTS
+        if ((cluster.spec or {}).get("openshift") or {}).get("platform") == "baremetal":
+            return  # the router's 80 / 443 point at the ingress VIP (keepalived moves it to a router pod's node)
         ips = ingress_ips(topology, list(cluster.nodes))
         network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ips])
         network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{ip}:443" for ip in ips])
@@ -418,7 +420,7 @@ class OpenShiftDay2:
                              "image digest. Upgrade a connected cluster, or re-create this one on the new version.")
         self._check_vm_cluster(db, cluster, "Upgrading")
         if channel is not None and channel and not CHANNEL_RE.match(channel):
-            raise ValueError(f"Not a channel: {channel} (e.g. stable-4.18, fast-4.19, eus-4.18, candidate-4.20)")
+            raise ValueError(f"Not a channel: {channel} (e.g. stable-4.18, fast-4.19, eus-4.18; OKD: stable-4)")
         self.svc._ensure_idle(cluster)
         if channel is not None and channel != (self._summary(self._cv(cluster))["channel"]):
             self._patch_channel(cluster, channel)
