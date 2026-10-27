@@ -1001,6 +1001,10 @@ class SpokeService:
         if hub is None or self.svc.to_dict(db, hub)["status"] != "ready":
             return None
 
+        # A prior provisioning task may have failed before the hub had a chance to finish the install.  The
+        # resume task is authoritative from this point, so clear that stale terminal state before publishing it.
+        self.svc._set_status(db, cluster, "provisioning", "Resuming ACM spoke provisioning")
+
         def run(db: Session, task: Task, cluster_id: int, hub_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
                 from app.services.baremetal_service import baremetal_service
