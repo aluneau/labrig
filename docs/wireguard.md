@@ -95,6 +95,11 @@ downloads its config again, without private key.
 | Handshake OK, no ping | The member's own firewall; `ip route get <member ip>` on the laptop must say `dev wg-…`. Another network of the laptop may overlap the group CIDR or the tunnel subnet (pick another group CIDR / `WG_SUBNET_POOL`). |
 | Router side | Router console: `wg show`, `systemctl status wg-quick@wg0`, `cat /etc/wireguard/wg0.conf`. *Router* tab → *Apply again* re-pushes the config. |
 
+For a browser-only OpenShift session on a network that blocks UDP, the group's **Remote access** tab has a
+*Browser fallback when WireGuard cannot connect* section. It builds the two required `/etc/hosts` entries and an
+SSH local-forward command to the router's HTTPS listener. The original route URL, certificate and OAuth redirects
+continue to work; the tunnel stops when the SSH command exits.
+
 ## IPv6
 
 In a group with IPv6 (docs/ipv6.md) the tunnel also gets a /64 (`subnet6`): devices get `<subnet6>::<n>` and route the

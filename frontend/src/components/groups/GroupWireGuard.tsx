@@ -76,6 +76,61 @@ const Cmd: React.FC<{ id?: string; children: string }> = ({ id, children }) => (
   <ClipboardCopy id={id} isCode isReadOnly hoverTip="Copy" clickTip="Copied" style={{ marginBottom: 6 }}>{children}</ClipboardCopy>
 );
 
+const HOST_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+const SSH_USER_RE = /^[a-z_][a-z0-9_.-]*$/i;
+
+/** TCP fallback for a browser route when a laptop's UDP path cannot carry WireGuard. */
+const SshBrowserTunnel: React.FC<{ group: GroupDetail; status: WireGuardStatus }> = ({ group, status }) => {
+  const firstCluster = group.clusters.find((c) => c.type === 'openshift');
+  const defaultRoute = firstCluster ? `console-openshift-console.apps.${group.domain}` : '';
+  const [route, setRoute] = useState(defaultRoute);
+  const [sshUser, setSshUser] = useState('');
+  const validRoute = HOST_RE.test(route) && route.endsWith(`.${group.domain}`);
+  const validUser = SSH_USER_RE.test(sshUser);
+  const oauth = `oauth-openshift.apps.${group.domain}`;
+  const uplink = group.spec.router?.uplink_ip;
+  const endpoint = status.endpoint_host;
+
+  return (
+    <ExpandableSection toggleText="Browser fallback when WireGuard cannot connect" style={{ marginTop: 16 }} isIndented>
+      <p>
+        If UDP is filtered on the laptop&apos;s network, an SSH tunnel can carry an OpenShift web route over TCP instead.
+        It does not expose the cluster: the browser only reaches the router through an authenticated SSH session to this host.
+      </p>
+      {!uplink ? <Alert variant="warning" isInline title="The router uplink address is not known yet; start the group first." /> : (
+        <>
+          <Form isHorizontal style={{ maxWidth: 720, marginTop: 12 }}>
+            <FormGroup label="OpenShift route" fieldId="ssh-fallback-route" isRequired>
+              <TextInput id="ssh-fallback-route" value={route} onChange={(_e, v) => setRoute(v)}
+                placeholder={`openshift-gitops-server-openshift-gitops.apps.${group.domain}`}
+                validated={route && !validRoute ? 'error' : 'default'} />
+              <FormHelperText><HelperText><HelperTextItem>
+                Must be a route below <code>{group.domain}</code>. Include the GitOps or console hostname, not its URL path.
+              </HelperTextItem></HelperText></FormHelperText>
+            </FormGroup>
+            <FormGroup label="SSH account on this host" fieldId="ssh-fallback-user" isRequired>
+              <TextInput id="ssh-fallback-user" value={sshUser} onChange={(_e, v) => setSshUser(v)} placeholder="your-linux-user"
+                validated={sshUser && !validUser ? 'error' : 'default'} />
+            </FormGroup>
+          </Form>
+          {validRoute && validUser && (
+            <>
+              <p style={{ marginTop: 12 }}>First, add the route and OpenShift OAuth host to the laptop&apos;s <code>/etc/hosts</code>:</p>
+              <Cmd id="ssh-fallback-hosts">{`printf '%s\\n' '127.0.0.1 ${route}' '127.0.0.1 ${oauth}' | sudo tee -a /etc/hosts`}</Cmd>
+              <p>Then keep this tunnel running and open the original HTTPS URL in the browser:</p>
+              <Cmd id="ssh-fallback-command">{`sudo ssh -N -o ExitOnForwardFailure=yes -L 443:${uplink}:443 ${sshUser}@${endpoint}`}</Cmd>
+              <p style={{ fontSize: 'var(--pf-v5-global--FontSize--sm)' }}>
+                Requires SSH access to <code>{endpoint}</code>. Press Ctrl+C to stop; remove the two hosts entries afterwards.
+                The local port is 443 so OpenShift OAuth redirects keep working.
+              </p>
+            </>
+          )}
+        </>
+      )}
+    </ExpandableSection>
+  );
+};
+
 /** What to run on the laptop: connect / disconnect, and the cleanup once the device or the lab is gone */
 export const LaptopCommands: React.FC<{ conn: string; setup?: boolean; cleanup?: boolean }> = ({ conn, setup = true, cleanup = true }) => {
   const file = `${conn}.conf`;
@@ -363,6 +418,7 @@ export const GroupWireGuard: React.FC<{ group: GroupDetail; onDone: (msg: string
       <ExpandableSection toggleText="Commands on the laptop (connect, disconnect, clean up)" style={{ marginTop: 16 }} isIndented>
         <LaptopCommands conn={wgConnectionName(group.name)} />
       </ExpandableSection>
+      <SshBrowserTunnel group={group} status={status} />
 
       <AddDeviceModal group={group} status={status} isOpen={adding} onClose={() => setAdding(false)} onAdded={load} />
       <Modal variant={ModalVariant.medium} title={`Device ${shown?.peer.name || ''}`} isOpen={!!shown} onClose={() => setShown(null)}
