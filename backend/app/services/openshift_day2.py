@@ -36,6 +36,7 @@ NODE_IMAGE_TIMEOUT = 30 * 60   # oc adm node-image create: pulls the node-joiner
 JOIN_TIMEOUT = 60 * 60         # node ISO boot -> RHCOS on disk -> reboot -> kubelet Ready
 UPGRADE_TIMEOUT = 5 * 3600     # z-stream on SNO ~1 h; minor upgrades / nested rigs take longer
 RETRIEVE_TIMEOUT = 2 * 60      # new channel -> CVO fetched its updates
+SETTLE_TIMEOUT = 15 * 60       # oc adm upgrade refused while an operator is degraded (transient after node changes)
 CHANNEL_RE = re.compile(r"^(stable|fast|candidate|eus)-\d+\.\d+$")
 PERCENT_RE = re.compile(r"(\d+)% complete")
 
@@ -477,9 +478,18 @@ class OpenShiftDay2:
             args = ["adm", "upgrade", f"--to={version}"]
             if version not in info["available"]:
                 args.append("--allow-not-recommended")
-            out = openshift_service.oc(cluster.name, cluster.version, args, 120)
-            if out["exitcode"] != 0:
-                raise RuntimeError(f"oc adm upgrade refused: {(out['stderr'] or out['stdout']).strip()[-500:]}")
+            deadline = time.monotonic() + SETTLE_TIMEOUT
+            while True:
+                out = openshift_service.oc(cluster.name, cluster.version, args, 120)
+                text = (out["stderr"] or out["stdout"]).strip()
+                if out["exitcode"] == 0:
+                    break
+                # a cluster operator degraded for a moment (e.g. a node just removed): wait for it to settle
+                if "--allow-upgrade-with-warnings" not in text or time.monotonic() > deadline:
+                    raise RuntimeError(f"oc adm upgrade refused: {text[-500:]}")
+                svc._check(task, cluster, db, 1, "Waiting for the cluster to settle before upgrading: "
+                           + " ".join(text.split())[:200])
+                svc._sleep(task, 30)
             started = datetime.now(timezone.utc).isoformat()
             self._set_upgrade(db, cluster, {"target": version, "from": info["current"], "state": "running",
                                             "started": started, "message": None})
