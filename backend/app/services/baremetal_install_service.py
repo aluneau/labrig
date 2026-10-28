@@ -19,6 +19,7 @@ from app.config import settings
 from app.models.bmh import BareMetalHost, BareMetalInstall
 from app.schemas.bmh import BareMetalLinuxInstall
 from app.schemas.task import TaskCreate
+from app.services.bmc import BMCError
 from app.services.baremetal_service import baremetal_service
 from app.services.helper_service import HelperError, run_helper
 from app.services.storage_service import storage_service
