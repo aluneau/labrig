@@ -108,7 +108,15 @@ class BareMetalInstallService:
             raise RuntimeError("The privileged ISO build completed without an installer ISO")
         task_service.update_progress(db, task.id, 70)
         url = f"http://{self._host_address(host)}/bmh-install/{install.token}/installer.iso"
-        baremetal_service.client(db, host).boot_iso_once(url)
+        try:
+            bmc = baremetal_service.client(db, host)
+            bmc.boot_iso_once(url)
+            bmc.verify_power_on()
+        except BMCError as e:
+            install.status, install.status_message = "error", str(e)
+            host.status, host.status_message = "error", str(e)
+            db.commit()
+            raise RuntimeError(str(e)) from e
         install.status, install.status_message = "booting", "Installer ISO mounted; watch the BMC console"
         host.status_message = install.status_message
         db.commit(); task_service.update_progress(db, task.id, 95)

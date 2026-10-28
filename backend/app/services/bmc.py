@@ -257,6 +257,18 @@ class RedfishBMC:
                 self.wait_power(state)
             time.sleep(3)
 
+    def verify_power_on(self, settle_seconds: int = 45) -> None:
+        """Fail a handoff when the server falls back off during POST.
+
+        A successful Redfish PowerOn response only says that iDRAC accepted the
+        request.  It does not mean the machine made it through firmware POST.
+        """
+        deadline = time.monotonic() + settle_seconds
+        while time.monotonic() < deadline:
+            if (self.power_state() or "").lower() != "on":
+                raise BMCError("host powered off during firmware boot after virtual-media handoff")
+            time.sleep(3)
+
     # ---------------------------------------------------------------- boot override
 
     def set_boot_once(self, target: str = "Cd") -> None:
