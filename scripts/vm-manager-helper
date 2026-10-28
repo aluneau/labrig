@@ -85,10 +85,26 @@ def build_bmh_iso(args):
         fail(2, "invalid generated installer paths")
     if os.path.exists(output):
         fail(2, "generated installer already exists")
-    result = subprocess.run(["mkksiso", "--ks", ks, source, output], capture_output=True, text=True,
+    intermediate = output + ".mkksiso"
+    if os.path.exists(intermediate):
+        fail(2, "temporary generated installer already exists")
+    result = subprocess.run(["mkksiso", "--ks", ks, source, intermediate], capture_output=True, text=True,
                             env={"PATH": PATH, "LC_ALL": "C"}, timeout=30 * 60)
-    if result.returncode or not os.path.isfile(output):
+    if result.returncode or not os.path.isfile(intermediate):
         fail(5, "mkksiso failed: " + (result.stderr or result.stdout).strip()[-500:])
+    # mkksiso's xorriso replay drops Joliet from AlmaLinux 9 media.  Dell virtual
+    # media firmware is sensitive to that metadata even though Redfish accepts
+    # the image.  Replay the boot catalog and restore Joliet before publishing.
+    try:
+        result = subprocess.run(["xorriso", "-indev", intermediate, "-outdev", output,
+                                 "-boot_image", "any", "replay", "-joliet", "on", "-commit", "-end"],
+                                capture_output=True, text=True, env={"PATH": PATH, "LC_ALL": "C"},
+                                timeout=30 * 60)
+    finally:
+        if os.path.exists(intermediate):
+            os.unlink(intermediate)
+    if result.returncode or not os.path.isfile(output):
+        fail(5, "xorriso compatibility rebuild failed: " + (result.stderr or result.stdout).strip()[-500:])
     os.chown(output, uid, uid)
     os.chmod(output, 0o600)
     print(output)
