@@ -411,6 +411,16 @@ class OpenShiftInstaller:
             self._set_live(cluster.id, phase="booting", assisted_status=None, progress=None, hosts=[],
                            cluster_operators=[])
             if self._is_bmh(cluster):
+                # A service restart can interrupt the handoff after iDRAC has
+                # accepted virtual media but before the physical node begins
+                # booting. Do not merely wait for an agent in that case.
+                from app.services.baremetal_service import baremetal_service
+                host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
+                if host is None:
+                    raise RuntimeError("The bare-metal host was deleted")
+                if (baremetal_service.client(db, host).power_state() or "").lower() != "on":
+                    svc._check(task, cluster, db, 40, "Restarting the bare-metal host from the agent ISO")
+                    self._boot_bmh(db, cluster, (cluster.spec or {}).get("iso_path") or "")
                 svc._check(task, cluster, db, 45, "Resuming after a server restart: following the install")
                 return self._finish(db, task, cluster, list(cluster.nodes), (cluster.spec or {}).get("iso_path"))
             missing = [n.name for n in cluster.nodes if libvirt_client.get_vm(n.name) is None]
