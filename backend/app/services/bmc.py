@@ -350,14 +350,15 @@ class RedfishBMC:
         """Insert the ISO, set a one-time CD boot and (re)start the host into it — the whole provisioning
         kick in one call."""
         self.insert_media(image_url)
-        # Dell iDRAC can defer a ForceRestart and issue the power-off phase after a caller has already
-        # observed the system back on.  That leaves virtual-media installs switching themselves off.
-        # Use an ordered cold cycle instead, and only set the one-time override after the system is off.
-        if (self.power_state() or "").lower() == "on":
-            self.power_off()
-            self.wait_power_stable("Off")
         self.set_boot_once("Cd")
-        self.power_on()
+        # On Dell iDRAC, ForceOff can be acknowledged before the controller
+        # actually applies it.  A later PowerOn then races that stale request
+        # and the freshly booted node turns itself off.  Use the controller's
+        # atomic cycle when it is already on; it was the established SNO path.
+        if (self.power_state() or "").lower() == "on":
+            self.power_cycle()
+        else:
+            self.power_on()
         self.wait_power("On")
 
     def erase_disks(self) -> None:
