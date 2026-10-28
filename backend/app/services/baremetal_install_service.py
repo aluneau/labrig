@@ -134,7 +134,7 @@ class BareMetalInstallService:
             # iDRAC may acknowledge a reset before its asynchronous power
             # transition is complete.  Do not let a new virtual-media boot
             # race a delayed ForceOff from the cancelled install.
-            bmc.wait_power("Off")
+            bmc.wait_power_stable("Off")
             host.status, host.status_message = "available", None
         install.status, install.status_message = "cancelled", "Cancelled; virtual media ejected and host powered off"
         db.commit()

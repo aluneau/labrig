@@ -243,6 +243,20 @@ class RedfishBMC:
             time.sleep(3)
         raise BMCError(f"host did not reach power state {state!r} within {timeout}s")
 
+    def wait_power_stable(self, state: str, settle_seconds: int = 75) -> None:
+        """Require a reported power state to remain stable before a conflicting action.
+
+        Some iDRAC releases acknowledge ForceOff and briefly report Off before
+        the requested transition has reached the host.  Starting a new virtual
+        media boot in that window lets the old shutdown turn off the new boot.
+        """
+        self.wait_power(state)
+        deadline = time.monotonic() + settle_seconds
+        while time.monotonic() < deadline:
+            if (self.power_state() or "").lower() != state.lower():
+                self.wait_power(state)
+            time.sleep(3)
+
     # ---------------------------------------------------------------- boot override
 
     def set_boot_once(self, target: str = "Cd") -> None:
@@ -329,7 +343,7 @@ class RedfishBMC:
         # Use an ordered cold cycle instead, and only set the one-time override after the system is off.
         if (self.power_state() or "").lower() == "on":
             self.power_off()
-            self.wait_power("Off")
+            self.wait_power_stable("Off")
         self.set_boot_once("Cd")
         self.power_on()
         self.wait_power("On")
