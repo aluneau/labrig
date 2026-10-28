@@ -25,7 +25,7 @@ import {
   Spinner,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { BareMetalHost, ISOImage } from '../types';
+import { BareMetalHost, BareMetalInstallStatus, ISOImage } from '../types';
 import { bareMetalApi, storageApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { errorText } from '../utils/format';
@@ -41,6 +41,8 @@ export const BareMetalHostDetailPage: React.FC = () => {
   const navigate = useNavigate();
   const { data: host, error: loadError, loading, reload } = usePolling<BareMetalHost>(
     () => bareMetalApi.get(hostId), 15000);
+  const { data: installs, reload: reloadInstalls } = usePolling<BareMetalInstallStatus[]>(
+    () => bareMetalApi.linuxInstalls(hostId), 10000);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(Date.now());
   const [auto, setAuto] = useState(false);
@@ -53,10 +55,45 @@ export const BareMetalHostDetailPage: React.FC = () => {
   const [installDisk, setInstallDisk] = useState('/dev/sda');
   const [installUser, setInstallUser] = useState('admin');
   const [installKey, setInstallKey] = useState('');
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+
+  const activeInstall = installs?.find((install) => install.status === 'pending' || install.status === 'booting');
 
   const openLinuxInstall = async () => {
-    try { const list = await storageApi.listIsos(); setIsos(list); setInstallIso(list[0]?.name || ''); setInstallOpen(true); }
+    try {
+      const list = await storageApi.listIsos();
+      setIsos(list); setInstallIso(list[0]?.name || ''); setInstallError(null); setInstallOpen(true);
+    }
     catch (err) { setError(errorText(err)); }
+  };
+
+  const submitLinuxInstall = async () => {
+    setInstallBusy(true); setInstallError(null);
+    try {
+      await bareMetalApi.installLinux(hostId, {
+        name: installName, iso_name: installIso, target_disk: installDisk,
+        admin_username: installUser, ssh_authorized_key: installKey,
+      });
+      setInstallOpen(false);
+      await reloadInstalls();
+    } catch (err) {
+      setInstallError(errorText(err));
+    } finally {
+      setInstallBusy(false); reload();
+    }
+  };
+
+  const cancelLinuxInstall = async (install: BareMetalInstallStatus) => {
+    setInstallBusy(true); setError(null);
+    try {
+      await bareMetalApi.cancelLinuxInstall(hostId, install.id);
+      await reloadInstalls();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setInstallBusy(false); reload();
+    }
   };
 
   useEffect(() => {
@@ -177,6 +214,20 @@ export const BareMetalHostDetailPage: React.FC = () => {
           </GridItem>
           <GridItem span={12}>
             <Card>
+              <CardTitle>Linux installation</CardTitle>
+              <CardBody>
+                {activeInstall ? (
+                  <Alert variant="warning" isInline title={`Installation ${activeInstall.name} is ${activeInstall.status}`}>
+                    {activeInstall.status_message || 'Virtual media is mounted. Check the BMC console for boot progress.'}
+                    <div style={{ marginTop: 8 }}><Button variant="danger" isLoading={installBusy}
+                      isDisabled={installBusy} onClick={() => cancelLinuxInstall(activeInstall)}>Cancel installation</Button></div>
+                  </Alert>
+                ) : <span className="pf-v5-u-color-200">No Linux installation is currently active.</span>}
+              </CardBody>
+            </Card>
+          </GridItem>
+          <GridItem span={12}>
+            <Card>
               <CardTitle>Network interfaces</CardTitle>
               <CardBody>
                 <Table aria-label="NICs" variant="compact" borders={false}>
@@ -213,12 +264,16 @@ export const BareMetalHostDetailPage: React.FC = () => {
         registered. This cannot be undone.
       </ConfirmModal>
       <Modal variant={ModalVariant.medium} title={`Install Linux on ${host.name}`} isOpen={installOpen}
-        onClose={() => setInstallOpen(false)}
+        onClose={() => !installBusy && setInstallOpen(false)}
         actions={[
-          <Button key="install" isDisabled={!installName || !installIso || !installKey}
-            onClick={() => run(async () => { await bareMetalApi.installLinux(hostId, { name: installName, iso_name: installIso, target_disk: installDisk, admin_username: installUser, ssh_authorized_key: installKey }); setInstallOpen(false); })}>Generate ISO and boot</Button>,
-          <Button key="cancel" variant="link" onClick={() => setInstallOpen(false)}>Cancel</Button>,
+          <Button key="install" isLoading={installBusy} isDisabled={!installName || !installIso || !installKey || !!activeInstall || installBusy}
+            onClick={submitLinuxInstall}>Generate ISO and boot</Button>,
+          <Button key="cancel" variant="link" isDisabled={installBusy} onClick={() => setInstallOpen(false)}>Cancel</Button>,
         ]}>
+        {installError && <Alert variant="danger" isInline title={installError} style={{ marginBottom: 16 }} />}
+        {activeInstall && <Alert variant="warning" isInline title="An installation is already active" style={{ marginBottom: 16 }}>
+          Cancel {activeInstall.name} from the Linux installation panel before starting another one.
+        </Alert>}
         <Alert variant="info" isInline title="Anaconda/Kickstart installation">
           Select an AlmaLinux or CentOS Stream installer ISO from Storage. VM cloud images cannot boot directly on physical hardware. The generated virtual-media ISO erases the selected disk and creates the supplied SSH administrator.
         </Alert>
