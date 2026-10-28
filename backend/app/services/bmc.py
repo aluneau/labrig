@@ -270,9 +270,9 @@ class RedfishBMC:
         payload: Dict[str, Any] = {
             "Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": target}
         }
-        mode = boot.get("BootSourceOverrideMode")
-        if mode:
-            payload["Boot"]["BootSourceOverrideMode"] = mode
+        # Do not PATCH BootSourceOverrideMode back verbatim.  Dell iDRAC 6
+        # treats that as a persistent BIOS change and creates a ConfigBIOS
+        # job, whereas a one-time boot target must remain runtime-only.
         self._request("PATCH", self._system(), payload)
 
     def clear_boot_override(self) -> None:
