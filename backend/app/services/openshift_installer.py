@@ -1079,11 +1079,20 @@ class OpenShiftInstaller:
     def start_bmh(self, db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
         from app.services.baremetal_service import baremetal_service
         svc = self.svc
+        recovering_install = cluster.status != "ready"
         svc._set_status(db, cluster, "starting", "Powering on the bare-metal host")
         host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         if host is None:
             raise RuntimeError("The bare-metal host was deleted")
-        baremetal_service.client(db, host).power_on()
+        # A failed initial BMH install still has its agent ISO available.  A
+        # plain PowerOn would boot the disk and leave the task waiting forever
+        # for an agent that was never started; reapply virtual-media boot.
+        agent_iso = (cluster.spec or {}).get("iso_path")
+        if recovering_install and agent_iso and os.path.isfile(agent_iso):
+            svc._check(task, cluster, db, 40, "Booting the bare-metal host from the agent ISO")
+            self._boot_bmh(db, cluster, agent_iso)
+        else:
+            baremetal_service.client(db, host).power_on()
         deadline = time.monotonic() + START_TIMEOUT
         while True:
             openshift_service.approve_csrs(cluster.name, cluster.version)
