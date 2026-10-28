@@ -1026,7 +1026,12 @@ class OpenShiftInstaller:
         if host is None:
             raise RuntimeError("The bare-metal host was deleted")
         url = self._iso_url(db, cluster)
-        baremetal_service.client(db, host).boot_iso_once(url)
+        bmc = baremetal_service.client(db, host)
+        bmc.boot_iso_once(url)
+        # Redfish accepts PowerOn before the physical machine has completed
+        # POST.  Fail this task explicitly when iDRAC powers it straight back
+        # off, rather than waiting for an agent that can never register.
+        bmc.verify_power_on()
 
     def _host_curl(self, url: str, token: Optional[str]) -> Optional[Dict[str, Any]]:
         """GET `url` from the host (bare metal: the host reaches the node directly, no router guest-exec)"""
