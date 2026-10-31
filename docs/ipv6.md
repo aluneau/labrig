@@ -206,7 +206,7 @@ What the app does differently from IPv4 / dual stack:
 - **agent-config**: `rendezvousIP` = master-0's IPv6 address, `additionalNTPSources` = the router's IPv6 address.
   No static `networkConfig`: the nodes take their address from their DHCPv6 reservation like dual stack nodes
   (RHCOS NetworkManager follows the RA's M flag; default route from the RA). No `nmstatectl` needed on the host.
-- **Router**: the nodes' reservations are `ipv6_only` (`dhcp-host=<mac>,set:vmm-v6only,[<ip6>],<name>` +
+- **Router**: the nodes' reservations are `ipv6_only` (`dhcp-host=<mac>,[<ip6>],<name>` + `dhcp-mac=set:vmm-v6only,<mac>` +
   `dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6`: dnsmasq tags DHCPv6 requests `dhcpv6`, so only the nodes' DHCPv4
   requests are ignored; NetworkManager's IPv4 may fail, the connection stays up on IPv6: nothing IPv4 on `br-ex`).
   AAAA only: the IPv4 address stays reserved for its host number but is never leased nor in DNS; `api` / `api-int` / `*.apps` and

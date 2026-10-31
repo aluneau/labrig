@@ -253,7 +253,7 @@ e2e/                  Playwright browser tests against the real app (see below)
   **IPv6-only OpenShift** (`openshift.ip_family` ipv4|dual_stack|ipv6, None = from `dual_stack`; `ipv6_service.is_ipv6_only`
   / `ip_family`): ipv6 needs `disconnected` (no IPv6 internet), platform none, no MetalLB. install-config v6 entries only;
   agent-config rendezvous = master-0 v6, NTP = router v6, no networkConfig (DHCPv6 + RA; no nmstatectl on the host).
-  Node reservations `ipv6_only` (`dhcp-host=mac,set:vmm-v6only,[v6],name` + `dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6`:
+  Node reservations `ipv6_only` (`dhcp-host=mac,[v6],name` + `dhcp-mac=set:vmm-v6only,mac` + `dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6`:
   DHCPv4 ignored; AAAA only; v4 stays reserved for the host number), records
   `publish(ipv6_only=True)`, LB backends `[v6]:port` (rendered `v6:port`: haproxy's last colon = port), chrony allows the
   /64, Assisted curl `[v6]:8090`. Registry over IPv6 (every IPv6 group with the registry): haproxy `vmm-registry6`

@@ -85,7 +85,8 @@ def test_agent_config_ipv6_only():
 
 def test_dnsmasq_ipv6_only_reservation():
     conf = ELRouterBackend().dnsmasq_conf(group())
-    assert "dhcp-host=52:54:00:00:00:10,set:vmm-v6only,[fd00:1:2:3::10],c-master-0" in conf
+    assert "dhcp-host=52:54:00:00:00:10,[fd00:1:2:3::10],c-master-0" in conf
+    assert "dhcp-mac=set:vmm-v6only,52:54:00:00:00:10" in conf
     assert "dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6" in conf  # DHCPv4 only
     assert "host-record=c-master-0.g.lab,c-master-0,fd00:1:2:3::10\n" in conf
     assert "10.62.0.10," not in conf and "10.62.0.10\n" not in conf  # no IPv4 lease, no A record
