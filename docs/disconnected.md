@@ -184,6 +184,12 @@ router: mirror registry  registry.<domain>:8443  (also <router uplink IP>:8443 f
 nodes: release, operators, demo image pulled from the mirror (IDMS / ITMS, mirrored catalog)
 ```
 
+**IPv6 only** (`openshift.ip_family: ipv6`, docs/ipv6.md "IPv6-only OpenShift") requires a disconnected install: the
+nodes have no IPv4, and the host no IPv6 internet. In IPv6 groups the router's haproxy serves the registry on its
+IPv6 address too (`vmm-registry6`: TLS with Quay's certificate, forwarded to Quay over IPv4, token realm rewritten
+from `<uplink_ip>:8443` to `registry.<domain>:8443`); the IPv4 paths (host, oc-mirror, `agent create image`) are
+unchanged.
+
 What the create task does, in order:
 
 1. **Registry**: enabled on the group router (an owned change of the group spec). An auto-created group's

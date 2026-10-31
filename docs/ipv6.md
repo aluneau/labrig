@@ -176,6 +176,68 @@ reaching the IPv6 LB address (L2 and BGP) and the API over IPv6. OpenShift 4.20.
 (InternalIP v4 + v6, cluster / service networks of both families, PreferDualStack MetalLB demo with an IPv6 LB address,
 console and API answering on the router's IPv6 address).
 
+## IPv6-only OpenShift
+
+The classic customer case "single stack IPv6 cluster": OpenShift nodes, pods and Services with **no IPv4 at all**.
+
+- **API**: `"openshift": {"ip_family": "ipv6", "disconnected": true, ...}` (`ip_family`: `ipv4` default |
+  `dual_stack` = `dual_stack: true` | `ipv6`; leaving it out follows `dual_stack`). **UI**: *Create cluster* →
+  OpenShift → *IP family* → *IPv6 only* (shown for a new group or a group with IPv6; it turns *Disconnected* on).
+  **OpenTofu**: `ip_family = "ipv6"` on `vmmanager_cluster` (with `openshift = { disconnected = true }`). Create time
+  only; `GET /clusters/{id}`: `ip_family`, `nodes[].ip6`.
+- **Needs `disconnected: true`**, refused otherwise in plain words: the host has no IPv6 internet, so IPv6-only
+  nodes can't reach quay.io; the mirror registry on the router serves the release (and the add-ons' operators) over
+  IPv6. Also refused: `platform: baremetal` (would need IPv6 VIPs), MetalLB (its pools are IPv4), OKD (no
+  disconnected). The group must have IPv6 (an auto-created group gets it).
+
+```
+host --(IPv4)--> router uplink 192.168.122.x :6443 / :443 / :8443
+                    | haproxy (bind :::port v4v6) -> [node IPv6]:6443 / :443 ; registry front [::]:8443 (TLS)
+                 [ router ]  fd00:564d:4d00:4::1   DNS (AAAA), NTP (chrony allow <group /64>), mirror registry
+                    |
+                 master-0   fd00:564d:4d00:4::10/64 (static, nmstate)   no IPv4
+pods fd01::/48 (hostPrefix 64)   services fd02::/112   machine network = the group /64
+```
+
+What the app does differently from IPv4 / dual stack:
+
+- **install-config**: `machineNetwork` = the group /64 only, `clusterNetwork` `fd01::/48` (hostPrefix 64),
+  `serviceNetwork` `fd02::/112` (OVN-Kubernetes single stack IPv6).
+- **agent-config**: `rendezvousIP` = master-0's IPv6 address, `additionalNTPSources` = the router's IPv6 address,
+  and a **static nmstate `networkConfig`** per node: `<ip6>/64`, default route and DNS = the router's IPv6
+  address, search domain, **IPv4 disabled** (no DHCPv4 attempt, nothing IPv4 on `br-ex`), RAs ignored. Static
+  rather than DHCPv6: an address and route that don't depend on RA / DHCPv6 timing, in the live ISO and on disk.
+- **Router**: the nodes' reservations are `ipv6_only` (`dhcp-host=<mac>,[<ip6>],<name>`, AAAA only: the IPv4
+  address stays reserved for its host number but is never leased nor in DNS); `api` / `api-int` / `*.apps` and
+  the node names are AAAA only (the router's / the node's IPv6 address); haproxy backends are `[<node ip6>]:port`
+  (`LoadBalancerSpec.backends` accepts `[ipv6]:port`) while its front still listens on every address, so the host's
+  kubeconfig keeps `https://<uplink_ip>:6443`; chrony also `allow`s the group /64; the Assisted Service progress is
+  curled from the router at `http://[<master-0 ip6>]:8090`.
+- **Mirror registry over IPv6**: Quay's podman port is IPv4 only, and its token realm (`WWW-Authenticate`) is
+  `https://<uplink_ip>:8443/v2/auth`, an IPv4 literal an IPv6-only node can't reach. In every IPv6 group with the
+  registry on, the router's haproxy has a `vmm-registry6` front on `[::]:8443` (v6only): TLS with Quay's own
+  certificate (`/etc/haproxy/vmm-registry.pem`, written by `vmm-registry.sh`), forwarded to Quay over IPv4, realm
+  rewritten to `https://registry.<domain>:8443/v2/auth` (`registry.<domain>` has the router's AAAA). Tokens are
+  unchanged (their audience is Quay's `SERVER_HOSTNAME`). IPv4 clients (the host, `agent create image` through the
+  `<uplink_ip>:8443` mirror, oc-mirror on the router) are not affected.
+- Egress: the group is disconnected (IPv4 egress blocked, IPv6 forward rejected): nothing in the install path
+  needs anything but the router.
+
+Checks (`e2e/openshift-ipv6only.js`, `REUSE=1 KEEP=1`): node `InternalIP` IPv6 only, cluster / service networks
+IPv6 only, no IPv4 on `br-ex`, a pod pulling from the mirror (`imagePullPolicy: Always`) with an IPv6 pod IP,
+ClusterVersion Available, the console route answering through the router's uplink.
+
+```
+oc get nodes -o wide                                   # INTERNAL-IP fd00:…::10
+oc get network.config cluster -o jsonpath='{.status}'  # fd01::/48, fd02::/112
+oc debug node/<n> -- chroot /host ip -4 addr show br-ex   # nothing
+# router: the registry's IPv6 front
+curl -6 -sk https://registry.<domain>:8443/v2/ -D- | grep -i www-auth   # realm="https://registry.<domain>:8443/v2/auth"
+```
+
+Not done: MetalLB pools for IPv6-only clusters, `platform: baremetal` IPv6 VIPs, IPv6-only kubeadm, IPv6-only lab
+groups (the router keeps its IPv4 uplink and LAN address; the host reaches the cluster through them).
+
 ## Topology, API
 
 - `GET /groups/{id}`: `ip6` on the router, members and hosts; `spec.network.ipv6`.
@@ -207,6 +269,6 @@ grep -i 'routeradv\|routersol' /proc/net/snmp6
 ## Not done (next steps)
 
 - Internet over IPv6 (NAT66 / NPTv6) when the uplink network has IPv6; IPv6-only groups (no IPv4).
-- k3s dual stack (its own NAT network has no IPv6); IPv6 primary family / IPv6-only clusters; BFD on IPv6 BGP
-  sessions; OpenShift MetalLB BGP over IPv6.
-- IPv6 NTP (`chrony allow`), IPv6 DNS forwarders, IPv6 load balancer backends.
+- k3s dual stack (its own NAT network has no IPv6); IPv6 primary family; IPv6-only kubeadm (IPv6-only OpenShift:
+  done, see above); BFD on IPv6 BGP sessions; OpenShift MetalLB BGP over IPv6.
+- IPv6 DNS forwarders. (IPv6 NTP and IPv6 load balancer backends: done for IPv6-only OpenShift.)
