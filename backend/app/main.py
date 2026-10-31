@@ -177,6 +177,19 @@ def serve_agent_iso(token: str, request: Request):
     return FileResponse(str(iso), media_type="application/octet-stream", filename="agent.iso")
 
 
+@app.api_route("/bmh-install/{token}/installer.iso", methods=["GET", "HEAD"], include_in_schema=False)
+def serve_bmh_installer(token: str, request: Request):
+    """Opaque, unauthenticated virtual-media URL for one active BMC install."""
+    from app.services.baremetal_install_service import baremetal_install_service
+    with SessionLocal() as db:
+        iso = baremetal_install_service.iso_for_token(db, token)
+    if iso is None:
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    if request.method == "HEAD":
+        return Response(headers={"Content-Length": str(iso.stat().st_size), "Content-Type": "application/octet-stream", "Accept-Ranges": "bytes"})
+    return FileResponse(str(iso), media_type="application/octet-stream", filename="installer.iso")
+
+
 # Serve the built frontend (npm run build) from the same origin, if present
 _frontend = settings.FRONTEND_DIR.resolve()
 if (_frontend / "index.html").is_file():

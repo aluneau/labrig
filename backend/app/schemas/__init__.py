@@ -21,7 +21,8 @@ from app.schemas.host import (
 )
 from app.schemas.cluster import Cluster, ClusterCreate, ClusterScale, ClusterNodeOut, ClusterCommandOutput
 from app.schemas.bmh import (
-    BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalPower, BareMetalHostNic,
+    BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalPower, BareMetalHostNic, IronicImageProxyConfig, IronicImageProxyStatus,
+    BareMetalLinuxInstall, BareMetalInstallStatus,
 )
 
 __all__ = [
@@ -37,5 +38,5 @@ __all__ = [
     "HostInfo", "HostResources", "LibvirtStatus", "LibvirtUnit", "LibvirtStop", "LibvirtAction",
     "SriovStatus", "SriovPF", "SriovNumVfs",
     "Cluster", "ClusterCreate", "ClusterScale", "ClusterNodeOut", "ClusterCommandOutput",
-    "BareMetalHost", "BareMetalHostCreate", "BareMetalHostUpdate", "BareMetalPower", "BareMetalHostNic",
+    "BareMetalHost", "BareMetalHostCreate", "BareMetalHostUpdate", "BareMetalPower", "BareMetalHostNic", "IronicImageProxyConfig", "IronicImageProxyStatus", "BareMetalLinuxInstall", "BareMetalInstallStatus",
 ]

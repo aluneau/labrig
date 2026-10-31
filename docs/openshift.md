@@ -328,7 +328,10 @@ node sit on a routable lab network:
   hub too (the host resolver answers the hub's api/apps via the uplink, and the spoke's api via its node IP/VIP).
 - **Lab routing prerequisite** (not something the app can configure): the real server's data network must be able to
   reach the hub router's **uplink IP**, and vice-versa — both are on routable lab networks the vm-manager host
-  already reaches. If they are on different L2 segments, the lab's router must route between them.
+  already reaches. If they are on different L2 segments, the lab's router must route between them. The default
+  libvirt NAT uplink (`192.168.122.0/24`) is host-private and is therefore not suitable as the external Ironic
+  virtual-media address for a physical BMC; use a routed uplink, or expose a host-side TCP proxy and an OpenShift
+  version with the Provisioning CR's external-Ironic-address support.
 
 ### Multi-node bare-metal spokes (topologies)
 

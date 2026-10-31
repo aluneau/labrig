@@ -15,7 +15,7 @@ import {
   AuthStatus, ApiToken, ApiTokenCreated,
   UpdateStatus,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
-  BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo,
+  BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo, IronicImageProxyStatus, IronicImageProxyConfig, BareMetalLinuxInstall, BareMetalInstallStatus,
 } from '../types';
 import { Diagnostics, LogParams, LogResult, LogRules, PodList } from '../types/logs';
 
@@ -388,6 +388,9 @@ export const logsApi = {
 };
 
 export const bareMetalApi = {
+  imageProxy: () => request<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy'),
+  configureImageProxy: (data: IronicImageProxyConfig) => request<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy', { method: 'PUT', body: JSON.stringify(data) }),
+  disableImageProxy: () => del<IronicImageProxyStatus>('/bare-metal-hosts/image-proxy'),
   list: () => request<BareMetalHost[]>('/bare-metal-hosts'),
   get: (id: number) => request<BareMetalHost>(`/bare-metal-hosts/${id}`),
   create: (data: BareMetalHostCreate) => post<BareMetalHost>('/bare-metal-hosts', data),
@@ -399,5 +402,8 @@ export const bareMetalApi = {
   power: (id: number, action: 'on' | 'off' | 'cycle', graceful = false) =>
     post<{ power_state: string }>(`/bare-metal-hosts/${id}/power`, { action, graceful }),
   reset: (id: number, wipe = true) => post<BareMetalHost>(`/bare-metal-hosts/${id}/reset?wipe=${wipe}`),
+  installLinux: (id: number, data: BareMetalLinuxInstall) => post<Task>(`/bare-metal-hosts/${id}/linux-install`, data),
+  linuxInstalls: (id: number) => request<BareMetalInstallStatus[]>(`/bare-metal-hosts/${id}/linux-installs`),
+  cancelLinuxInstall: (id: number, installId: number) => post<BareMetalInstallStatus>(`/bare-metal-hosts/${id}/linux-installs/${installId}/cancel`),
   consoleScreenshotUrl: (id: number) => `${API_BASE}/api/v1/bare-metal-hosts/${id}/console-screenshot`,
 };

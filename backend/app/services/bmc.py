@@ -243,6 +243,32 @@ class RedfishBMC:
             time.sleep(3)
         raise BMCError(f"host did not reach power state {state!r} within {timeout}s")
 
+    def wait_power_stable(self, state: str, settle_seconds: int = 75) -> None:
+        """Require a reported power state to remain stable before a conflicting action.
+
+        Some iDRAC releases acknowledge ForceOff and briefly report Off before
+        the requested transition has reached the host.  Starting a new virtual
+        media boot in that window lets the old shutdown turn off the new boot.
+        """
+        self.wait_power(state)
+        deadline = time.monotonic() + settle_seconds
+        while time.monotonic() < deadline:
+            if (self.power_state() or "").lower() != state.lower():
+                self.wait_power(state)
+            time.sleep(3)
+
+    def verify_power_on(self, settle_seconds: int = 45) -> None:
+        """Fail a handoff when the server falls back off during POST.
+
+        A successful Redfish PowerOn response only says that iDRAC accepted the
+        request.  It does not mean the machine made it through firmware POST.
+        """
+        deadline = time.monotonic() + settle_seconds
+        while time.monotonic() < deadline:
+            if (self.power_state() or "").lower() != "on":
+                raise BMCError("host powered off during firmware boot after virtual-media handoff")
+            time.sleep(3)
+
     # ---------------------------------------------------------------- boot override
 
     def set_boot_once(self, target: str = "Cd") -> None:
@@ -256,9 +282,9 @@ class RedfishBMC:
         payload: Dict[str, Any] = {
             "Boot": {"BootSourceOverrideEnabled": "Once", "BootSourceOverrideTarget": target}
         }
-        mode = boot.get("BootSourceOverrideMode")
-        if mode:
-            payload["Boot"]["BootSourceOverrideMode"] = mode
+        # Do not PATCH BootSourceOverrideMode back verbatim.  Dell iDRAC 6
+        # treats that as a persistent BIOS change and creates a ConfigBIOS
+        # job, whereas a one-time boot target must remain runtime-only.
         self._request("PATCH", self._system(), payload)
 
     def clear_boot_override(self) -> None:
@@ -325,7 +351,15 @@ class RedfishBMC:
         kick in one call."""
         self.insert_media(image_url)
         self.set_boot_once("Cd")
-        self.power_cycle()
+        # On Dell iDRAC, ForceOff can be acknowledged before the controller
+        # actually applies it.  A later PowerOn then races that stale request
+        # and the freshly booted node turns itself off.  Use the controller's
+        # atomic cycle when it is already on; it was the established SNO path.
+        if (self.power_state() or "").lower() == "on":
+            self.power_cycle()
+        else:
+            self.power_on()
+        self.wait_power("On")
 
     def erase_disks(self) -> None:
         """Wipe the host's physical disks (decommission). Dell iDRAC only, via the OEM SystemErase action

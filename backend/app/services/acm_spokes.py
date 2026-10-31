@@ -37,6 +37,10 @@ MCE_NS = "multicluster-engine"
 CIM_TIMEOUT = 25 * 60
 DISCOVERY_TIMEOUT = 40 * 60
 INSTALL_TIMEOUT = 150 * 60
+# A physical host must remain reserved until BMO has removed its Ironic record.  In
+# particular, freeing it as soon as `oc delete bmh --wait=false` returns lets a
+# new spoke reuse the same boot MAC while Ironic still owns it.
+BMH_DELETE_TIMEOUT = 20 * 60
 
 
 def provisioner(cluster: Cluster) -> Optional[Dict[str, Any]]:
@@ -158,7 +162,11 @@ class SpokeService:
         runner.log("Hub: metal3 (Provisioning, no provisioning network) for BareMetalHosts")
         runner.apply_retry([{"apiVersion": "metal3.io/v1alpha1", "kind": "Provisioning",
                              "metadata": {"name": "provisioning-configuration"},
-                             "spec": {"provisioningNetwork": "Disabled", "watchAllNamespaces": True}}],
+                             # A physical BMC uses its management/external network for virtual media; without
+                             # this, Metal3 can select an isolated provisioning path even though no provisioning
+                             # network was configured.  This is safe for emulated BMCs too.
+                             "spec": {"provisioningNetwork": "Disabled", "virtualMediaViaExternalNetwork": True,
+                                      "watchAllNamespaces": True}}],
                            "Provisioning", timeout=5 * 60)
         scs = runner.oc_json(["get", "storageclass"], 30).get("items", [])
         if not any((sc.get("metadata", {}).get("annotations") or {}).get("storageclass.kubernetes.io/is-default-class")
@@ -1001,6 +1009,10 @@ class SpokeService:
         if hub is None or self.svc.to_dict(db, hub)["status"] != "ready":
             return None
 
+        # A prior provisioning task may have failed before the hub had a chance to finish the install.  The
+        # resume task is authoritative from this point, so clear that stale terminal state before publishing it.
+        self.svc._set_status(db, cluster, "provisioning", "Resuming ACM spoke provisioning")
+
         def run(db: Session, task: Task, cluster_id: int, hub_id: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:
                 from app.services.baremetal_service import baremetal_service
@@ -1298,10 +1310,57 @@ class SpokeService:
 
     # ------------------------------------------------------------------------------------------------ delete
 
+    @staticmethod
+    def _reserve_hosts_for_cleanup(db: Session, hosts: List[Any], cluster_name: str, reason: str) -> None:
+        """Keep physical hosts out of the allocator while hub-side teardown is incomplete.
+
+        `cluster_name` is deliberately retained.  It is the durable reservation: status alone is not enough,
+        because a BMC inventory refresh may turn an error host back into ``available``.
+        """
+        for host in hosts:
+            host.cluster_name = cluster_name
+            host.status = "provisioning"
+            host.status_message = reason
+        db.commit()
+
+    def _wait_for_bmh_deletion(self, runner: Any, cluster_name: str, bmh_names: List[str]) -> None:
+        """Wait until BMO has finalized each BMH and therefore removed its Ironic node.
+
+        Kubernetes accepting a delete is not sufficient here: a BMH stays terminating while BMO deprovisions
+        it and deletes the corresponding Ironic record.  Reusing the physical host before that point causes
+        the next BMH registration to fail with a duplicate MAC/Ironic-node conflict.
+        """
+        deadline = time.monotonic() + BMH_DELETE_TIMEOUT
+        last_pending: Optional[List[str]] = None
+        while True:
+            pending: List[str] = []
+            for bmh_name in bmh_names:
+                result = runner.oc(["get", "bmh", bmh_name, "-n", cluster_name,
+                                    "--ignore-not-found", "-o", "name"], 30)
+                if result["exitcode"] == 0:
+                    if result["stdout"].strip():
+                        pending.append(bmh_name)
+                    continue
+                # --ignore-not-found normally returns success and no output.  Any other error means we cannot
+                # prove cleanup finished, so retain the reservation rather than risking a duplicate Ironic node.
+                detail = (result.get("stderr") or result.get("stdout") or "oc get failed").strip()[-300:]
+                raise RuntimeError(f"could not verify BareMetalHost cleanup for {bmh_name}: {detail}")
+            if not pending:
+                return
+            if pending != last_pending:
+                runner.log(f"Spoke {cluster_name}: waiting for BareMetalHost cleanup ({', '.join(pending)})")
+                last_pending = pending
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"BareMetalHost cleanup for {', '.join(pending)} did not finish after "
+                                   f"{BMH_DELETE_TIMEOUT // 60} min; physical host(s) remain reserved")
+            runner.sleep(10)
+
     def release(self, db: Session, cluster: Cluster) -> None:
-        """cluster_service.delete_cluster of a spoke: its objects on the hub (no wait: the hub finishes the
-        cleanup), then free the machine. Emulated: the group's VM stays (powered off, metadata cleared).
-        Real BareMetalHost: eject media + power off + release it (NOT wiped) and restore its BMC DNS."""
+        """Delete a spoke's hub objects and release its machine.
+
+        An emulated spoke is still deleted asynchronously.  A real BareMetalHost is different: it is released
+        only after BMO finalized the BMH, which also removes the Ironic node keyed by its boot MAC.
+        """
         from app.services.baremetal_service import baremetal_service
         from app.services.cluster_service import METADATA_KEY, METADATA_URI
         hub = self.hub_of(db, cluster)
@@ -1318,6 +1377,11 @@ class SpokeService:
         removed = gitops_service.remove_spoke(cluster.name, (hub.name if hub else p.get("hub_name")))
         if removed and hub_ready and (cluster.spec or {}).get("gitops"):
             gitops_service.wait_pruned(self.acm._runner(hub), hub, cluster.name)
+        if hosts and not hub_ready:
+            reason = (f"Waiting for ACM hub {hub.name if hub else p.get('hub_name', 'unknown')} to remove "
+                      "the BareMetalHost/Ironic record")
+            self._reserve_hosts_for_cleanup(db, hosts, cluster.name, reason)
+            raise RuntimeError(reason + "; the physical host remains reserved; retry deletion when the hub is ready")
         if hub_ready:
             runner = self.acm._runner(hub)
             deletes = [["delete", "managedcluster", cluster.name],
@@ -1326,12 +1390,24 @@ class SpokeService:
                 deletes.append(["delete", "bmh", bmh_name, "-n", cluster.name])
                 if hosts:
                     deletes.append(["delete", "nmstateconfig", bmh_name, "-n", cluster.name])
-            deletes.append(["delete", "namespace", cluster.name])
             for args in deletes:
                 try:
                     runner.oc(args + ["--ignore-not-found", "--wait=false"], 60)
                 except (RuntimeError, ValueError) as e:
                     logger.warning(f"Spoke {cluster.name}: oc {' '.join(args[:2])} on {hub.name}: {e}")
+            if hosts:
+                try:
+                    self._wait_for_bmh_deletion(runner, cluster.name, bmh_names)
+                except (RuntimeError, TimeoutError) as e:
+                    reason = f"Hub cleanup pending: {e}"
+                    self._reserve_hosts_for_cleanup(db, hosts, cluster.name, reason)
+                    raise RuntimeError(reason) from e
+            # Do this only after the BMH is gone.  Although a terminating namespace also waits for BMH
+            # finalizers, keeping it alive while polling makes an interrupted cleanup retryable and diagnosable.
+            try:
+                runner.oc(["delete", "namespace", cluster.name, "--ignore-not-found", "--wait=false"], 60)
+            except (RuntimeError, ValueError) as e:
+                logger.warning(f"Spoke {cluster.name}: oc delete namespace on {hub.name}: {e}")
             # the machine is powered off below (and by the BMH delete): its klusterlet can't acknowledge the
             # addon pre-delete / ManifestWork cleanup, which kept the ManagedCluster + namespace Terminating
             self.acm.reap_lost(hub, cluster.name)

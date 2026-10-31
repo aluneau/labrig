@@ -16,12 +16,17 @@ import {
   FlexItem,
   Grid,
   GridItem,
+  FormGroup,
+  FormSelect,
+  FormSelectOption,
+  Modal,
+  ModalVariant,
   PageSection,
   Spinner,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { BareMetalHost } from '../types';
-import { bareMetalApi } from '../services/api';
+import { BareMetalHost, BareMetalInstallStatus, ISOImage } from '../types';
+import { bareMetalApi, storageApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
 import { errorText } from '../utils/format';
 import { PageHeader } from '../components/common/PageHeader';
@@ -36,11 +41,60 @@ export const BareMetalHostDetailPage: React.FC = () => {
   const navigate = useNavigate();
   const { data: host, error: loadError, loading, reload } = usePolling<BareMetalHost>(
     () => bareMetalApi.get(hostId), 15000);
+  const { data: installs, reload: reloadInstalls } = usePolling<BareMetalInstallStatus[]>(
+    () => bareMetalApi.linuxInstalls(hostId), 10000);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(Date.now());
   const [auto, setAuto] = useState(false);
   const [consoleError, setConsoleError] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const [isos, setIsos] = useState<ISOImage[]>([]);
+  const [installName, setInstallName] = useState('');
+  const [installIso, setInstallIso] = useState('');
+  const [installDisk, setInstallDisk] = useState('/dev/sda');
+  const [installUser, setInstallUser] = useState('admin');
+  const [installKey, setInstallKey] = useState('');
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+
+  const activeInstall = installs?.find((install) => install.status === 'pending' || install.status === 'booting');
+
+  const openLinuxInstall = async () => {
+    try {
+      const list = await storageApi.listIsos();
+      setIsos(list); setInstallIso(list[0]?.name || ''); setInstallError(null); setInstallOpen(true);
+    }
+    catch (err) { setError(errorText(err)); }
+  };
+
+  const submitLinuxInstall = async () => {
+    setInstallBusy(true); setInstallError(null);
+    try {
+      await bareMetalApi.installLinux(hostId, {
+        name: installName, iso_name: installIso, target_disk: installDisk,
+        admin_username: installUser, ssh_authorized_key: installKey,
+      });
+      setInstallOpen(false);
+      await reloadInstalls();
+    } catch (err) {
+      setInstallError(errorText(err));
+    } finally {
+      setInstallBusy(false); reload();
+    }
+  };
+
+  const cancelLinuxInstall = async (install: BareMetalInstallStatus) => {
+    setInstallBusy(true); setError(null);
+    try {
+      await bareMetalApi.cancelLinuxInstall(hostId, install.id);
+      await reloadInstalls();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setInstallBusy(false); reload();
+    }
+  };
 
   useEffect(() => {
     if (!auto) return;
@@ -82,6 +136,7 @@ export const BareMetalHostDetailPage: React.FC = () => {
           Install OpenShift (SNO)
         </Button>
       </FlexItem>
+      <FlexItem><Button isDisabled={busy} onClick={openLinuxInstall}>Install Linux</Button></FlexItem>
       <FlexItem>
         <Button variant="danger" isDisabled={busy} onClick={() => setConfirmReset(true)}>Reset</Button>
       </FlexItem>
@@ -159,6 +214,20 @@ export const BareMetalHostDetailPage: React.FC = () => {
           </GridItem>
           <GridItem span={12}>
             <Card>
+              <CardTitle>Linux installation</CardTitle>
+              <CardBody>
+                {activeInstall ? (
+                  <Alert variant="warning" isInline title={`Installation ${activeInstall.name} is ${activeInstall.status}`}>
+                    {activeInstall.status_message || 'Virtual media is mounted. Check the BMC console for boot progress.'}
+                    <div style={{ marginTop: 8 }}><Button variant="danger" isLoading={installBusy}
+                      isDisabled={installBusy} onClick={() => cancelLinuxInstall(activeInstall)}>Cancel installation</Button></div>
+                  </Alert>
+                ) : <span className="pf-v5-u-color-200">No Linux installation is currently active.</span>}
+              </CardBody>
+            </Card>
+          </GridItem>
+          <GridItem span={12}>
+            <Card>
               <CardTitle>Network interfaces</CardTitle>
               <CardBody>
                 <Table aria-label="NICs" variant="compact" borders={false}>
@@ -194,6 +263,26 @@ export const BareMetalHostDetailPage: React.FC = () => {
         into the Lifecycle Controller), ejects any virtual media and powers the machine off. The host stays
         registered. This cannot be undone.
       </ConfirmModal>
+      <Modal variant={ModalVariant.medium} title={`Install Linux on ${host.name}`} isOpen={installOpen}
+        onClose={() => !installBusy && setInstallOpen(false)}
+        actions={[
+          <Button key="install" isLoading={installBusy} isDisabled={!installName || !installIso || !installKey || !!activeInstall || installBusy}
+            onClick={submitLinuxInstall}>Generate ISO and boot</Button>,
+          <Button key="cancel" variant="link" isDisabled={installBusy} onClick={() => setInstallOpen(false)}>Cancel</Button>,
+        ]}>
+        {installError && <Alert variant="danger" isInline title={installError} style={{ marginBottom: 16 }} />}
+        {activeInstall && <Alert variant="warning" isInline title="An installation is already active" style={{ marginBottom: 16 }}>
+          Cancel {activeInstall.name} from the Linux installation panel before starting another one.
+        </Alert>}
+        <Alert variant="info" isInline title="Anaconda/Kickstart installation">
+          Select an AlmaLinux or CentOS Stream installer ISO from Storage. VM cloud images cannot boot directly on physical hardware. The generated virtual-media ISO erases the selected disk and creates the supplied SSH administrator.
+        </Alert>
+        <FormGroup label="Install name" isRequired fieldId="bmh-linux-name"><input id="bmh-linux-name" value={installName} onChange={(e) => setInstallName(e.target.value)} /></FormGroup>
+        <FormGroup label="Installer ISO" isRequired fieldId="bmh-linux-iso"><FormSelect id="bmh-linux-iso" value={installIso} onChange={(_e, v) => setInstallIso(v)}>{isos.map((iso) => <FormSelectOption key={iso.name} value={iso.name} label={iso.name} />)}</FormSelect></FormGroup>
+        <FormGroup label="Target disk" fieldId="bmh-linux-disk"><input id="bmh-linux-disk" value={installDisk} onChange={(e) => setInstallDisk(e.target.value)} /></FormGroup>
+        <FormGroup label="Administrator" fieldId="bmh-linux-user"><input id="bmh-linux-user" value={installUser} onChange={(e) => setInstallUser(e.target.value)} /></FormGroup>
+        <FormGroup label="SSH public key" isRequired fieldId="bmh-linux-key"><textarea id="bmh-linux-key" value={installKey} onChange={(e) => setInstallKey(e.target.value)} rows={3} style={{ width: '100%' }} /></FormGroup>
+      </Modal>
     </>
   );
 };
