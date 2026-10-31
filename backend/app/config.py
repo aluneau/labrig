@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     DEFAULT_POOL_NAME: str = "default"
     DEFAULT_POOL_PATH: str = "/var/lib/libvirt/images"
 
+    # Host resource budget checked before creating VMs / groups / clusters (services/budget.py, docs/budget.md):
+    # RAM kept for the host (MiB), vCPU overcommit ratio above which a warning is shown, and whether a
+    # lab that doesn't fit is refused (409, `force=true` overrides) or only warned about
+    BUDGET_MEMORY_RESERVE_MIB: int = 2048
+    BUDGET_VCPU_OVERCOMMIT: float = 4.0
+    BUDGET_ENFORCE: bool = True
+
     # Network attached to new VMs when none is given
     DEFAULT_NETWORK: str = "default"
 

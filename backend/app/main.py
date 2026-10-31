@@ -17,6 +17,7 @@ from app.events import event_bus
 from app.libvirt_client import libvirt_client, LibvirtUnavailable
 from app.services.daemon_service import daemon_service, DaemonError
 from app.services.helper_service import HelperError
+from app.services.budget import BudgetExceeded
 from app.services.task_service import task_service
 from app.services.cluster_service import cluster_service
 from app.services import wireguard_service, auth_service
@@ -141,6 +142,12 @@ async def libvirt_error_handler(request: Request, exc: libvirt.libvirtError):
         return JSONResponse(status_code=503, content=LIBVIRT_STOPPED)
     status = 404 if exc.get_error_code() in _NOT_FOUND_CODES else 400
     return JSONResponse(status_code=status, content={"detail": exc.get_error_message() or str(exc)})
+
+
+@app.exception_handler(BudgetExceeded)
+async def budget_exceeded_handler(request: Request, exc: BudgetExceeded):
+    """A create that doesn't fit on the host (services/budget.py): 409, force=true overrides"""
+    return JSONResponse(status_code=409, content={"detail": exc.result["message"], "budget": exc.result})
 
 
 @app.exception_handler(DaemonError)

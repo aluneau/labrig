@@ -38,6 +38,7 @@ from app.services.cluster_drivers import EL_DISTRIBUTIONS, ClusterDriver, get_dr
 from app.services.cluster_network import ClusterNetwork, GroupClusterNetwork, LibvirtClusterNetwork, free_subnet
 from app.schemas.group import IPv6Spec, ip6_for
 from app.services import ipv6_service
+from app.services import budget
 from app.services.group_service import group_service, network_name as group_network_name
 from app.services.ipv6_service import group_ip6, is_dual_stack
 from app.services.task_service import task_service
@@ -419,6 +420,8 @@ class ClusterService:
         clash = [n for n in self._node_names(data.name, data.ctlplanes, data.workers) if n in existing_vms]
         if clash:
             raise ValueError(f"VM '{clash[0]}' already exists")
+        plan = budget.plan_cluster(db, data)  # nodes (+ the auto-created group's router)
+        budget.enforce(plan["items"], plan["starting"])
 
         if driver.needs_group:
             return self._create_in_group(db, data, image)
@@ -1193,6 +1196,7 @@ class ClusterService:
                             "image": f"{image.distribution} {image.version}",
                             "el": image.distribution in EL_DISTRIBUTIONS}
             db.commit()
+        budget.enforce(budget.plan_workers(db, cluster, count))
 
         def run(db: Session, task: Task, cluster_id: int, count: int) -> Dict[str, Any]:
             def body(cluster: Cluster) -> Dict[str, Any]:

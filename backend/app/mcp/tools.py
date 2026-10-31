@@ -212,9 +212,11 @@ async def create_vm(ctx: Ctx, name: str, cloud_image: Optional[Ref] = None, iso_
                     username: Optional[str] = None, password: Optional[str] = None,
                     ssh_keys: Optional[List[str]] = None, user_data: Optional[str] = None,
                     extra_nics: Optional[List[Dict[str, Any]]] = None, iommu: bool = False,
-                    start: bool = True) -> Any:
+                    start: bool = True, force_budget: bool = False) -> Any:
     """Create a standalone VM from a cloud image (configured by cloud-init) or an ISO. For a VM inside a lab
     group use add_group_member instead (it gets a DHCP reservation and a DNS name).
+    Refused (HTTP 409, plain-words numbers) when it doesn't fit in the host's free RAM / disk: tell the user,
+    shrink it, or set force_budget only when the user asks to create anyway.
 
     Args:
         name: VM name
@@ -231,6 +233,7 @@ async def create_vm(ctx: Ctx, name: str, cloud_image: Optional[Ref] = None, iso_
         extra_nics: more NICs, e.g. [{"network": "lab2", "model": "virtio"}] (model igb for SR-IOV labs)
         iommu: add a virtual IOMMU (vfio / VF passthrough in the guest)
         start: start it right away
+        force_budget: create even when the host resource budget refuses it (only when the user asks)
     """
     body: Dict[str, Any] = {"name": name, "memory": memory_mb, "vcpu": vcpu, "disk_size": disk_gb,
                             "iso_path": iso_path, "network_name": network, "cloudinit_username": username,
@@ -239,7 +242,12 @@ async def create_vm(ctx: Ctx, name: str, cloud_image: Optional[Ref] = None, iso_
                             "start": start}
     if cloud_image is not None:
         body["cloud_image_id"] = (await _cloud_image(ctx, cloud_image))["id"]
-    return _brief_vm(await ctx.api("POST", "/vms", _clean(body)))
+    return _brief_vm(await ctx.api("POST", "/vms", _clean(body), _force(force_budget)))
+
+
+def _force(force_budget: bool) -> Dict[str, Any]:
+    """?force=true on a create: skip the host resource budget refusal (services/budget.py)"""
+    return {"force": "true"} if force_budget else {}
 
 
 async def _cloud_image(ctx: Ctx, ref: Ref) -> Dict[str, Any]:
@@ -469,8 +477,10 @@ async def get_group(ctx: Ctx, group: Ref, leases: bool = True) -> Any:
 
 
 @tool
-async def create_group(ctx: Ctx, spec: Dict[str, Any]) -> Any:
+async def create_group(ctx: Ctx, spec: Dict[str, Any], force_budget: bool = False) -> Any:
     """Create a lab group from a full GroupSpec (runs as a task; follow it with wait_for_task).
+    Refused (HTTP 409) when router + members don't fit in the host's free RAM / disk (force_budget: only
+    when the user asks to create anyway).
     Call api_describe(path_contains='/groups', method='POST') for the exact schema. Minimal example:
     {"name": "case123", "cidr": "10.42.7.0/24", "domain": "lab", "members": [{"name": "web", "image": "debian-13"}]}
     (cidr: a free /24, see list_groups / list_networks).
@@ -478,12 +488,13 @@ async def create_group(ctx: Ctx, spec: Dict[str, Any]) -> Any:
 
     Args:
         spec: the GroupSpec JSON object
+        force_budget: create even when the host resource budget refuses it
     """
-    return await ctx.api("POST", "/groups", spec)
+    return await ctx.api("POST", "/groups", spec, _force(force_budget))
 
 
 @tool
-async def add_group_member(ctx: Ctx, group: Ref, member: Dict[str, Any]) -> Any:
+async def add_group_member(ctx: Ctx, group: Ref, member: Dict[str, Any], force_budget: bool = False) -> Any:
     """Add a VM to a lab group (gets a DHCP reservation and <name>.<domain>). MemberSpec example:
     {"name": "db", "image": "almalinux-9", "memory": 2048, "vcpus": 2, "disk_size": 20}; source "iso" or
     "empty" for non cloud-init machines (api_describe '/groups/{group_id}/members' for every field).
@@ -491,9 +502,10 @@ async def add_group_member(ctx: Ctx, group: Ref, member: Dict[str, Any]) -> Any:
     Args:
         group: group name or id
         member: MemberSpec JSON object
+        force_budget: create even when the host resource budget refuses it (HTTP 409: not enough RAM / disk)
     """
     g = await _find(ctx, "groups", group)
-    return await ctx.api("POST", f"/groups/{g['id']}/members", member)
+    return await ctx.api("POST", f"/groups/{g['id']}/members", member, _force(force_budget))
 
 
 @tool
@@ -558,7 +570,7 @@ async def get_cluster(ctx: Ctx, cluster: Ref) -> Any:
 
 
 @tool
-async def create_cluster(ctx: Ctx, spec: Dict[str, Any]) -> Any:
+async def create_cluster(ctx: Ctx, spec: Dict[str, Any], force_budget: bool = False) -> Any:
     """Create a k3s, kubeadm or OpenShift cluster (runs as a task: follow it with wait_for_cluster).
     Exact schema: api_describe(path_contains='/clusters', method='POST'). Examples:
     - k3s: {"name": "k3", "type": "k3s", "workers": 2}
@@ -578,8 +590,10 @@ async def create_cluster(ctx: Ctx, spec: Dict[str, Any]) -> Any:
 
     Args:
         spec: ClusterCreate JSON object
+        force_budget: k3s / kubeadm: create even when the host resource budget refuses it (HTTP 409: the nodes
+            don't fit in the host's free RAM / disk); only when the user asks to create anyway
     """
-    return await ctx.api("POST", "/clusters", spec)
+    return await ctx.api("POST", "/clusters", spec, _force(force_budget))
 
 
 @tool

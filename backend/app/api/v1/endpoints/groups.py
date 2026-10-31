@@ -17,6 +17,7 @@ from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
 from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
 from app.schemas.group import BGPSettings, BGPStatus, GroupTopology
 from app.services.group_service import LeaseInUse, group_service
+from app.services import budget
 from app.schemas.registry import (
     REPO, TAG, ImageCopyRequest, MirrorRequest, MirrorStarted, RegistryCredentials, RegistryImages, RegistryStatus,
 )
@@ -50,10 +51,13 @@ def sync_groups(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=GroupCreateResult, status_code=202)
-def create_group(spec: GroupSpec, db: Session = Depends(get_db)):
-    """Create network + router + members. Runs as a task (router first boot takes a few minutes)."""
+def create_group(spec: GroupSpec, force: bool = Query(False, description=budget.FORCE_HELP),
+                 db: Session = Depends(get_db)):
+    """Create network + router + members. Runs as a task (router first boot takes a few minutes).
+    409 when they don't fit on the host (see POST /hosts/budget)."""
     try:
-        group, task = group_service.create_group(db, spec)
+        with budget.request(force):
+            group, task = group_service.create_group(db, spec)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"group": group_service.to_api(db, group), "task_id": task.id}
@@ -70,12 +74,16 @@ def update_group(
     group_id: int, spec: GroupSpec,
     replace_members: bool = Query(False, description="Recreate members whose image/size/cloud-init changed"),
     delete_disks: bool = Query(True, description="Delete the disks of removed members"),
+    force: bool = Query(False, description=budget.FORCE_HELP),
     db: Session = Depends(get_db),
 ):
-    """Replace the spec: members are added/removed, the router config is re-rendered and applied live"""
+    """Replace the spec: members are added/removed, the router config is re-rendered and applied live
+    (409 when new members don't fit on the host)"""
     _group_or_404(db, group_id)
     try:
-        group_service.update_group(db, group_id, spec, replace_members=replace_members, removed_disks=delete_disks)
+        with budget.request(force):
+            group_service.update_group(db, group_id, spec, replace_members=replace_members,
+                                       removed_disks=delete_disks)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _detail(db, group_id)
@@ -118,11 +126,13 @@ def stop_group(group_id: int, force: bool = Query(False), db: Session = Depends(
 
 
 @router.post("/{group_id}/members", response_model=GroupDetail, status_code=201)
-def add_member(group_id: int, member: MemberSpec, db: Session = Depends(get_db)):
-    """Add a member VM: gets a fixed MAC + reserved IP, the router is updated live"""
+def add_member(group_id: int, member: MemberSpec, force: bool = Query(False, description=budget.FORCE_HELP),
+               db: Session = Depends(get_db)):
+    """Add a member VM: gets a fixed MAC + reserved IP, the router is updated live (409 when it doesn't fit)"""
     _group_or_404(db, group_id)
     try:
-        group_service.add_member(db, group_id, member)
+        with budget.request(force):
+            group_service.add_member(db, group_id, member)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return _detail(db, group_id)

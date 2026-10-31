@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db, SessionLocal
 from app.schemas import VM, VMCreate, VMUpdate, VMDetail, VMConsole
 from app.services.vm_service import vm_service
+from app.services import budget
 
 router = APIRouter()
 
@@ -37,10 +38,12 @@ def get_vm(vm_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=VM, status_code=201)
-def create_vm(vm_data: VMCreate, db: Session = Depends(get_db)):
-    """Create a new VM"""
+def create_vm(vm_data: VMCreate, force: bool = Query(False, description=budget.FORCE_HELP),
+              db: Session = Depends(get_db)):
+    """Create a new VM (409 when it doesn't fit on the host, see POST /hosts/budget)"""
     try:
-        return vm_service.create_vm(db, vm_data)
+        with budget.request(force):
+            return vm_service.create_vm(db, vm_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
