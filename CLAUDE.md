@@ -249,7 +249,11 @@ e2e/                  Playwright browser tests against the real app (see below)
   machine/cluster/service networks (fd01::/48, fd02::/112), nodes on DHCPv6. Cluster nodes in IPv6 groups get the
   members' network-config. `network.publish(paired=True)` adds the paired AAAA (api -> router v6, nodes). MetalLB: pool
   `+ pool6` (L2: v6 twins of the v4 range; kubeadm BGP: owned `/64` announce range `<c>-metallb6` + BGPPeer
-  `lab-router6` to the router v6 with ebgpMultiHop, no BFD), demo `PreferDualStack`, `service_ip6`. e2e `kubeadm-ipv6.js`.
+  `lab-router6` to the router v6 with ebgpMultiHop; kubeadm and OpenShift share `metallb.dual_stack_pool`), demo
+  `PreferDualStack`, `service_ip6`. BFD on v6: `lab-router6` gets the BFDProfile too = multihop BFD, so the router's
+  `LAB6` gets `ebgp-multihop 2` + static `peer <v6> multihop local-address <router v6>` (`router_ipv6.frr_bfd_*`).
+  OpenShift `platform: baremetal` dual stack: `api_vip6`/`ingress_vip6` = twins of the v4 VIPs, `apiVIPs`/`ingressVIPs`
+  `[v4, v6]`, AAAA -> v6 VIPs. e2e `kubeadm-ipv6.js`, `openshift-ipv6.js`.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),

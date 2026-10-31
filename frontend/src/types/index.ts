@@ -1186,6 +1186,7 @@ export interface BFDPeer {
   remote_transmit_interval?: number | null;
   remote_detect_multiplier?: number | null;
   detect_ms?: number | null; // how long the router waits before declaring the peer down
+  multihop?: boolean; // IPv6 sessions: multihop BFD
 }
 
 export interface BGPSettings {

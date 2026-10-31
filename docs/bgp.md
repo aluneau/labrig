@@ -143,4 +143,9 @@ With IPv6 on in the group (docs/ipv6.md), FRR also runs `address-family ipv6 uni
 (peer group `LAB6`), an IPv6 announce range (`lab6`, a /64 of `IPV6_ULA_POOL`, accepted `le 128`). Members peering
 over a DHCPv6 address need `neighbor <router>::1 disable-connected-check` (the address is a /128). Example config and
 details: docs/ipv6.md.
-BFD covers the IPv4 sessions only: IPv6 sessions (`LAB6`, IPv6 neighbors) fall back to the BGP hold time.
+BFD covers the IPv6 sessions too. They are **multihop** BFD sessions (UDP 4784): a speaker on a DHCPv6 /128 peers
+with `ebgp-multihop` (MetalLB's `lab-router6` BGPPeer has `ebgpMultiHop`), so bgpd asks for a multihop session; with
+BFD on, the router's `LAB6` gets `ebgp-multihop 2` + `bfd profile vmm` and static `peer <ip6> multihop local-address
+<router>::1` entries for the lab machines (same reason as the IPv4 static peers). A member running BFD over IPv6
+uses `neighbor <router>::1 ebgp-multihop 2` (instead of `disable-connected-check`) + `neighbor <router>::1 bfd
+profile …`. `GET /groups/{id}/bgp` lists them in `bfd_peers` with `multihop: true`.

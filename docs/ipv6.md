@@ -119,7 +119,9 @@ router bgp 64513
 
 `disable-connected-check` is needed: a DHCPv6 address is a /128, so FRR doesn't see the router as "directly
 connected" and otherwise keeps the eBGP session in `Active` ("No path to specified Neighbor"). The same applies to
-MetalLB / other speakers on DHCPv6 addresses (use `ebgp-multihop 2` where there is no such knob).
+MetalLB / other speakers on DHCPv6 addresses (use `ebgp-multihop 2` where there is no such knob). With BFD on the
+router, IPv6 sessions use multihop BFD: use `neighbor <prefix>::1 ebgp-multihop 2` instead, plus `neighbor
+<prefix>::1 bfd profile …` (docs/bgp.md "IPv6").
 
 ## Dual stack clusters (kubeadm, OpenShift)
 
@@ -149,9 +151,13 @@ preflight; networkd / NetworkManager keep handling the RAs: the node keeps its d
 `EnableIPv6` + `IPv6Network` (VXLAN over IPv6 between nodes), kube-proxy dual stack. Cluster nodes in an IPv6 group
 get the members' network-config (DHCPv4 + DHCPv6 + RAs), with or without dual stack.
 
-**OpenShift** (agent-based installer, platform none only: `platform: baremetal` + dual stack is refused, its keepalived VIPs would need IPv6 ones too): `machineNetwork` = group CIDR + group /64, `clusterNetwork` and
+**OpenShift** (agent-based installer): `machineNetwork` = group CIDR + group /64, `clusterNetwork` and
 `serviceNetwork` with the IPv6 entries above (OVN-Kubernetes). The nodes take their IPv6 address from the group's
 DHCPv6 reservations (RHCOS NetworkManager follows the RA's M flag): no static `networkConfig` in agent-config.
+`platform: baremetal` (compact / HA): the API / ingress VIPs get IPv6 twins (`api_vip6` / `ingress_vip6`,
+`<prefix>::<host number>` of the IPv4 VIP: free with it, outside the dynamic DHCPv6 range); install-config
+`apiVIPs` / `ingressVIPs` = `[v4, v6]`; `api` / `api-int` / `*.apps` AAAA -> the IPv6 VIPs; the router's forwards
+(uplink :6443 / :80 / :443) stay IPv4 -> IPv4 VIPs.
 
 **DNS, API**: `api` / `api-int` (and `*.apps` for OpenShift) get an AAAA record = the router's IPv6 address, the
 nodes' names their own; haproxy listens on IPv4 and IPv6 (`bind :::port v4v6`), backends stay IPv4.
@@ -162,13 +168,16 @@ nodes' names their own; haproxy listens on IPv4 and IPv6 (`bind :::port v4v6`), 
 - **L2**: the IPv6 range is *paired* with the IPv4 one (`10.43.4.200-.207` → `<prefix>::200-<prefix>::207`): those
   IPv4 addresses are kept out of DHCP, so their IPv6 twins are free too. A node answers neighbor discovery (NDP)
   for the IPv6 address like ARP for the IPv4 one.
-- **BGP** (kubeadm): the cluster gets its own IPv6 announce range (a /64 of `IPV6_ULA_POOL`, `<cluster>-metallb6`,
-  released when MetalLB goes back to L2 or off), the pool is `<range>::10-<range>::ff`; a second `BGPPeer`
-  (`lab-router6`) peers with the router's LAN IPv6 address with `ebgpMultiHop` (a DHCPv6 address is a /128: FRR
-  wouldn't see the router as directly connected), the router installs the /128 routes with the node's global next
-  hop. No BFD on the IPv6 sessions (the router runs BFD on IPv4 sessions). OpenShift BGP mode stays IPv4.
-- The *MetalLB lab* tab adds the IPv6 checks (address from the pool, router `curl -6`), the BGP checks list the IPv6
-  sessions; the topology shows the IPv6 service address in the virtual IP box.
+- **BGP** (kubeadm and OpenShift, same code: `metallb.dual_stack_pool`): the cluster gets its own IPv6 announce
+  range (a /64 of `IPV6_ULA_POOL`, `<cluster>-metallb6`, released when MetalLB goes back to L2 or off), the pool is
+  `<range>::10-<range>::ff`; a second `BGPPeer` (`lab-router6`) peers with the router's LAN IPv6 address with
+  `ebgpMultiHop` (a DHCPv6 address is a /128: FRR wouldn't see the router as directly connected), the router
+  installs the /128 routes with the node's global next hop. With BFD (`metallb.bfd`), `lab-router6` has the same
+  `bfdProfile`: multihop BFD sessions, the router's `LAB6` is multihop too (docs/bgp.md "IPv6"). Stored with the
+  cluster: `pool6`, `range6`, `service_ip6`.
+- The *MetalLB lab* tab adds the IPv6 checks (address from the pool, router `curl -6`), the BGP / BFD checks list
+  the IPv6 sessions; the topology shows the IPv6 service address in the virtual IP box (and the IPv6 VIPs of a
+  platform baremetal cluster).
 
 Verified with `e2e/kubeadm-ipv6.js` (1 control plane + 1 worker, Debian 13): both InternalIPs, podCIDRs and podIPs
 of both families, pod → pod over IPv6 across nodes, the IPv6 ClusterIP, a member resolving `hello` to A + AAAA and
@@ -207,6 +216,5 @@ grep -i 'routeradv\|routersol' /proc/net/snmp6
 ## Not done (next steps)
 
 - Internet over IPv6 (NAT66 / NPTv6) when the uplink network has IPv6; IPv6-only groups (no IPv4).
-- k3s dual stack (its own NAT network has no IPv6); IPv6 primary family / IPv6-only clusters; BFD on IPv6 BGP
-  sessions; OpenShift MetalLB BGP over IPv6.
+- k3s dual stack (its own NAT network has no IPv6); IPv6 primary family / IPv6-only clusters.
 - IPv6 NTP (`chrony allow`), IPv6 DNS forwarders, IPv6 load balancer backends.

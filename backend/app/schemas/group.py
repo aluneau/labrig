@@ -1160,6 +1160,7 @@ class BFDPeer(BaseModel):
     remote_transmit_interval: Optional[int] = None
     remote_detect_multiplier: Optional[int] = None
     detect_ms: Optional[int] = None     # how long the router waits before declaring the peer down
+    multihop: bool = False              # IPv6 sessions: multihop BFD (UDP 4784; the speakers use ebgp-multihop)
 
 
 class BGPSession(BaseModel):

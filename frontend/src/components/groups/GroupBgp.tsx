@@ -225,7 +225,7 @@ export const GroupBgp: React.FC<{ group: GroupDetail; onDone: (msg: string) => v
             <Tbody>
               {(status.bfd_peers || []).map((p) => (
                 <Tr key={p.peer}>
-                  <Td>{p.peer}</Td>
+                  <Td>{p.peer}{p.multihop && <span style={muted} title="IPv6 session: multihop BFD (UDP 4784), the peer uses ebgp-multihop"> multihop</span>}</Td>
                   <Td>{p.name || '—'}</Td>
                   <Td>{bfdLabel(p.status)}</Td>
                   <Td>{p.detect_ms != null ? `${p.detect_ms} ms` : '—'}</Td>
