@@ -104,6 +104,8 @@ function routerLines(t: GroupTopology): Line[] {
     { text: `uplink ${r.uplink_ip || '(DHCP)'} · internet side` },
     { text: `LAN ${r.lan_ip} · lab gateway`, bold: true },
   ];
+  // IPv6-only machines reach the router on its IPv6 address only
+  if (r.lan_ip6 && t.machines.some((m) => m.ipv6_only)) lines.push({ text: `LAN ${r.lan_ip6} · IPv6 gateway` });
   if (r.tunnel_ip) lines.push({ text: `tunnel ${r.tunnel_ip} · WireGuard` });
   return lines;
 }

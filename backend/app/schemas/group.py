@@ -985,6 +985,7 @@ class GroupHostInfo(BaseModel):
     name: str
     ip: str
     ip6: Optional[str] = None
+    ipv6_only: bool = False  # IPv6-only host (IPv6-only OpenShift node): ip is reserved but never leased
     mac: str
     owner: Optional[str] = None
     fqdn: Optional[str] = None
@@ -1231,6 +1232,7 @@ class TopologyMachine(BaseModel):
     cluster: Optional[str] = None
     ip: Optional[str] = None
     ip6: Optional[str] = None
+    ipv6_only: bool = False         # IPv6-only OpenShift node: ip is None, ip6 is its only address
     mac: Optional[str] = None
     fqdn: Optional[str] = None
     state: str = "missing"
@@ -1265,6 +1267,8 @@ class TopologyCluster(BaseModel):
     service_ip: Optional[str] = None
     service_hostname: Optional[str] = None
     apps_domain: Optional[str] = None
+    dual_stack: bool = False
+    ip_family: str = "ipv4"   # ipv4 | dual_stack | ipv6
 
 
 class TopologyLoadBalancer(BaseModel):

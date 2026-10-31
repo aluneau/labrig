@@ -1361,7 +1361,7 @@ class GroupService:
             "status": group.status, "state": state, "error_message": group.error_message,
             "network_name": network_name(spec.name), "network_id": network.id if network else None,
             "router": router, "members": members, "member_count": len(members),
-            "hosts": [{"name": r.name, "ip": r.ip, "ip6": spec.ip6_of(r.ip), "mac": r.mac, "owner": r.owner, "fqdn": f"{r.name}.{spec.domain}",
+            "hosts": [{"name": r.name, "ip": r.ip, "ip6": spec.ip6_of(r.ip), "ipv6_only": r.ipv6_only, "mac": r.mac, "owner": r.owner, "fqdn": f"{r.name}.{spec.domain}",
                        "vm_id": vms[r.name].id if r.name in vms else None,
                        "state": states[r.name]["state"] if r.name in states else "missing"}
                       for r in spec.reservations],

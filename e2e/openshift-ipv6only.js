@@ -8,7 +8,8 @@
 // Long: mirror 30-90 min (release only), SNO install 40-60 min. Needs ~32 GiB free RAM.
 //   env: BASE_URL, CHROME_PATH, CLUSTER_NAME (e2e-v6o-sno), CIDR (10.62.0.0/24), VERSION, CHANNEL (stable-4.20),
 //        OC (oc binary; default: the app's cached one under OC_DATA = backend data dir), REUSE=1 (use the existing
-//        cluster of that name), KEEP=1
+//        cluster of that name), KEEP=1, TOPO_ONLY=1 (only the Topology checks on the existing cluster, any state:
+//        e.g. while it is provisioning)
 const { chromium } = require('./auth'); // playwright-core + login when the backend has authentication on
 const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -41,6 +42,41 @@ const api = async (p, opts) => {
 };
 const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const isV6 = (a) => a.includes(':');
+const TOPO_ONLY = process.env.TOPO_ONLY === '1';
+
+// Topology tab (cluster page, then the group page): the node shows its IPv6 address only, an "IPv6 only" line,
+// a tooltip saying so, no IPv4 address anywhere for it; the kubectl flow goes uplink IPv4 -> haproxy -> node IPv6
+async function topologyChecks(page, cluster, shot, tag) {
+  const node = cluster.nodes[0];
+  const topo = await api(`/groups/${cluster.group_id}/topology`);
+  const m = topo.machines.find((x) => x.name === node.name);
+  if (!m || m.ip || !m.ipv6_only || m.ip6 !== node.ip6) throw new Error(`topology machine: ${JSON.stringify(m)}`);
+  const c = topo.clusters.find((x) => x.name === cluster.name);
+  if (c?.ip_family !== 'ipv6') throw new Error(`topology cluster ip_family: ${c?.ip_family}`);
+  if (node.ip) throw new Error(`cluster API node ip ${node.ip} (IPv6 only: none expected)`);
+  for (const where of ['cluster', 'group']) {
+    await page.goto(where === 'cluster' ? `${BASE}/clusters/${cluster.id}` : `${BASE}/groups/${cluster.group_id}`);
+    await page.getByRole('tab', { name: 'Topology' }).click();
+    const svg = page.locator('#topology-svg');
+    await svg.waitFor();
+    const box = page.locator(`[data-key="m:${node.name}"]`).first();
+    await box.waitFor();
+    const text = await box.textContent();
+    if (!text.includes(node.ip6) || !/IPv6 only/.test(text)) throw new Error(`${where} topology box: ${text}`);
+    await box.hover();
+    const tip = await page.locator('#topo-tip').textContent();
+    if (!/IPv6 only/.test(tip) || /10\.\d+\.\d+\.\d+ and/.test(tip)) throw new Error(`${where} tooltip: ${tip}`);
+    await shot(`topology-${where}-${tag}`);
+    if (where === 'cluster' && topo.clusters.find((x) => x.name === cluster.name)?.api_url) {
+      await page.locator('#topo-flow').selectOption(`kubectl:${cluster.name}`);
+      await page.locator('#topo-next').click();
+      const step = await page.locator('#topo-step').textContent();
+      if (!/over IPv6/.test(step) || !step.includes(node.ip6)) throw new Error(`kubectl flow step 2: ${step}`);
+      await shot(`topology-flow-${tag}`);
+    }
+  }
+  log(`Topology (${tag}): ${node.name} ${node.ip6}, IPv6 only, kubectl flow over IPv6 (cluster + group tabs)`);
+}
 
 (async () => {
   const browser = await chromium.launch({ executablePath: CHROME, headless: true });
@@ -54,6 +90,13 @@ const isV6 = (a) => a.includes(':');
   let created = false;
 
   try {
+    if (TOPO_ONLY) {
+      const c = (await api('/clusters')).find((x) => x.name === NAME);
+      if (!c) throw new Error(`no cluster ${NAME}`);
+      await topologyChecks(page, await api(`/clusters/${c.id}`), shot, c.status);
+      ok = true;
+      return;
+    }
     // --- the create dialog: IP family radio, IPv6 only switches Disconnected on
     await page.goto(BASE + '/clusters');
     await page.getByRole('button', { name: 'Create cluster' }).click();
@@ -99,12 +142,17 @@ const isV6 = (a) => a.includes(':');
 
     // --- follow: mirror, egress, ISO, install (hours)
     let last = '';
+    let checkedTopoEarly = false;
     const deadline = Date.now() + 6 * 3600 * 1000;
     while (true) {
       cluster = await api(`/clusters/${clusterId}`);
       const msg = `${cluster.status} ${cluster.task_progress ?? ''}% ${cluster.status_message || ''}`;
       if (msg !== last) { log(msg.slice(0, 220)); last = msg; }
       if (cluster.status === 'ready' && !cluster.task_running) break;
+      if (!checkedTopoEarly && cluster.nodes.length && cluster.status === 'provisioning') {
+        await topologyChecks(page, cluster, shot, 'provisioning');  // while it installs
+        checkedTopoEarly = true;
+      }
       if (cluster.status === 'error') throw new Error(`create failed: ${cluster.status_message}`);
       if (Date.now() > deadline) throw new Error('not ready after 6 h');
       await sleep(60000);
@@ -171,6 +219,8 @@ const isV6 = (a) => a.includes(':');
     if (!/^(200|302)$/.test(curl.stdout)) throw new Error(`console via the router: HTTP ${curl.stdout} ${curl.stderr}`);
     log(`console ${consoleHost} via ${cluster.api_ip}:443: HTTP ${curl.stdout}`);
 
+    await topologyChecks(page, cluster, shot, 'ready');
+
     // --- cluster page: IPv6 only label, node address
     await page.goto(`${BASE}/clusters/${clusterId}`);
     await page.locator('#cluster-ipv6-only').waitFor();
@@ -181,7 +231,7 @@ const isV6 = (a) => a.includes(':');
     log('FAILED:', e.message);
     try { await shot('failure'); } catch { /* */ }
   } finally {
-    if (clusterId && !KEEP && (created || REUSE)) {
+    if (clusterId && !KEEP && !TOPO_ONLY && (created || REUSE)) {
       log(`deleting ${NAME}`);
       try {
         await api(`/clusters/${clusterId}`, { method: 'DELETE' });
