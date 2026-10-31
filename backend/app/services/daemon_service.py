@@ -84,15 +84,19 @@ class DaemonService:
         return blocks
 
     def _systemctl_run(self, verb: str, units: List[str]) -> None:
-        if not units:
-            return
+        # One unit per call: systemd 262 enqueues several units in one D-Bus job whose polkit check carries no
+        # "unit" detail, so the rule (which matches unit names) can't allow it ("Failed to enqueue jobs: Access denied")
+        for unit in units:
+            self._systemctl_one(verb, unit)
+
+    def _systemctl_one(self, verb: str, unit: str) -> None:
         result = subprocess.run(
-            [self._systemctl, "--no-ask-password", verb, "--", *units],
+            [self._systemctl, "--no-ask-password", verb, "--", unit],
             capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout).strip()
-            logger.error(f"systemctl {verb} {' '.join(units)} failed: {err}")
+            logger.error(f"systemctl {verb} {unit} failed: {err}")
             if "auth" in err.lower() or "polkit" in err.lower() or "access denied" in err.lower():
                 raise DaemonError(403, f"Not allowed to {verb} libvirt ({err}). Re-run scripts/setup.sh: it installs "
                                        f"the polkit rule letting the 'libvirt' group start/stop libvirt.")
