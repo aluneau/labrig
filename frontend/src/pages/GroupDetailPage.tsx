@@ -32,7 +32,7 @@ import {
   Title,
 } from '@patternfly/react-core';
 import { Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
-import { CloudImage, GroupDetail, RouterConfig } from '../types';
+import { CloudImage, GroupDetail, RouterConfig, SnapshotCreate } from '../types';
 import { groupApi, storageApi } from '../services/api';
 import { useLiveEvents } from '../hooks/useEvents';
 import { errorText, formatMiB } from '../utils/format';
@@ -53,6 +53,16 @@ import { HostBudget, budgetBlocks, useHostBudget } from '../components/common/Ho
 import { groupStatus } from './GroupsPage';
 import { Markdown } from '../components/common/Markdown';
 import { SaveTemplateModal } from '../components/groups/SaveTemplateModal';
+import { SnapshotsPanel } from '../components/snapshots/SnapshotsPanel';
+
+/** Snapshots tab: the whole lab at one instant (docs/snapshots.md) */
+const GroupSnapshots: React.FC<{ groupId: number; name: string }> = ({ groupId, name }) => {
+  const load = useCallback(() => groupApi.snapshots(groupId), [groupId]);
+  const create = useCallback((d: SnapshotCreate) => groupApi.createSnapshot(groupId, d), [groupId]);
+  const revert = useCallback((n: string) => groupApi.revertSnapshot(groupId, n), [groupId]);
+  const remove = useCallback((n: string) => groupApi.deleteSnapshot(groupId, n), [groupId]);
+  return <SnapshotsPanel kind="group" targetName={name} load={load} create={create} revert={revert} remove={remove} />;
+};
 
 /** Case guide of a group created from a template (rendered when it was created) */
 const GuideTab: React.FC<{ group: GroupDetail }> = ({ group }) => {
@@ -516,6 +526,9 @@ export const GroupDetailPage: React.FC = () => {
           </Tab>
           <Tab eventKey="bmc" title={<TabTitleText>BMC (Redfish)</TabTitleText>} id="group-tab-bmc">
             <PageSection variant="light"><GroupBmc group={group} onDone={onDone} onError={onError} /></PageSection>
+          </Tab>
+          <Tab eventKey="snapshots" title={<TabTitleText>Snapshots</TabTitleText>} id="group-tab-snapshots">
+            <PageSection variant="light"><GroupSnapshots groupId={group.id} name={group.name} /></PageSection>
           </Tab>
           <Tab eventKey="router" title={<TabTitleText>Router</TabTitleText>}>
             <PageSection variant="light"><RouterTab group={group} onError={onError} onDone={onDone} /></PageSection>

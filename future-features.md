@@ -330,7 +330,7 @@ idea as the live DHCP reservations, but with the router as the target.
 ### 2.5 Lifecycle and extras
 
 - **Start/stop the whole group** with ordering (router → infra → others) and a per-group "autostart".
-- **Snapshots**: external qcow2 snapshots of all members (`snapshotCreateXML` with disk-only + memory
+- **Snapshots** (done 2026-10-31, docs/snapshots.md): external qcow2 snapshots of all members (`snapshotCreateXML` with disk-only + memory
   optional) → "save the lab before trying the customer's fix" and revert. Effort M.
   Paused 2026-10-11 after research (logs viewer came first). Plan: **internal** qcow2 snapshots (native revert, no
   overlay chains; libvirt 12.8 / QEMU 11.1 here, app VMs are BIOS + qcow2), memory included when running; plain-words

@@ -1,7 +1,7 @@
 """API Router"""
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift, templates, logs, bmh
+from app.api.v1.endpoints import auth, vms, vm_devices, storage, networks, hosts, tasks, events, groups, clusters, openshift, templates, logs, bmh, snapshots
 
 api_router = APIRouter()
 
@@ -11,12 +11,14 @@ api_router.include_router(logs.router, tags=["logs"])
 
 # Before vms: its POST /{vm_id}/{action} would otherwise catch POST /{vm_id}/disks
 api_router.include_router(vm_devices.router, prefix="/vms", tags=["vms"])
+api_router.include_router(snapshots.vm_router, prefix="/vms", tags=["snapshots"])
 api_router.include_router(vms.router, prefix="/vms", tags=["vms"])
 api_router.include_router(storage.router, prefix="/storage", tags=["storage"])
 api_router.include_router(networks.router, prefix="/networks", tags=["networks"])
 api_router.include_router(hosts.router, prefix="/hosts", tags=["hosts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(events.router, prefix="/events", tags=["events"])
+api_router.include_router(snapshots.group_router, prefix="/groups", tags=["snapshots"])
 api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(openshift.router, prefix="/openshift", tags=["openshift"])
 api_router.include_router(openshift.cluster_router, prefix="/clusters/{cluster_id}/openshift", tags=["openshift"])

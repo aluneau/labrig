@@ -412,6 +412,9 @@ class LibvirtClient:
 
         if domain.isActive():
             domain.destroy()
+        if not delete_disks:
+            # kept disks must not carry the internal snapshots' data (unreachable once the VM is undefined)
+            self.drop_snapshots(domain)
         try:
             domain.undefineFlags(
                 libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
@@ -1301,6 +1304,149 @@ class LibvirtClient:
         net.undefine()
         logger.info(f"Deleted network {name}")
         return True
+
+    # Snapshots (internal qcow2: disks + the memory state when the VM runs; docs/snapshots.md)
+
+    def snapshot_blockers(self, name: str) -> List[str]:
+        """Plain-words reasons why this VM can't have internal snapshots (empty list = it can)"""
+        domain = self._domain(name)
+        live, config = self._xml_roots(domain)
+        reasons: List[str] = []
+        for root in [r for r in (live, config) if r is not None]:
+            os_el = root.find("os")
+            loader = os_el.find("loader") if os_el is not None else None
+            if ((os_el is not None and os_el.get("firmware") == "efi")
+                    or (loader is not None and loader.get("type") == "pflash") or root.find("./os/nvram") is not None):
+                reasons.append("it boots with UEFI firmware (its NVRAM can't be part of an internal snapshot)")
+            if (root.find("./devices/hostdev") is not None
+                    or root.find("./devices/interface[@type='hostdev']") is not None):
+                reasons.append("it has a passed-through device (an SR-IOV VF NIC or a host PCI device): "
+                               "its state lives in the hardware and can't be saved")
+            for disk in domain_xml.disk_elements(root):
+                if disk.get("device") != "disk":
+                    continue  # CD-ROMs are read-only: not part of the snapshot
+                info = domain_xml.disk_info(disk)
+                if disk.get("type") not in ("file", "volume"):
+                    reasons.append(f"disk {info['target']} is not a file ({disk.get('type')}): "
+                                   "internal snapshots need qcow2 disk files")
+                elif info["format"] != "qcow2":
+                    reasons.append(f"disk {info['target']} is {info['format'] or 'raw'}, not qcow2: "
+                                   "internal snapshots need qcow2 disks")
+        return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _snapshot_dict(snap: libvirt.virDomainSnapshot) -> Dict[str, Any]:
+        root = ET.fromstring(snap.getXMLDesc(0))
+        memory = root.find("memory")
+        created = root.findtext("creationTime")
+        meta = None
+        dom_el = root.find("domain")
+        if dom_el is not None and dom_el.find(f"./metadata/{{{VMM_NS}}}group") is not None:
+            meta = LibvirtClient._group_meta(ET.tostring(dom_el, encoding="unicode"))
+        try:
+            current = bool(snap.isCurrent(0))
+        except libvirt.libvirtError:
+            current = False
+        return {
+            "name": root.findtext("name"),
+            "description": root.findtext("description") or None,
+            "created": int(created) if created else None,
+            "state": root.findtext("state"),
+            "memory": memory is not None and memory.get("snapshot") == "internal",
+            "parent": root.findtext("./parent/name"),
+            "current": current,
+            "group_meta": meta,  # the domain's vmm:group metadata at snapshot time (router: the group spec)
+        }
+
+    def list_snapshots(self, name: str) -> List[Dict[str, Any]]:
+        """Snapshots of a VM, oldest first"""
+        snaps = []
+        for snap in self._domain(name).listAllSnapshots(0):
+            try:
+                snaps.append(self._snapshot_dict(snap))
+            except libvirt.libvirtError:
+                pass  # deleted meanwhile
+        return sorted(snaps, key=lambda s: (s["created"] or 0, s["name"]))
+
+    def has_snapshot(self, name: str, snap_name: str) -> bool:
+        try:
+            self._domain(name).snapshotLookupByName(snap_name, 0)
+            return True
+        except libvirt.libvirtError:
+            return False
+
+    def create_snapshot(self, name: str, snap_name: str, description: Optional[str] = None) -> Dict[str, Any]:
+        """Internal snapshot: disks, plus the memory state when the VM runs (or is paused)"""
+        domain = self._domain(name)
+        active = domain.isActive()
+        desc = f"<description>{escape(description)}</description>" if description else ""
+        memory = "<memory snapshot='internal'/>" if active else "<memory snapshot='no'/>"
+        xml = f"<domainsnapshot><name>{escape(snap_name)}</name>{desc}{memory}</domainsnapshot>"
+        snap = domain.snapshotCreateXML(xml, 0)
+        logger.info(f"Created snapshot {snap_name} of {name} (memory={active})")
+        self._publish_snapshot(domain, "created", snap_name)
+        return self._snapshot_dict(snap)
+
+    def revert_snapshot(self, name: str, snap_name: str, paused: bool = False, running: bool = False) -> None:
+        """Revert to a snapshot. paused / running override the state it was taken in (memory snapshots only)."""
+        domain = self._domain(name)
+        snap = domain.snapshotLookupByName(snap_name, 0)
+        flags = (libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED if paused
+                 else libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_RUNNING if running else 0)
+        try:
+            domain.revertToSnapshot(snap, flags)
+        except libvirt.libvirtError as e:
+            if e.get_error_code() != libvirt.VIR_ERR_SNAPSHOT_REVERT_RISKY:
+                raise
+            # e.g. the running VM's config changed since: the revert has to restart QEMU
+            domain.revertToSnapshot(snap, flags | libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_FORCE)
+        logger.info(f"Reverted {name} to snapshot {snap_name}")
+        self._publish_snapshot(domain, "reverted", snap_name)
+
+    def delete_snapshot(self, name: str, snap_name: str) -> None:
+        domain = self._domain(name)
+        domain.snapshotLookupByName(snap_name, 0).delete(0)
+        logger.info(f"Deleted snapshot {snap_name} of {name}")
+        self._publish_snapshot(domain, "deleted", snap_name)
+
+    @staticmethod
+    def _publish_snapshot(domain: libvirt.virDomain, event: str, snap_name: str) -> None:
+        event_bus.publish({"kind": "snapshot", "event": event, "uuid": domain.UUIDString(),
+                           "name": domain.name(), "snapshot": snap_name})
+
+    def set_guest_time(self, name: str, tolerance: float = 5.0) -> Optional[str]:
+        """Set the guest clock to the host's through the guest agent. None if it's in sync afterwards,
+        else why not (no agent, command forbidden...). qemu-ga also runs `hwclock -w`, which fails in
+        guests without hwclock although the clock was set: the clock is read back to tell."""
+        domain = self._domain(name)
+        error = None
+        for _attempt in range(5):  # the agent may need a moment after a resume
+            now = time.time()
+            try:
+                domain.setTime({"seconds": int(now), "nseconds": int((now % 1) * 1e9)}, 0)
+                return None
+            except libvirt.libvirtError as e:
+                error = e.get_error_message() or str(e)
+                try:
+                    guest_ns = self.agent_command(name, "guest-get-time", timeout=5)
+                    if guest_ns is not None and abs(guest_ns / 1e9 - time.time()) <= tolerance:
+                        return None
+                except libvirt.libvirtError:
+                    pass
+            time.sleep(2)
+        return error
+
+    def drop_snapshots(self, domain: libvirt.virDomain) -> None:
+        """Delete every snapshot of a domain (their data lives inside its qcow2 disks)"""
+        try:
+            snaps = domain.listAllSnapshots(0)
+        except libvirt.libvirtError:
+            return
+        for snap in snaps:
+            try:
+                snap.delete(0)
+            except libvirt.libvirtError as e:
+                logger.warning(f"Could not delete snapshot {snap.getName()} of {domain.name()}: {e}")
 
     # Lab groups: app metadata on domains / networks
 

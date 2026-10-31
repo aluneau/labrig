@@ -52,12 +52,14 @@ backend/app/
                       kube_exec (kubectl / oc on a cluster: one path for MCP kubectl, pod logs and the MCP oc tool),
                       acm (ACM hub add-on: operator + MultiClusterHub, sizing checks; managed cluster import / detach),
                       acm_spokes (hub provisions SNO on BMC members: metal3 + assisted service, BMH virtual media),
-                      bmc_service (sushy-tools Redfish emulator per group, supervisor) + bmc_emulator (the process)
+                      bmc_service (sushy-tools Redfish emulator per group, supervisor) + bmc_emulator (the process),
+                      snapshot_service (internal qcow2 snapshots of VMs and whole lab groups)
   api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters
                       template_service (customer-case templates: load/validate, render, create, save group as template)
   templates/          built-in customer-case templates (<id>.yaml, docs/templates.md)
   mcp/                MCP server at POST /api/mcp (docs/mcp.md): registry (signature+docstring -> schema), tools, server (JSON-RPC)
-  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates, logs
+  api/v1/endpoints/   vms (+ WebSocket /vms/{id}/vnc bridge), storage, networks, hosts, tasks, events (SSE), groups, clusters, templates, logs,
+                      snapshots (/vms|groups/{id}/snapshots, mounted before vms / groups)
   schemas/ models/    Pydantic API schemas / SQLAlchemy models
 frontend/src/
   services/api.ts     typed API client (+ vncUrl)       types/index.ts  API types (keep in sync with backend schemas)
@@ -74,6 +76,7 @@ docs/disconnected.md  egress switch + mirror registry on the router (mirror-regi
 docs/ipv6.md          dual stack groups: RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6
 docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow hop / PMTUD black hole; templates in backend/app/templates
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
+docs/snapshots.md     VM + lab group snapshots: memory included, group revert + clock sync, refusals
 docs/logs.md          log viewer + diagnostics: sources, filters, known-problems rules, pod logs, adding a rule
 docs/mcp.md           AI assistants: MCP endpoint, Claude Code / Desktop / Cursor / VS Code setup, tools
 docs/budget.md        host resource budget: services/budget.py `enforce()` once per API request (`budget.request(force)` in the create endpoints, never in tasks) -> 409 + `force=true`; dry run POST /hosts/budget (UI "Host resources" line); OpenShift keeps its own rule
@@ -348,6 +351,18 @@ e2e/                  Playwright browser tests against the real app (see below)
   `kubeadm init` (v1beta4 config, app token + certificate key, SANs = uplink/router IP + api names),
   Flannel, `kubeadm join` (`--node-name`: EL hostnames are FQDNs; control planes one at a time).
 
+- **Snapshots** (docs/snapshots.md, `snapshot_service`, components/snapshots/SnapshotsPanel): **internal** qcow2 snapshots
+  (no overlay chains): `<memory snapshot='internal'/>` when the VM is active, disks only when off; refused in plain words
+  (`libvirt_client.snapshot_blockers`) for hostdev / VF NICs, UEFI / NVRAM, raw or non-file disks. Create / revert /
+  delete are tasks (`vm_snapshot*`, `group_snapshot*`; one snapshot op per VM at a time, group snapshot tasks and
+  group start / stop exclude each other); events `{"kind":"snapshot"}`. A group snapshot = the same name on every VM of
+  the group (router, members, `reservations` = cluster nodes): suspend all, snapshot each (rollback on failure /
+  cancel), resume, `virDomainSetTime`. Revert = each VM `REVERT_PAUSED`, resume all router first, set clocks (read back:
+  qemu-ga's `hwclock -w` fails where hwclock is missing), then `group.spec` = the spec in the router snapshot's domain
+  metadata (+ member rows, WireGuard / BMC reconcile). Refused when the VM set differs from the snapshot's spec (added /
+  removed members or nodes) or a VM lacks the snapshot. VM revert of a memory snapshot uses `REVERT_RUNNING` (group
+  snapshots are taken paused). `delete_vm` with kept disks deletes the snapshots first (their data is in the qcow2).
+  Cluster rows are not snapshotted (same VM set = still consistent). No OpenTofu resource (imperative).
 - **Logs / diagnostics** (docs/logs.md, `log_service`, components/logs/): VM logs through guest-exec only (journal as
   `journalctl -o json` = real priority, `dmesg -T -x`, cloud-init, any file), pod logs through `kube_exec` (per container,
   + pod status lines and events: ImagePullBackOff never shows in a container log). ONE server-side filter for UI / API /
@@ -437,6 +452,7 @@ node acm.js                                                     # ACM hub (SNO) 
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node logs.js                                                    # logs + diagnostics: sources, filters, rules, MCP, UI (EL_IMAGE=almalinux-9 CLUSTER=<name>: EL + pod logs)
 node budget.js                                                  # host budget: dry run vs /proc/meminfo, 409 + nothing left, force, MCP, modal lines (backend with BUDGET_MEMORY_RESERVE_MIB=200000)
+node snapshots.js                                               # VM + group snapshots: memory revert (file back, clock), shut-off, refusal on added member, spec back
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host

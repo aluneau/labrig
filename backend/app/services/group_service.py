@@ -973,7 +973,8 @@ class GroupService:
     def _check_no_power_task(db: Session, group: Group) -> None:
         """A start racing a stop still waiting on a VM would power that VM off again (and vice versa)"""
         busy = db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id,
-                                     Task.type.in_(["group_start", "group_stop"]),
+                                     Task.type.in_(["group_start", "group_stop", "group_snapshot",
+                                                    "group_snapshot_revert", "group_snapshot_delete"]),
                                      Task.status.in_(["pending", "running"])).first()
         if busy is not None:
             raise ValueError(f"'{busy.name}' is still running: wait for it to finish")

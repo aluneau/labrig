@@ -2,6 +2,7 @@ import {
   VM, VMCreate, VMUpdate, VMDetail, VMPowerAction, ConsoleInfo, DeviceChange, VMBootUpdate, VMDiskCreate,
   StoragePool, StoragePoolCreate, Volume, VolumeCreate, ISOImage,
   CloudImage, CloudImageDistribution, CloudImageDownload,
+  GroupSnapshotList, SnapshotCreate, VMSnapshotList,
   Network, NetworkCreate, NetworkDetail, NetworkConfig, NetworkUpdate, DHCPHost, Task, HostInfo, HostResources, HostDnsStatus,
   HostDnsRecord, HostDnsRecordCreate,
   LeaseRelease, LibvirtStatus, LibvirtAction, LibvirtStopMode,
@@ -91,6 +92,10 @@ export const vmApi = {
     request<VM>(`/vms/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: number, deleteDisks = false) => del(`/vms/${id}?delete_disks=${deleteDisks}`),
   power: (id: number, action: VMPowerAction) => post<VM>(`/vms/${id}/${action}`),
+  snapshots: (id: number) => request<VMSnapshotList>(`/vms/${id}/snapshots`),
+  createSnapshot: (id: number, data: SnapshotCreate) => post<Task>(`/vms/${id}/snapshots`, data),
+  revertSnapshot: (id: number, name: string) => post<Task>(`/vms/${id}/snapshots/${encodeURIComponent(name)}/revert`),
+  deleteSnapshot: (id: number, name: string) => del<Task>(`/vms/${id}/snapshots/${encodeURIComponent(name)}`),
   console: (id: number) => request<ConsoleInfo>(`/vms/${id}/console`),
   setCdrom: (id: number, isoPath: string | null) =>
     request<DeviceChange>(`/vms/${id}/cdrom`, { method: 'PUT', body: JSON.stringify({ iso_path: isoPath }) }),
@@ -170,6 +175,10 @@ export const groupApi = {
   delete: (id: number, deleteDisks = true) => del(`/groups/${id}?delete_disks=${deleteDisks}`),
   start: (id: number) => post<Task>(`/groups/${id}/start`),
   stop: (id: number, force = false) => post<Task>(`/groups/${id}/stop?force=${force}`),
+  snapshots: (id: number) => request<GroupSnapshotList>(`/groups/${id}/snapshots`),
+  createSnapshot: (id: number, data: SnapshotCreate) => post<Task>(`/groups/${id}/snapshots`, data),
+  revertSnapshot: (id: number, name: string) => post<Task>(`/groups/${id}/snapshots/${encodeURIComponent(name)}/revert`),
+  deleteSnapshot: (id: number, name: string) => del<Task>(`/groups/${id}/snapshots/${encodeURIComponent(name)}`),
   addMember: (id: number, member: MemberSpec, force = false) =>
     post<GroupDetail>(`/groups/${id}/members${forceQ(force)}`, member),
   removeMember: (id: number, name: string, deleteDisks = true) =>
@@ -231,6 +240,7 @@ export const groupApi = {
 
 export const taskApi = {
   list: () => request<Task[]>('/tasks'),
+  get: (id: number) => request<Task>(`/tasks/${id}`),
   cancel: (id: number) => post(`/tasks/${id}/cancel`),
   delete: (id: number) => del(`/tasks/${id}`),
 };
