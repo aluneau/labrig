@@ -5,11 +5,13 @@
 //    IPv4 + an IPv6 ClusterIP, pod -> pod over IPv6 across nodes (Flannel VXLAN over IPv6), the IPv6 ClusterIP answers
 //  - a group member (Debian 13, created) resolves hello.<domain> to A + AAAA, curls the MetalLB IPv6 address (L2 / NDP),
 //    and reaches the API load balancer over IPv6 (api.<cluster>.<domain> AAAA -> router, haproxy v4v6)
-//  - MetalLB switched to BGP: an IPv6 announce range owned by the cluster, IPv6 sessions with the router, the member
+//  - MetalLB switched to BGP + BFD: an IPv6 announce range owned by the cluster, IPv6 sessions with the router (BFD up
+//    on both families, the IPv6 one multihop; NO_BFD=1: without BFD), the member
 //    curls the new IPv6 LB address (routed by the router); MetalLB lab checks green
 //  - delete the cluster (and its group) unless KEEP=1
 //
-// Env: BASE_URL, CLUSTER (default e2e-c-k6), IMAGE_ID (default: Debian 13), REUSE=1, KEEP=1.
+// Env: BASE_URL, CLUSTER (default e2e-c-k6), CIDR (group, default: auto), IMAGE_ID (default: Debian 13), NO_BFD=1,
+//      REUSE=1, KEEP=1.
 // Budget: router 512 MiB + control plane 2.5 GiB + worker 2 GiB + member 768 MiB.
 const L = require('./lib-router');
 const { log, sleep, guestSh, must, waitFor, api, post, put, waitTask } = L;
@@ -43,6 +45,7 @@ async function scenario(id) {
       const c = await post('/clusters', {
         name: NAME, type: 'kubeadm', ctlplanes: 1, workers: 1, cloud_image_id: img, username: 'admin', password: 'test1234',
         ctlplane: { memory: 2560, vcpu: 2, disk_size: 20 }, worker: { memory: 2048, vcpu: 2, disk_size: 20 },
+        ...(process.env.CIDR ? { cidr: process.env.CIDR } : {}),
         kubeadm: { dual_stack: true, metallb: { enabled: true, mode: 'l2', addresses: 8, demo: true } },
       });
       id = c.id;
@@ -67,6 +70,7 @@ async function scenario(id) {
     }
 
     // 3. pods + Service of both families
+    await kubectl(cluster, '-n metallb-demo wait --for=condition=Ready pod -l app=hello --timeout=300s');
     const pods = (await kjson(cluster, '-n metallb-demo get pods -l app=hello')).items;
     const podIPs = pods.map((p) => ({ name: p.metadata.name, node: p.spec.nodeName, ips: (p.status.podIPs || []).map((x) => x.ip) }));
     for (const p of podIPs) log(`pod ${p.name} on ${p.node}: ${p.ips.join(', ')}`);
@@ -125,7 +129,7 @@ async function scenario(id) {
     for (const c of s.checks) log(`check OK ${c.name}: ${c.detail}`);
 
     // 6. MetalLB BGP: IPv6 announce range + IPv6 sessions, routed by the router
-    const t = await put(`/clusters/${id}/metallb`, { enabled: true, mode: 'bgp', demo: true, addresses: 8 });
+    const t = await put(`/clusters/${id}/metallb`, { enabled: true, mode: 'bgp', bfd: !process.env.NO_BFD, demo: true, addresses: 8 });
     await waitTask(t.id || t.task_id, 15 * 60000, 'MetalLB -> BGP');
     mlb = (await api(`/clusters/${id}`)).spec.kubeadm.metallb;
     log('MetalLB BGP', JSON.stringify({ pool: mlb.pool, pool6: mlb.pool6, range6: mlb.range6, ip: mlb.service_ip, ip6: mlb.service_ip6 }));
@@ -133,6 +137,14 @@ async function scenario(id) {
     s = await scenario(id);
     for (const c of s.checks) log(`check OK ${c.name}: ${c.detail}`);
     const v6peers = (s.bgp_peers || []).filter((p) => p.afi === 'ipv6');
+    if (!process.env.NO_BFD) {
+      const b = await api(`/groups/${cluster.group_id}/bgp`);
+      const bfd6 = b.bfd_peers.filter((p) => p.peer.includes(':'));
+      log('router BFD peers', JSON.stringify(b.bfd_peers.map((p) => `${p.peer} ${p.status}${p.multihop ? ' multihop' : ''}`)));
+      if (v6peers.some((p) => p.bfd !== 'up') || bfd6.filter((p) => p.status === 'up').length < cluster.nodes.length) {
+        throw new Error(`IPv6 BFD: ${JSON.stringify(v6peers)}`);
+      }
+    }
     if (v6peers.length !== cluster.nodes.length || v6peers.some((p) => p.state !== 'Established')) {
       throw new Error(`IPv6 sessions: ${JSON.stringify(v6peers)}`);
     }

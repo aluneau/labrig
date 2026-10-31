@@ -123,19 +123,15 @@ def apply(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
             mlb["pool"] = metallb.assign_pool(network, gspec, mode, int(mlb.get("addresses") or 16),
                                               [n.ip for n in cluster.nodes], cluster.name, bool(mlb.get("bfd")))
         else:  # (re)record the pool in the group spec: idempotent, repairs a spec edited meanwhile
-            name = f"{cluster.name}-metallb"
-            if mode == "bgp":
-                network.set_bgp_range(name, mlb["pool"], bfd=bool(mlb.get("bfd")))
-            else:
-                start, end = mlb["pool"].split("-")
-                network.set_address_pool(name, start, end)
+            metallb.record_pool(network, cluster.name, mode, mlb["pool"], bool(mlb.get("bfd")))
         dual = is_dual_stack(cluster)
-        range6 = _range6(db, network, gspec, cluster.name, mlb, mode) if dual else None
-        if not dual or mode != "bgp":
+        pool6, range6 = None, None
+        if dual:
+            pool6, range6 = metallb.dual_stack_pool(db, network, cluster.name, mode, mlb["pool"], mlb.get("range6"))
+        else:
             network.remove_bgp_range(f"{cluster.name}-metallb6")
-        network.commit()
+            network.commit()
         gspec = network.spec()
-        pool6 = metallb.pool6_for(gspec, mode, mlb["pool"], range6) if dual else None
         _save(db, cluster, pool=mlb["pool"], pool6=pool6, range6=range6)
         client = _client(cluster, task, db)
         client.install()
@@ -161,24 +157,6 @@ def apply(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
         raise
     final = _save(db, cluster, state="done", message=None)
     return {"metallb": {k: final.get(k) for k in ("mode", "pool", "pool6", "service_ip", "service_ip6", "hostname")}}
-
-
-def _range6(db: Session, network: GroupClusterNetwork, gspec: Any, cluster_name: str, mlb: Dict[str, Any],
-            mode: str) -> Optional[str]:
-    """Dual stack, bgp mode: the cluster's IPv6 announce range (a /64 of IPV6_ULA_POOL, owned by the cluster,
-    kept across applies). l2: None (the IPv6 pool is paired with the IPv4 one, on the group network)."""
-    if mode != "bgp":
-        return None
-    from app.services import ipv6_service
-    name = f"{cluster_name}-metallb6"
-    owner = f"cluster:{cluster_name}"
-    bgp = gspec.router.bgp
-    current = next((r.prefix for r in (bgp.announce_ranges if bgp else []) if r.owner == owner and r.name == name),
-                   None) or mlb.get("range6")
-    if not current:
-        current = ipv6_service.free_64(ipv6_service.used_v6(db, None, ""))
-    network.set_bgp_range(name, current)
-    return current
 
 
 def remove(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:

@@ -150,11 +150,14 @@ def _ms(value: Any) -> Optional[int]:
 
 
 def parse_bfd(data: Any) -> List[Dict[str, Any]]:
-    """`show bfd peers json` -> [{peer, status, uptime_seconds, ...}] (single-hop IPv4 sessions)"""
+    """`show bfd peers json` -> [{peer, status, uptime_seconds, ..., multihop}] (IPv4 single-hop sessions,
+    IPv6 multihop ones)"""
     peers = []
     for p in data if isinstance(data, list) else []:
         ip = p.get("peer")
-        if not ip or not _is_ipv4(ip):
+        try:
+            ipaddress.ip_address(ip or "")
+        except ValueError:
             continue
         rx, tx = _ms(p.get("receive-interval")), _ms(p.get("transmit-interval"))
         rrx, rtx = _ms(p.get("remote-receive-interval")), _ms(p.get("remote-transmit-interval"))
@@ -169,9 +172,9 @@ def parse_bfd(data: Any) -> List[Dict[str, Any]]:
             "diagnostic": p.get("diagnostic") if p.get("diagnostic") not in (None, "ok") else None,
             "detect_multiplier": _ms(p.get("detect-multiplier")), "receive_interval": rx, "transmit_interval": tx,
             "remote_receive_interval": rrx, "remote_transmit_interval": rtx, "remote_detect_multiplier": rmult,
-            "detect_ms": detect,
+            "detect_ms": detect, "multihop": bool(p.get("multihop")),
         })
-    peers.sort(key=lambda x: ipaddress.IPv4Address(x["peer"]))
+    peers.sort(key=lambda x: (ipaddress.ip_address(x["peer"]).version, ipaddress.ip_address(x["peer"])))
     return peers
 
 

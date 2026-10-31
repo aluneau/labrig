@@ -154,7 +154,8 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
         if os_spec.get("platform") == "baremetal":  # keepalived VIPs inside the cluster (which node holds them: not read)
             for kind, host in (("api", f"api.{zone}"), ("ingress", f"*.apps.{zone}")):
                 if os_spec.get(f"{kind}_vip"):
-                    vips.append({"address": os_spec[f"{kind}_vip"], "kind": f"vip-{kind}", "name": kind,
+                    vips.append({"address": os_spec[f"{kind}_vip"], "address6": os_spec.get(f"{kind}_vip6"),
+                                 "kind": f"vip-{kind}", "name": kind,
                                  "hostname": host, "cluster": c.name, "via": []})
         if not ip:
             continue

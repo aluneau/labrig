@@ -46,8 +46,9 @@ Typical times on a desktop: ISO 3–5 min (first time per release: + base ISO ex
 
 **IPv6 dual stack** (`openshift.dual_stack: true`, create only; UI switch *IPv6 dual stack*, OpenTofu `dual_stack`): the
 group needs IPv6 (an auto-created group gets it); install-config adds the group /64 to `machineNetwork`, `fd01::/48`
-(hostPrefix 64) and `fd02::/112`; `api` / `*.apps` get AAAA records; MetalLB L2 an IPv6 range. See docs/ipv6.md
-"Dual stack clusters".
+(hostPrefix 64) and `fd02::/112`; `api` / `*.apps` get AAAA records; MetalLB an IPv6 range (L2: the twins of the
+IPv4 pool; BGP: an IPv6 announce /64 + IPv6 sessions, BFD included); platform baremetal: IPv6 twins of the VIPs.
+See docs/ipv6.md "Dual stack clusters".
 
 ## Reaching the cluster
 
@@ -95,9 +96,14 @@ in-cluster haproxy / the router pods serve them.
   `https://<router uplink IP>:6443` and the host's `/etc/hosts` lines keep pointing at the uplink.
 - install-config: `platform.baremetal.apiVIPs` / `ingressVIPs` (no hosts / provisioning network: the agent config
   carries the hosts).
+- **Dual stack** (`dual_stack: true`): each VIP gets its IPv6 twin (`api_vip6` / `ingress_vip6` = `<group
+  prefix>::<host number>`, read back in `spec.openshift`; free because the IPv4 VIP is kept out of DHCP, and outside
+  the dynamic DHCPv6 range `::dc:0-ffff`). `apiVIPs` / `ingressVIPs` are two-element lists, IPv4 first (primary
+  family); `api` / `api-int` / `*.apps` get AAAA records -> the IPv6 VIPs. The router's forwards stay IPv4 (uplink
+  -> IPv4 VIPs).
 
-Verified so far: rendered configs and `openshift-install agent create image` for a compact cluster; a full compact /
-HA install with VIPs is still to be run (3 × 16 GiB masters).
+Verified so far: rendered configs and `openshift-install agent create image` for a compact cluster (IPv4 and dual
+stack, 4.20.41); a full compact / HA install with VIPs is still to be run (3 × 16 GiB masters).
 
 ## Add-ons
 
@@ -124,6 +130,8 @@ Chosen at creation, or later from the cluster's *Operators* tab:
   outside the group network (an announce range of the router, see [bgp.md](bgp.md)), `BGPPeer` to the router
   (AS 64513 → 64512) + `BGPAdvertisement`. Switch day 2 with the *MetalLB lab* tab's **Switch to BGP/L2 mode**
   (the demo Service gets an address of the new pool and `hello.<domain>` follows; re-download WireGuard configs).
+  Dual stack clusters: + an IPv6 pool, and in bgp mode an IPv6 announce /64 and a second `BGPPeer` `lab-router6`
+  (docs/ipv6.md).
 
 ## Scenario: MetalLB L2 lab
 

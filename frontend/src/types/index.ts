@@ -1186,6 +1186,7 @@ export interface BFDPeer {
   remote_transmit_interval?: number | null;
   remote_detect_multiplier?: number | null;
   detect_ms?: number | null; // how long the router waits before declaring the peer down
+  multihop?: boolean; // IPv6 sessions: multihop BFD
 }
 
 export interface BGPSettings {
@@ -1287,6 +1288,8 @@ export interface TopologyCluster {
   metallb_mode?: 'l2' | 'bgp' | null;
   metallb_pool?: string | null;
   service_ip?: string | null;
+  service_ip6?: string | null; // dual stack: the demo Service's IPv6 address
+  dual_stack?: boolean;
   service_hostname?: string | null;
 }
 

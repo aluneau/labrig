@@ -9,7 +9,8 @@ spec.ipv6_prefix() is None. router_service calls these at a few hook points:
     sysctl    net.ipv6.conf.all.forwarding = 1
     NM        the LAN connection gets <prefix>::1/64 (cloud-init network-config at creation, nmcli on
               pushes, so IPv6 can be switched on / off on a running group)
-    FRR       address-family ipv6 unicast (dynamic IPv6 neighbors, IPv6 announce ranges, le 128)
+    FRR       address-family ipv6 unicast (dynamic IPv6 neighbors, IPv6 announce ranges, le 128), BFD on
+              the IPv6 sessions (multihop)
     WireGuard IPv6 tunnel address + device /128s
 """
 import ipaddress
@@ -171,6 +172,31 @@ def frr_listen(spec: GroupSpec, remote: str) -> List[str]:
         return []
     return [" neighbor LAB6 peer-group", f" neighbor LAB6 remote-as {remote}",
             f" bgp listen range {net} peer-group LAB6"]
+
+
+def frr_bfd_peers(spec: GroupSpec, known4: List[str], profile: str) -> List[str]:
+    """BFD on: static multihop BFD sessions with the IPv6 twins of the known lab addresses (inside bfdd's `bfd`
+    block). IPv6 BGP sessions are multihop on the speakers' side (a DHCPv6 address is a /128: MetalLB peers with
+    ebgpMultiHop), so their BFD session is multihop (UDP 4784) and LAB6 is multihop here too (frr_bfd_neighbors);
+    static like the IPv4 ones: a dynamic peer only gets its BFD session once BGP is up"""
+    r6 = router_ip6(spec)
+    if r6 is None:
+        return []
+    lines: List[str] = []
+    for ip in known4:
+        ip6 = spec.ip6_of(ip)
+        if ip6:
+            lines += [f" peer {ip6} multihop local-address {r6}", f"  profile {profile}", " exit"]
+    return lines
+
+
+def frr_bfd_neighbors(spec: GroupSpec, peers: List[str], profile: str) -> List[str]:
+    """BFD on: `router bgp` lines for the IPv6 peers (LAB6 + explicit IPv6 neighbors). LAB6 gets ebgp-multihop
+    so that bgpd asks for multihop BFD sessions, matching the speakers' (see frr_bfd_peers)"""
+    if prefix(spec) is None:
+        return []
+    lines = [" neighbor LAB6 ebgp-multihop 2"] if "LAB6" in peers else []
+    return lines + [f" neighbor {p} bfd profile {profile}" for p in peers]
 
 
 def frr_address_family(spec: GroupSpec, peers: List[str], maximum_paths: int) -> List[str]:

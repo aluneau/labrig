@@ -8,7 +8,7 @@ kubeadm: MetalLBClient.kube()).
   ARP for each service IP.
 - bgp: the pool is a /27 of BGP_ANNOUNCE_POOL, an announce range of the group router owned by the cluster;
   every node's speaker peers with the router LAN IP (AS 64513 -> 64512) and announces the service IPs
-  (ECMP). With BFD on the router, the BGPPeer gets a BFDProfile with the router's timers: a dead node's
+  (ECMP). Dual stack: + an IPv6 /64 announce range and a second BGPPeer to the router's IPv6 address. With BFD on the router, the BGPPeer gets a BFDProfile with the router's timers: a dead node's
   routes are withdrawn in well under a second instead of the 30 s hold time.
 - demo: a hello Deployment (2 replicas, answers with its pod and node) + LoadBalancer Service, published
   as hello.<group domain> on the router's DNS.
@@ -48,7 +48,8 @@ def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None,
     """IPAddressPool + L2Advertisement (l2) or BGPPeer (+ BFDProfile) + BGPAdvertisement (bgp).
     pool6 (dual stack): the pool's IPv6 range too; in bgp mode a second BGPPeer to the router's IPv6
     address (IPv6 routes over an IPv6 session; ebgpMultiHop: the nodes' DHCPv6 address is a /128, so FRR
-    wouldn't see the router as directly connected; no BFD on it: the router runs BFD on IPv4 sessions only).
+    wouldn't see the router as directly connected). With BFD it uses the same BFDProfile: a multihop BFD
+    session (UDP 4784), the router's IPv6 peers are multihop too (router_service.frr_conf).
     Returns (manifests to apply, [kind, name] of the other mode's objects to delete afterwards)."""
     meta = lambda name: {"name": name, "namespace": NAMESPACE}  # noqa: E731
     manifests: List[Dict[str, Any]] = [
@@ -72,8 +73,7 @@ def config_manifests(pool: str, mode: str, bgp: Optional[Dict[str, Any]] = None,
         else:
             stale.append(["bfdprofiles.metallb.io", BFD_PROFILE])  # after the peer stopped using it
         if pool6 and bgp.get("router_ip6"):
-            peer6 = {k: v for k, v in peer.items() if k != "bfdProfile"}
-            peer6.update(peerAddress=bgp["router_ip6"], ebgpMultiHop=True)
+            peer6 = dict(peer, peerAddress=bgp["router_ip6"], ebgpMultiHop=True)
             manifests.append({"apiVersion": "metallb.io/v1beta2", "kind": "BGPPeer", "metadata": meta(PEER6_NAME),
                               "spec": peer6})
         else:
@@ -191,8 +191,50 @@ def assign_pool(network: Any, gspec: Any, mode: str, size: int, node_ips: List[s
     pool = pick_l2_pool(gspec, size, node_ips)
     start, end = pool.split("-")
     network.remove_bgp_range(name)
+    network.remove_bgp_range(f"{name}6")  # dual stack: the IPv6 announce range goes with the IPv4 one
     network.set_address_pool(name, start, end)
     return pool
+
+
+def record_pool(network: Any, cluster_name: str, mode: str, pool: str, bfd: bool = False) -> None:
+    """(Re)record an assigned pool in the group spec (queued, applied by commit()): idempotent, repairs a spec
+    edited meanwhile; the other mode's entry is dropped"""
+    name = f"{cluster_name}-metallb"
+    if mode == "bgp":
+        network.remove_address_pool(name)
+        network.set_bgp_range(name, pool, bfd=bfd)
+    else:
+        start, end = pool.split("-")
+        network.remove_bgp_range(name)
+        network.set_address_pool(name, start, end)
+
+
+def assign_range6(db: Any, network: Any, gspec: Any, cluster_name: str, previous: Optional[str] = None) -> str:
+    """Dual stack, bgp mode: the cluster's IPv6 announce range (a /64 of IPV6_ULA_POOL, `<cluster>-metallb6`,
+    owned by the cluster, kept across applies; `previous` = the one stored with the cluster). Queued on the
+    network like assign_pool (applied by its commit())."""
+    from app.services import ipv6_service
+    name = f"{cluster_name}-metallb6"
+    owner = f"cluster:{cluster_name}"
+    bgp = gspec.router.bgp
+    current = next((r.prefix for r in (bgp.announce_ranges if bgp else []) if r.owner == owner and r.name == name),
+                   None) or previous
+    if not current:
+        current = ipv6_service.free_64(ipv6_service.used_v6(db, None, ""))
+    network.set_bgp_range(name, current)
+    return current
+
+
+def dual_stack_pool(db: Any, network: Any, cluster_name: str, mode: str, pool: str,
+                    previous_range6: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    """Dual stack cluster: (pool6, range6) for `mode`, the group spec updated and committed: bgp = an owned IPv6
+    announce range (assign_range6) and a pool in it; l2 = the IPv6 twins of the IPv4 pool, no IPv6 range.
+    Shared by kubeadm (kubeadm_metallb.apply) and OpenShift (the MetalLB add-on)."""
+    range6 = assign_range6(db, network, network.spec(), cluster_name, previous_range6) if mode == "bgp" else None
+    if range6 is None:
+        network.remove_bgp_range(f"{cluster_name}-metallb6")
+    network.commit()
+    return pool6_for(network.spec(), mode, pool, range6), range6
 
 
 def demo_hostname(gspec: Any, cluster_name: str) -> str:
@@ -434,7 +476,8 @@ def _bgp_checks(cluster: Any, group: Any, ip: str, result: Dict[str, Any], clien
         v6 = group_ip6(group.spec)
         for n in cluster.nodes:
             ip6 = ip6_for(n.ip, *v6) if v6 else None
-            peers.append({"node": n.name, "ip": ip6, "afi": "ipv6", "bfd": None,
+            peers.append({"node": n.name, "ip": ip6, "afi": "ipv6",
+                          "bfd": (bfd_peers.get(ip6) or {}).get("status") if result.get("bfd") else None,
                           "state": (sessions.get(ip6) or {}).get("state", "no session")})
     result["bgp_peers"] = peers
     up = [p for p in peers if p["state"] == "Established"]
@@ -442,12 +485,12 @@ def _bgp_checks(cluster: Any, group: Any, ip: str, result: Dict[str, Any], clien
                    "detail": f"{len(up)}/{len(peers)} Established"
                    + "".join(f"; {p['node']}: {p['state']}" for p in peers if p["state"] != "Established")})
     if result.get("bfd"):
-        v4_peers = [p for p in peers if p.get("afi") != "ipv6"]
-        bfd_up = [p for p in v4_peers if p["bfd"] == "up"]
+        bfd_up = [p for p in peers if p["bfd"] == "up"]
         profile = client.bfd_profile()
-        detect = [p.get("detect_ms") for p in bfd_peers.values() if p.get("detect_ms")]
-        checks.append({"name": "BFD watches every session (fast failover)", "ok": len(bfd_up) == len(v4_peers) and bool(profile),
-                       "detail": (f"{len(bfd_up)}/{len(v4_peers)} up" + (f", a dead node is detected in {max(detect)} ms" if detect else "")
+        mine = {p["ip"] for p in peers}  # the cluster's sessions (not other lab machines' static BFD peers)
+        detect = [p.get("detect_ms") for ip, p in bfd_peers.items() if ip in mine and p.get("detect_ms")]
+        checks.append({"name": "BFD watches every session (fast failover)", "ok": len(bfd_up) == len(peers) and bool(profile),
+                       "detail": (f"{len(bfd_up)}/{len(peers)} up" + (f", a dead node is detected in {max(detect)} ms" if detect else "")
                                   + ("" if profile else "; the BGPPeer has no BFD profile: switch the mode again to apply it"))})
     route = next((r for r in status.get("routes") or [] if r["prefix"] == f"{ip}/32"), None)
     names = {n.ip: n.name for n in cluster.nodes}

@@ -1160,6 +1160,7 @@ class BFDPeer(BaseModel):
     remote_transmit_interval: Optional[int] = None
     remote_detect_multiplier: Optional[int] = None
     detect_ms: Optional[int] = None     # how long the router waits before declaring the peer down
+    multihop: bool = False              # IPv6 sessions: multihop BFD (UDP 4784; the speakers use ebgp-multihop)
 
 
 class BGPSession(BaseModel):
@@ -1237,7 +1238,8 @@ class TopologyMachine(BaseModel):
 class TopologyVip(BaseModel):
     """A floating address: a service IP (MetalLB) or a BGP-learned prefix"""
     address: str                    # 10.45.0.1 or 10.45.0.0/27
-    kind: str                       # metallb-l2 | metallb-bgp | bgp-route
+    address6: Optional[str] = None  # dual stack: the Service's IPv6 address / the IPv6 twin of a baremetal VIP
+    kind: str                       # metallb-l2 | metallb-bgp | vip-api | vip-ingress | bgp-route
     name: Optional[str] = None      # e.g. hello
     hostname: Optional[str] = None  # hello.<domain>
     cluster: Optional[str] = None
@@ -1257,6 +1259,8 @@ class TopologyCluster(BaseModel):
     metallb_mode: Optional[str] = None   # l2 | bgp
     metallb_pool: Optional[str] = None
     service_ip: Optional[str] = None
+    service_ip6: Optional[str] = None    # dual stack: the demo Service's IPv6 address
+    dual_stack: bool = False
     service_hostname: Optional[str] = None
     apps_domain: Optional[str] = None
 

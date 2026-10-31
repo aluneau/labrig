@@ -315,6 +315,7 @@ class ELRouterBackend(RouterBackend):
                            key=ipaddress.IPv4Address)
             for ip in known:
                 lines += [f" peer {ip} local-address {spec.router.ip}", f"  profile {BFD_PROFILE}", " exit"]
+            lines += v6.frr_bfd_peers(spec, [str(ip) for ip in known], BFD_PROFILE)
             lines += ["exit", "!"]
         remote = str(bgp.peer_asn) if bgp.peer_asn else "external"
         lines += [f"router bgp {bgp.asn}",
@@ -343,6 +344,7 @@ class ELRouterBackend(RouterBackend):
         if bfd is not None:
             # BFD down = BGP session down at once: the peer's routes are withdrawn without waiting for the hold time
             lines += [f" neighbor {p} bfd profile {BFD_PROFILE}" for p in peers]
+            lines += v6.frr_bfd_neighbors(spec, peers6, BFD_PROFILE)
         lines += [" !", " address-family ipv4 unicast", f"  maximum-paths {bgp.maximum_paths}",
                   f"  maximum-paths ibgp {bgp.maximum_paths}"]
         for p in peers:
