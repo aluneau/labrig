@@ -76,6 +76,7 @@ docs/router-cases.md  split DNS zones, proxy-only egress (squid), MTU / narrow h
 docs/templates.md     customer-case templates: file format, placeholders, API, adding one
 docs/logs.md          log viewer + diagnostics: sources, filters, known-problems rules, pod logs, adding a rule
 docs/mcp.md           AI assistants: MCP endpoint, Claude Code / Desktop / Cursor / VS Code setup, tools
+docs/budget.md        host resource budget: services/budget.py `enforce()` once per API request (`budget.request(force)` in the create endpoints, never in tasks) -> 409 + `force=true`; dry run POST /hosts/budget (UI "Host resources" line); OpenShift keeps its own rule
 docs/updates.md       release installs (/opt/vm-manager), vm-manager-update, GitHub releases (CI, nightly), Host page Update now
 opentofu_provider/    Go provider (terraform-plugin-framework): vmmanager_cloud_image, _network, _vm, _disk, _nic, _group, _wireguard_peer, _cluster, _sriov_pf, _acm_managed_cluster
 examples/opentofu/    lab (network with DHCP reservations + 2 Debian VMs), devices (disk, ISO, boot order), group (lab group), disconnected (registry + egress), disconnected-kubeadm, router-cases (split DNS, proxy, MTU), ipv6 (dual stack group), sriov-pool, k3s, kubeadm (clusters), acm (hub + imported kubeadm)
@@ -435,6 +436,7 @@ node kubeadm-metallb.js                                         # kubeadm + Meta
 node acm.js                                                     # ACM hub (SNO) + import kubeadm / k3s, Available, refused k3s on own NAT, detach (REUSE=1 KEEP=1, ~2 h fresh)
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node logs.js                                                    # logs + diagnostics: sources, filters, rules, MCP, UI (EL_IMAGE=almalinux-9 CLUSTER=<name>: EL + pod logs)
+node budget.js                                                  # host budget: dry run vs /proc/meminfo, 409 + nothing left, force, MCP, modal lines (backend with BUDGET_MEMORY_RESERVE_MIB=200000)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
