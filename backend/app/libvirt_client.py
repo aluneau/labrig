@@ -1003,6 +1003,40 @@ class LibvirtClient:
             pool.create()
         return pool
 
+    def budget_domains(self) -> List[Dict[str, Any]]:
+        """Every domain with its state, vCPUs, max memory (KiB) and, when running, its resident memory
+        (memoryStats rss, KiB; None when QEMU doesn't report it): the host resource budget's input"""
+        conn = self.connect()
+        result = []
+        for d in conn.listAllDomains(0):
+            try:
+                state, max_mem, _mem, vcpu, _t = d.info()
+                rss = None
+                if state == libvirt.VIR_DOMAIN_RUNNING:
+                    try:
+                        rss = d.memoryStats().get("rss")
+                    except libvirt.libvirtError:
+                        pass
+                result.append({"name": d.name(), "state": DOMAIN_STATES.get(state, "unknown"),
+                               "max_memory": max_mem, "vcpu": vcpu, "rss": rss})
+            except libvirt.libvirtError:
+                pass  # undefined meanwhile
+        return result
+
+    def pool_available(self, name: str) -> Optional[int]:
+        """Free bytes of an active storage pool (refreshed first), None when it doesn't exist / isn't active"""
+        try:
+            pool = self.connect().storagePoolLookupByName(name)
+            if not pool.isActive():
+                return None
+            try:
+                pool.refresh(0)
+            except libvirt.libvirtError:
+                pass
+            return int(pool.info()[3])
+        except libvirt.libvirtError:
+            return None
+
     def start_storage_pool(self, name: str) -> None:
         self.connect().storagePoolLookupByName(name).create()
 

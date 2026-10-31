@@ -52,6 +52,7 @@ import { AcmBanner, AcmLabel } from '../components/clusters/AcmRelation';
 import { MirroredImages } from '../components/clusters/MirroredImages';
 import { ClusterLogs } from '../components/logs/ClusterLogs';
 import { AddWorkersModal, UpgradesCard } from '../components/clusters/OpenShiftDay2';
+import { HostBudget, budgetBlocks, useHostBudget } from '../components/common/HostBudget';
 
 const TOPOLOGY_NAMES: Record<string, string> = { sno: 'single node', compact: 'compact (3 nodes)', ha: 'HA' };
 const STORAGE_NAMES: Record<string, string> = { none: 'none', lvms: 'LVM Storage', odf: 'OpenShift Data Foundation' };
@@ -228,6 +229,10 @@ export const ClusterDetailPage: React.FC = () => {
   };
 
   const install = useInstallStatus(cluster);
+  // k3s / kubeadm "Add worker": the host budget of one more worker, shown only when it says something
+  const workerBudget = useHostBudget(cluster && cluster.type !== 'openshift' && cluster.status === 'ready'
+    ? { cluster_id: cluster.id, count: 1 } : null);
+  const [forceWorker, setForceWorker] = useState(false);
 
   if (!cluster) {
     return <PageSection>{loadError ? <Alert variant="danger" isInline title={loadError} /> : <Spinner size="xl" />}</PageSection>;
@@ -280,8 +285,9 @@ export const ClusterDetailPage: React.FC = () => {
                   onClick={() => run(() => clusterApi.stop(cluster.id))}>Stop</Button>
               )}
               {!isOpenShift && (
-                <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'}
-                  onClick={() => run(() => clusterApi.addWorkers(cluster.id, 1))}>Add worker</Button>
+                <Button variant="secondary" icon={<PlusIcon />} id="add-worker"
+                  isDisabled={busy || cluster.status !== 'ready' || budgetBlocks(workerBudget, forceWorker)}
+                  onClick={() => run(() => clusterApi.addWorkers(cluster.id, 1, undefined, forceWorker))}>Add worker</Button>
               )}
               {isOpenShift && !cluster.spec?.bare_metal && !cluster.spec?.openshift?.provisioner && (
                 <Button variant="secondary" icon={<PlusIcon />} isDisabled={busy || cluster.status !== 'ready'} id="os-add-worker"
@@ -291,6 +297,9 @@ export const ClusterDetailPage: React.FC = () => {
             </Flex>
           </FlexItem>
         </Flex>
+        {workerBudget && (workerBudget.problems.length > 0 || workerBudget.warnings.length > 0) && (
+          <HostBudget result={workerBudget} force={forceWorker} onForce={setForceWorker} />
+        )}
       </PageSection>
 
       {tabbed && (

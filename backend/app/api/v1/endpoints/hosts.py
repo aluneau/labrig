@@ -13,8 +13,8 @@ from app.services.sriov_service import sriov_service
 from app.services.task_service import task_service
 from app.services import update_service
 from app.services.helper_service import HelperError
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
 
 router = APIRouter()
 
@@ -66,6 +66,36 @@ def get_host_resources():
     """Get current resource usage"""
     resources = host_service.get_resources()
     return resources
+
+
+class BudgetRequest(BaseModel):
+    """Dry run of the host resource budget (services/budget.py): give ONE of vm / group / group_id + members /
+    cluster / cluster_id + count / items, as the create request would (names may be left out)"""
+    vm: Optional[Dict[str, Any]] = None
+    group: Optional[Dict[str, Any]] = None
+    group_id: Optional[int] = None
+    members: List[Dict[str, Any]] = []
+    cluster: Optional[Dict[str, Any]] = None
+    cluster_id: Optional[int] = None
+    count: int = Field(1, ge=1, le=20)
+    worker: Optional[Dict[str, int]] = None
+    items: List[Dict[str, Any]] = []
+    starting: List[str] = []
+
+
+@router.post("/budget")
+def host_budget(body: BudgetRequest, db: Session = Depends(get_db)):
+    """Would this create fit on the host? Memory (MemAvailable - reserve - growth of running VMs - VMs it starts),
+    vCPU overcommit, storage pool space. Returns ok / blocking / problems / warnings (plain words) / need / host.
+    Creates refuse what is blocking with 409 unless force=true."""
+    from pydantic import ValidationError
+    from app.services import budget
+    try:
+        return budget.dry_run(db, body.model_dump())
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ValidationError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/dns")

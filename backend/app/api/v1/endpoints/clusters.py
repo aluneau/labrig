@@ -1,7 +1,7 @@
 """Kubernetes cluster endpoints"""
 from typing import List, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.schemas.cluster import ClusterMirrorRequest, ClusterUpgradeRequest, Clu
 from app.services import kube_exec
 from app.services.acm import acm_service
 from app.services.cluster_service import cluster_service
+from app.services import budget
 
 router = APIRouter()
 
@@ -39,9 +40,12 @@ def list_clusters(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=Cluster, status_code=201)
-def create_cluster(data: ClusterCreate, db: Session = Depends(get_db)):
-    """Create a cluster; provisioning runs as a background task (see task_id)"""
-    cluster = _bad_request(cluster_service.create_cluster, db, data)
+def create_cluster(data: ClusterCreate, force: bool = Query(False, description=budget.FORCE_HELP),
+                   db: Session = Depends(get_db)):
+    """Create a cluster; provisioning runs as a background task (see task_id). k3s / kubeadm: 409 when the
+    nodes (+ an auto-created group's router) don't fit on the host; OpenShift keeps its own stricter RAM check."""
+    with budget.request(force):
+        cluster = _bad_request(cluster_service.create_cluster, db, data)
     return cluster_service.get_cluster_dict(db, cluster.id)
 
 
@@ -61,11 +65,14 @@ def delete_cluster(cluster_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{cluster_id}/workers", response_model=Task)
-def add_workers(cluster_id: int, data: ClusterScale, db: Session = Depends(get_db)):
+def add_workers(cluster_id: int, data: ClusterScale, force: bool = Query(False, description=budget.FORCE_HELP),
+                db: Session = Depends(get_db)):
     """Add `count` workers (task). OpenShift (4.17+, VMs in a lab group): `oc adm node-image create` -> node ISO ->
-    new VMs, CSRs approved until Ready; `worker` sizes them (default: the cluster's worker size)."""
+    new VMs, CSRs approved until Ready; `worker` sizes them (default: the cluster's worker size).
+    k3s / kubeadm: 409 when they don't fit on the host."""
     worker = data.worker.model_dump() if data.worker is not None else None
-    return _bad_request(cluster_service.add_workers, db, _get(db, cluster_id), data.count, worker)
+    with budget.request(force):
+        return _bad_request(cluster_service.add_workers, db, _get(db, cluster_id), data.count, worker)
 
 
 @router.delete("/{cluster_id}/nodes/{node_name}", response_model=Task)

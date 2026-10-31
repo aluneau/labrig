@@ -73,6 +73,7 @@ type groupDHCPHostModel struct {
 type groupModel struct {
 	ID            types.String         `tfsdk:"id"`
 	Name          types.String         `tfsdk:"name"`
+	ForceBudget   types.Bool           `tfsdk:"force_budget"`
 	CIDR          types.String         `tfsdk:"cidr"`
 	Domain        types.String         `tfsdk:"domain"`
 	Uplink        types.String         `tfsdk:"uplink"`
@@ -344,6 +345,7 @@ func (r *groupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 		Attributes: map[string]schema.Attribute{
 			"id":   schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"name": schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "Group name; VMs are <name>-rtr and <name>-<member>."},
+			"force_budget": forceBudgetAttribute(),
 			"cidr": schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "IPv4 subnet, e.g. 10.42.7.0/24 (router = first address)."},
 			"domain": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keep,
 				Description: "DNS zone served by the router. Defaults to <name>.lab."},
@@ -726,7 +728,7 @@ func (r *groupResource) Create(ctx context.Context, req resource.CreateRequest, 
 		Group  apiGroup `json:"group"`
 		TaskID int64    `json:"task_id"`
 	}
-	if err := r.client.Do(ctx, "POST", "/groups", body, &created); err != nil {
+	if err := r.client.Do(ctx, "POST", "/groups"+forceBudgetQuery(plan.ForceBudget), body, &created); err != nil {
 		resp.Diagnostics.AddError("Cannot create group", err.Error())
 		return
 	}
@@ -994,7 +996,11 @@ func (r *groupResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.client.Do(ctx, "PUT", "/groups/"+id+"?replace_members=true&delete_disks=true", body, nil); err != nil {
+	put := "/groups/" + id + "?replace_members=true&delete_disks=true"
+	if plan.ForceBudget.ValueBool() {
+		put += "&force=true"
+	}
+	if err := r.client.Do(ctx, "PUT", put, body, nil); err != nil {
 		resp.Diagnostics.AddError("Cannot update group", err.Error())
 		return
 	}

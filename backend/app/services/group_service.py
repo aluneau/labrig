@@ -39,6 +39,7 @@ from app.schemas.group import (
 from app.services.cloud_image_service import cloud_image_service
 from app.services import bgp_service as bgps
 from app.services import ipv6_service
+from app.services import budget
 from app.services import router_cases
 from app.services import wireguard_service as wgs
 from app.services.router_service import EL_IMAGES, STATE_DIR, get_backend
@@ -309,6 +310,7 @@ class GroupService:
                 raise ValueError(f"A VM named '{name}' already exists")
 
         spec = self.normalize(db, spec)
+        budget.enforce(budget.plan_group(db, spec))  # router + members (no-op when a cluster create checked)
         group = Group(name=spec.name, cidr=spec.cidr, domain=spec.domain, uplink=spec.uplink,
                       router_vm_name=router_vm_name(spec.name), spec=spec.model_dump(mode="json"),
                       status="creating")
@@ -630,8 +632,10 @@ class GroupService:
                 raise ValueError(f"VM name '{vm_name}' is too long (max 64 characters): use a shorter member name")
             if libvirt_client.get_vm(vm_name) is not None:
                 raise ValueError(f"A VM named '{vm_name}' already exists")
+        # new members only: replaced ones give their RAM / disk back before being rebuilt
+        budget.enforce(budget.plan_members(db, spec.name, added))
 
-        router_running = (libvirt_client.get_vm(router_vm_name(spec.name)) or {}).get("state") == "running"
+        router_running =(libvirt_client.get_vm(router_vm_name(spec.name)) or {}).get("state") == "running"
         previous_status = group.status
         group.status = "updating"
         db.commit()

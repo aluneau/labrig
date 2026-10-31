@@ -42,7 +42,7 @@ from app.schemas.registry import MirrorRequest, OperatorCatalog, OperatorPackage
 from app.schemas.vm import VMNicCreate
 from app.services.cluster_network import GroupClusterNetwork
 from app.services.group_service import group_service, network_name as group_network_name, router_vm_name
-from app.services import acm, ipv6_service, metallb
+from app.services import acm, budget, ipv6_service, metallb
 from app.services.openshift_addons import DEMO_IMAGE, STORAGE_SERIAL, AddonRunner
 from app.services import registry_service
 from app.services.openshift_service import (CATALOG_INDEXES, POD_CIDR, POD_CIDR6, RESERVED_CIDRS, SERVICE_CIDR,
@@ -252,6 +252,7 @@ class OpenShiftInstaller:
                 if ipaddress.IPv4Network(gspec.router.wireguard.subnet).overlaps(ipaddress.IPv4Network(reserved)):
                     raise ValueError(f"The group's WireGuard subnet overlaps {reserved}, used inside OpenShift")
         self._check_budget(db, sizes, counts, opts, self._registry_extra(gspec, owned) if opts.disconnected else 0)
+        budget.skip()  # its own stricter rule above: no generic check for the group it creates
 
         task = None
         if group is None:
@@ -348,10 +349,8 @@ class OpenShiftInstaller:
         an OOM-killed master corrupts etcd). extra: MiB more for the router (mirror registry)."""
         need = (sizes["ctlplane"]["memory"] * counts["masters"] + sizes["worker"]["memory"] * counts["workers"]
                 + extra)
-        try:
-            with open("/proc/meminfo") as f:
-                total = next(int(line.split()[1]) // 1024 for line in f if line.startswith("MemTotal:"))
-        except (OSError, StopIteration, ValueError):
+        total = budget.meminfo().get("MemTotal")  # shared reading (services/budget.py); the rule stays this one
+        if total is None:
             return
         running = sum(vm.get("max_memory", 0) // 1024 for vm in libvirt_client.list_vms() if vm.get("state") == "running")
         free = total - running - 4096  # keep 4 GiB for the host

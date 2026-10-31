@@ -25,7 +25,8 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | Customer-case templates (§2.5): gallery, params → review (editable YAML, OpenTofu, guide) → create, Case guide tab, save group as template (docs/templates.md) | ✅ done (2026-10-09) |
 | IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); dual stack kubeadm / OpenShift clusters (2026-10-27) |
 | Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
-| CI, per-group resource budget | open (§4) |
+| Host resource budget before every create (RAM / vCPU / pool space, 409 + force, UI line; docs/budget.md) | ✅ done (2026-10-31) |
+| CI | open (§4) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
@@ -595,8 +596,8 @@ Next, in order:
    steps into a group/cluster option; real VF pools on RHEL lab hosts with SR-IOV NICs.
 4. Cross-cutting, before sharing widely: ~~**authentication**~~ (done: docs/auth.md; next maybe OIDC / per-group
    ownership), a **CI** job (`scripts/check-python.py`, backend import, `tsc` + build,
-   `go vet`, `e2e/smoke.js`), and a per-group **resource budget** check (CPU/RAM/disk) before creating,
-   so a lab doesn't starve the host.
+   `go vet`, `e2e/smoke.js`), and ~~a per-group **resource budget** check (CPU/RAM/disk) before creating,
+   so a lab doesn't starve the host~~ (done: docs/budget.md, every VM / group / member / k3s / kubeadm create).
 
 ### Sources
 - kcli: https://github.com/karmab/kcli, https://kcli.readthedocs.io/en/latest/

@@ -634,12 +634,9 @@ class TemplateService:
                 pass
         declared = data.resources
         mem, cpu, disk = max(mem, declared.memory_mb), max(cpu, declared.vcpus), max(disk, declared.disk_gb)
-        free = None
-        try:
-            from app.services.host_service import host_service
-            free = int(host_service.get_resources()["memory_free"] // (1024 * 1024))
-        except Exception:
-            pass
+        # same MemAvailable reading as the create-time host budget (services/budget.py); a warning only here
+        from app.services import budget
+        free = budget.meminfo().get("MemAvailable")
         return {"vcpus": cpu, "memory_mb": mem, "disk_gb": disk, "host_memory_free_mb": free,
                 "fits": free is None or mem <= free, "detail": detail}
 

@@ -52,6 +52,7 @@ type vmModel struct {
 	Autostart    types.Bool      `tfsdk:"autostart"`
 	Running      types.Bool      `tfsdk:"running"`
 	WaitForIP    types.Bool      `tfsdk:"wait_for_ip"`
+	ForceBudget  types.Bool      `tfsdk:"force_budget"`
 	CloudInit    *cloudInitModel `tfsdk:"cloud_init"`
 	Status       types.String    `tfsdk:"status"`
 	IPAddresses  types.List      `tfsdk:"ip_addresses"`
@@ -92,6 +93,7 @@ func (r *vmResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *r
 			},
 			"autostart":   schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "Start with the host."},
 			"running":     schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), Description: "Desired power state."},
+			"force_budget": forceBudgetAttribute(),
 			"wait_for_ip": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "Wait (up to 5 min) for a DHCP address after starting."},
 			"cloud_init": schema.SingleNestedAttribute{
 				Optional:      true,
@@ -188,7 +190,7 @@ func (r *vmResource) Create(ctx context.Context, req resource.CreateRequest, res
 	}
 
 	var created apiVM
-	if err := r.client.Do(ctx, "POST", "/vms", body, &created); err != nil {
+	if err := r.client.Do(ctx, "POST", "/vms"+forceBudgetQuery(plan.ForceBudget), body, &created); err != nil {
 		resp.Diagnostics.AddError("Cannot create VM", err.Error())
 		return
 	}

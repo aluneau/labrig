@@ -38,6 +38,7 @@ type clusterResource struct{ client *Client }
 type clusterModel struct {
 	ID             types.String    `tfsdk:"id"`
 	Name           types.String    `tfsdk:"name"`
+	ForceBudget    types.Bool      `tfsdk:"force_budget"`
 	Type           types.String    `tfsdk:"type"`
 	Version        types.String    `tfsdk:"version"`
 	Ctlplanes      types.Int64     `tfsdk:"ctlplanes"`
@@ -190,6 +191,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 		Attributes: map[string]schema.Attribute{
 			"id":      schema.StringAttribute{Computed: true, PlanModifiers: keepStr},
 			"name":    schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "DNS label; nodes are <name>-ctlplane-N / <name>-worker-N."},
+			"force_budget": forceBudgetAttribute(),
 			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (standalone network), kubeadm or openshift (in a lab group with a router)."},
 			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 (default: latest of openshift.channel). The installed version is read back."},
 			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt,
@@ -523,7 +525,7 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 
 	var created apiCluster
-	if err := r.client.Do(ctx, "POST", "/clusters", body, &created); err != nil {
+	if err := r.client.Do(ctx, "POST", "/clusters"+forceBudgetQuery(plan.ForceBudget), body, &created); err != nil {
 		resp.Diagnostics.AddError("Cannot create cluster", err.Error())
 		return
 	}
@@ -686,7 +688,7 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	want, have := plan.Workers.ValueInt64(), state.Workers.ValueInt64()
 	if want > have {
-		if err := r.client.Do(ctx, "POST", "/clusters/"+id+"/workers", map[string]any{"count": want - have}, nil); err != nil {
+		if err := r.client.Do(ctx, "POST", "/clusters/"+id+"/workers"+forceBudgetQuery(plan.ForceBudget), map[string]any{"count": want - have}, nil); err != nil {
 			resp.Diagnostics.AddError("Cannot add workers", err.Error())
 			return
 		}

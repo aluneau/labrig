@@ -18,6 +18,7 @@ from app.libvirt_client import libvirt_client
 from app.models import VM, Volume
 from app.schemas import VMCreate, VMUpdate
 from app.services.cloud_image_service import cloud_image_service
+from app.services import budget
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ class VMService:
                 raise ValueError("Cloud image not found or not downloaded yet")
             if vm_data.iso_path:
                 raise ValueError("Choose either a cloud image or an ISO, not both")
+        budget.enforce(budget.plan_vm(db, vm_data, image))  # once per request: a group's own check runs first
 
         pool_name = libvirt_client.ensure_pool(settings.DEFAULT_POOL_NAME, settings.DEFAULT_POOL_PATH).name()
         disk_size = (vm_data.disk_size or 0) * 1024 ** 3
