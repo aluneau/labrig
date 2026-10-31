@@ -23,6 +23,14 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   with a huge reserve; `groups.js` passed on main. Not run for real: forced group / cluster create, member add, add
   worker.
 
+- **OpenShift dual stack completed** (docs/ipv6.md): MetalLB BGP over IPv6, BFD on IPv6 sessions (multihop),
+  dual stack + platform baremetal (v6 VIPs). Real SNO 4.20.41 BGP+BFD v6 by the agent; `bgp-bfd.js` + `ipv6.js`
+  passed on main. Compact baremetal dual stack: installer accepted the config, never installed (RAM).
+- **IPv6-only OpenShift** (`openshift.ip_family: ipv6`, disconnected only, platform none, no MetalLB): real
+  disconnected SNO 4.20.44 by the agent (`openshift-ipv6only.js`), registry over IPv6 via haproxy on the router,
+  topology shows v6-only nodes. On main: refusal checked, `smoke.js` + `ipv6.js` passed; no OpenShift install
+  re-run on the merged code. Not done: MetalLB / baremetal VIPs / kubeadm IPv6-only.
+
 ## Next candidates (roadmap)
 
 - Clone / export a group with disks (share a reproducer with a colleague on a RHEL lab host).
