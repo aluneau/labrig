@@ -474,7 +474,8 @@ def _bgp_checks(cluster: Any, group: Any, ip: str, result: Dict[str, Any], clien
     if result.get("bfd"):
         bfd_up = [p for p in peers if p["bfd"] == "up"]
         profile = client.bfd_profile()
-        detect = [p.get("detect_ms") for p in bfd_peers.values() if p.get("detect_ms")]
+        mine = {p["ip"] for p in peers}  # the cluster's sessions (not other lab machines' static BFD peers)
+        detect = [p.get("detect_ms") for ip, p in bfd_peers.items() if ip in mine and p.get("detect_ms")]
         checks.append({"name": "BFD watches every session (fast failover)", "ok": len(bfd_up) == len(peers) and bool(profile),
                        "detail": (f"{len(bfd_up)}/{len(peers)} up" + (f", a dead node is detected in {max(detect)} ms" if detect else "")
                                   + ("" if profile else "; the BGPPeer has no BFD profile: switch the mode again to apply it"))})

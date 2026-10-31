@@ -70,6 +70,7 @@ async function scenario(id) {
     }
 
     // 3. pods + Service of both families
+    await kubectl(cluster, '-n metallb-demo wait --for=condition=Ready pod -l app=hello --timeout=300s');
     const pods = (await kjson(cluster, '-n metallb-demo get pods -l app=hello')).items;
     const podIPs = pods.map((p) => ({ name: p.metadata.name, node: p.spec.nodeName, ips: (p.status.podIPs || []).map((x) => x.ip) }));
     for (const p of podIPs) log(`pod ${p.name} on ${p.node}: ${p.ips.join(', ')}`);
