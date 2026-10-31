@@ -3,7 +3,8 @@ import { API_BASE, UNAUTHORIZED_EVENT, authApi } from '../services/api';
 
 /** Event pushed by the backend on /api/v1/events (Server-Sent Events) */
 export interface LiveEvent {
-  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection' | 'group' | 'cluster';
+  kind: 'vm' | 'network' | 'pool' | 'task' | 'connection' | 'group' | 'cluster' | 'snapshot';
+  snapshot?: string; // snapshot events: its name (name = the VM's)
   event?: string | number;
   uuid?: string;
   name?: string;

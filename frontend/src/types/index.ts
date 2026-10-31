@@ -1841,3 +1841,42 @@ export interface ClusterUpgrades {
   operators_updated: number;
   operators_pending: string[];
 }
+
+// Snapshots (backend/app/schemas/snapshot.py, docs/snapshots.md)
+
+export interface SnapshotCreate {
+  name: string;
+  description?: string | null;
+}
+
+export interface VMSnapshot {
+  name: string;
+  description?: string | null;
+  created?: string | null;
+  state?: string | null; // running, paused (group snapshot), shutoff
+  memory: boolean;
+  parent?: string | null;
+  current: boolean;
+}
+
+export interface VMSnapshotList {
+  snapshots: VMSnapshot[];
+  supported: boolean;
+  reasons: string[];
+}
+
+export interface GroupSnapshot {
+  name: string;
+  description?: string | null;
+  created?: string | null;
+  vms: { vm: string; state?: string | null; memory: boolean }[];
+  revertable: boolean;
+  problem?: string | null;
+}
+
+export interface GroupSnapshotList {
+  snapshots: GroupSnapshot[];
+  vms: string[];
+  supported: boolean;
+  reasons: string[];
+}
