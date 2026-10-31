@@ -596,6 +596,9 @@ class ReservationSpec(BaseModel):
     mac: str = Field(..., pattern=MAC)
     ip: str
     owner: Optional[str] = None  # "cluster:<name>": managed by the app
+    # IPv6-only host (IPv6-only OpenShift node): the router serves it only its IPv6 address (DHCPv6, AAAA);
+    # `ip` stays reserved (its host number gives the IPv6 address) but is never leased nor in DNS
+    ipv6_only: bool = False
 
     @field_validator("ip")
     @classmethod
@@ -613,7 +616,7 @@ class LoadBalancerSpec(BaseModel):
     on `port` and spreads connections over the healthy backends (round robin, TCP health checks)."""
     name: str = Field(..., pattern=HOST_LABEL)
     port: int = Field(..., ge=1, le=65535)
-    backends: List[str] = Field(..., min_length=1)  # "ip:port"
+    backends: List[str] = Field(..., min_length=1)  # "ip:port" or "[ipv6]:port"
     mode: Literal["tcp"] = "tcp"
     owner: Optional[str] = None
 
@@ -624,8 +627,11 @@ class LoadBalancerSpec(BaseModel):
         for backend in v:
             host, _, port = backend.strip().rpartition(":")
             if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
-                raise ValueError(f"Backend '{backend}' must be ip:port")
-            result.append(f"{_ipv4(host, 'Backend')}:{int(port)}")
+                raise ValueError(f"Backend '{backend}' must be ip:port or [ipv6]:port")
+            if host.startswith("[") and host.endswith("]"):
+                result.append(f"[{_ipv6(host[1:-1], 'Backend')}]:{int(port)}")
+            else:
+                result.append(f"{_ipv4(host, 'Backend')}:{int(port)}")
         return result
 
 

@@ -332,13 +332,15 @@ class GroupClusterNetwork(ClusterNetwork):
         from app.services.group_service import group_service
         return group_service.free_ip(self.spec(), taken)
 
-    def reserve(self, hostname: str, mac: str, ip: str) -> None:
+    def reserve(self, hostname: str, mac: str, ip: str, ipv6_only: bool = False) -> None:
+        """ipv6_only: the router leases / resolves only the paired IPv6 address (IPv6-only OpenShift node)"""
         from app.schemas.group import ReservationSpec
 
         def op(spec):
             spec.reservations = [r for r in spec.reservations
                                  if not (r.owner == self.owner and (r.mac == mac.lower() or r.name == hostname))]
-            spec.reservations.append(ReservationSpec(name=hostname, mac=mac, ip=ip, owner=self.owner))
+            spec.reservations.append(ReservationSpec(name=hostname, mac=mac, ip=ip, owner=self.owner,
+                                                     ipv6_only=ipv6_only))
         self._ops.append(op)
 
     def release(self, mac: str) -> None:
@@ -349,25 +351,30 @@ class GroupClusterNetwork(ClusterNetwork):
     def ip6_of(self, ip: Optional[str]) -> Optional[str]:
         return self.spec().ip6_of(ip)
 
-    def publish(self, ip: str, hostnames: List[str], ip6: Optional[str] = None, paired: bool = False) -> None:
+    def publish(self, ip: str, hostnames: List[str], ip6: Optional[str] = None, paired: bool = False,
+                ipv6_only: bool = False) -> None:
+        """ipv6_only: AAAA only (the paired IPv6 address of `ip`, which stays the record's key)"""
         from app.schemas.group import DNSRecord
 
         def op(spec):
-            aaaa = ip6 or (spec.ip6_of(ip) if paired else None)
+            aaaa = ip6 or (spec.ip6_of(ip) if paired or ipv6_only else None)
+            if ipv6_only and not aaaa:
+                raise ValueError(f"Group {spec.name} has no IPv6: no IPv6 address for {ip}")
             names = [n for n in (self._relative(h, spec.domain) for h in hostnames) if n]
             records = [r for r in spec.router.dns.records
                        if not (r.owner == self.owner and (r.a == ip or r.name in names))]
             if any(r.name in names for r in records):
                 clash = next(r.name for r in records if r.name in names)
                 raise ValueError(f"DNS record '{clash}' already exists in group {spec.name}")
-            spec.router.dns.records = records + [DNSRecord(name=n, a=ip, aaaa=aaaa, owner=self.owner)
-                                                       for n in names]
+            spec.router.dns.records = records + [DNSRecord(name=n, a=None if ipv6_only else ip, aaaa=aaaa,
+                                                           owner=self.owner) for n in names]
         self._ops.append(op)
 
     def unpublish(self, ip: str) -> None:
         def op(spec):
+            ip6 = spec.ip6_of(ip)
             spec.router.dns.records = [r for r in spec.router.dns.records
-                                       if not (r.owner == self.owner and r.a == ip)]
+                                       if not (r.owner == self.owner and (r.a == ip or (ip6 and not r.a and r.aaaa == ip6)))]
         self._ops.append(op)
 
     def publish_api(self, hostnames: List[str], ctlplane_ips: List[str], port: int) -> str:

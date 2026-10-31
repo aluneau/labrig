@@ -237,11 +237,15 @@ class OpenShiftInstaller:
             self.check_platform(opts, gspec.cidr)
 
         group, gspec, owned, node_subnet = self.svc._resolve_group(db, data, names, RESERVED_CIDRS, check)
-        if opts.dual_stack and group is None:
+        v6only = opts.ip_family == "ipv6"
+        if (opts.dual_stack or v6only) and group is None:
             from app.schemas.group import IPv6Spec
             gspec.network.ipv6 = IPv6Spec(enabled=True)  # the auto-created group gets IPv6
-        ipv6_service.check_dual_stack(gspec, opts.dual_stack, {"cluster network": POD_CIDR6,
-                                                               "service network": SERVICE_CIDR6})
+        if v6only and not (gspec.network.ipv6 is not None and gspec.network.ipv6.enabled):
+            raise ValueError(f"Lab group {gspec.name} has no IPv6: switch on IPv6 on the group first (Network & DNS "
+                             "tab), or leave the group out (a new group gets IPv6)")
+        ipv6_service.check_dual_stack(gspec, opts.dual_stack or v6only, {"cluster network": POD_CIDR6,
+                                                                         "service network": SERVICE_CIDR6})
         if opts.disconnected:
             # the router becomes the lab's bastion: mirror registry (more RAM + a registry disk)
             if not version.startswith("4."):
@@ -263,7 +267,8 @@ class OpenShiftInstaller:
         spec["openshift"] = {**opts.model_dump(), "version": version}
         spec.update(ctlplanes=counts["masters"], workers=counts["workers"], ctlplane=sizes["ctlplane"],
                     worker=sizes["worker"], cidr=str(node_subnet), pod_cidr=POD_CIDR, service_cidr=SERVICE_CIDR,
-                    **({"pod_cidr6": POD_CIDR6, "service_cidr6": SERVICE_CIDR6} if opts.dual_stack else {}),
+                    **({"pod_cidr6": POD_CIDR6, "service_cidr6": SERVICE_CIDR6}
+                       if opts.dual_stack or v6only else {}),
                     api_port=LB_PORTS["api"], group_task_id=task.id if task else None, addons=[],
                     image=f"{'OKD' if is_okd(version) else 'OpenShift'} {version}")
         cluster = Cluster(
@@ -279,6 +284,10 @@ class OpenShiftInstaller:
         self.svc._publish(cluster)
         topo = {"sno": "single node", "compact": "compact (3 masters)",
                 "ha": f"3 masters + {counts['workers']} workers"}[opts.topology]
+        if v6only:
+            topo += ", IPv6 only"
+        elif opts.dual_stack:
+            topo += ", dual stack"
         if opts.platform == "baremetal":
             topo += ", platform baremetal (API / ingress VIPs)"
         where = f"new lab group {group.name}" if owned else f"lab group {group.name}"
@@ -498,9 +507,15 @@ class OpenShiftInstaller:
         gspec = network.spec()
         router_ip = gspec.router.ip
         dual = bool(opts.dual_stack)  # AAAA records too (haproxy listens on the router's IPv6 address)
+        # IPv6 only: the nodes' IPv4 addresses stay reserved (their host numbers give the IPv6 ones) but are
+        # never leased nor in DNS; DNS is AAAA only, the router's load balancers reach the nodes over IPv6
+        v6only = opts.ip_family == "ipv6"
+
+        def backend(ip: str, port: int) -> str:
+            return f"[{gspec.ip6_of(ip)}]:{port}" if v6only else f"{ip}:{port}"
         for node in nodes:
-            network.reserve(node.name, node.mac, node.ip)
-            network.publish(node.ip, [f"{node.name}.{zone}", node.name], paired=dual)
+            network.reserve(node.name, node.mac, node.ip, ipv6_only=v6only)
+            network.publish(node.ip, [f"{node.name}.{zone}", node.name], paired=dual, ipv6_only=v6only)
         if opts.platform == "baremetal":
             # keepalived in the cluster holds the VIPs (kept out of DHCP / static assignments like a MetalLB pool);
             # DNS points at them. The router only forwards its uplink :6443 / :80 / :443 to them: the host (and the
@@ -512,11 +527,12 @@ class OpenShiftInstaller:
             network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{vips['ingress']}:80"])
             network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{vips['ingress']}:443"])
         else:
-            network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"], paired=dual)
-            network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{ip}:6443" for ip in masters])
-            network.publish_lb(f"{cluster.name}-mcs", LB_PORTS["mcs"], [f"{ip}:22623" for ip in masters])
-            network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{ip}:80" for ip in ingress])
-            network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{ip}:443" for ip in ingress])
+            network.publish(router_ip, [f"api.{zone}", f"api-int.{zone}", f"*.apps.{zone}"], paired=dual,
+                            ipv6_only=v6only)
+            network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [backend(ip, 6443) for ip in masters])
+            network.publish_lb(f"{cluster.name}-mcs", LB_PORTS["mcs"], [backend(ip, 22623) for ip in masters])
+            network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [backend(ip, 80) for ip in ingress])
+            network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [backend(ip, 443) for ip in ingress])
         if opts.metallb.enabled and not opts.metallb.pool:
             pool = self._assign_pool(network, gspec, opts.metallb.mode, opts.metallb.addresses, [n.ip for n in nodes],
                                      cluster.name, opts.metallb.bfd)
@@ -807,6 +823,8 @@ class OpenShiftInstaller:
                             + [k.strip() for k in spec.get("ssh_keys") or [] if k.strip()])
         network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
         first = next(n for n in nodes if n.role == "ctlplane")
+        v6only = opts.ip_family == "ipv6"
+        gspec = network.spec()
         mirror = self.load_mirror(cluster) if opts.disconnected else None
         if opts.disconnected and mirror is None:
             raise RuntimeError("The mirror results are missing: delete the cluster and create it again")
@@ -815,10 +833,19 @@ class OpenShiftInstaller:
             # disconnected: the registry's credentials only (no quay.io / cloud.openshift.com: no telemetry)
             self.mirror_pull_secret(cluster) if mirror else openshift_service.pull_secret_for(cluster.version),
             ssh_key, self.install_mirror(mirror) if mirror else None,
-            self.vips(cluster), network.spec().ipv6_prefix() if opts.dual_stack else None)
-        agent = openshift_service.agent_config(
-            cluster.name, first.ip, network.gateway(),  # NTP: chrony on the router
-            [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes])
+            self.vips(cluster), gspec.ipv6_prefix() if opts.dual_stack or v6only else None,
+            ipv6_only=v6only)
+        hosts = [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac,
+                  "ip6": gspec.ip6_of(n.ip)} for n in nodes]
+        if v6only:
+            # static IPv6 per node; rendezvous, NTP (chrony on the router), DNS: the router's IPv6 address
+            rip6 = gspec.ip6_of(gspec.router.ip)
+            agent = openshift_service.agent_config(
+                cluster.name, gspec.ip6_of(first.ip), rip6, hosts,
+                ipv6={"gateway": rip6, "dns": [rip6], "search": [cluster.domain]})
+        else:
+            agent = openshift_service.agent_config(
+                cluster.name, first.ip, network.gateway(), hosts)  # NTP: chrony on the router
         configs = {"install-config.yaml": install, "agent-config.yaml": agent}
         for name, data in configs.items():
             text = yaml.dump(data, Dumper=_BlockDumper, sort_keys=False)
@@ -1322,6 +1349,11 @@ class OpenShiftInstaller:
         group = cluster.network[len("vmm-g-"):] if cluster.network.startswith("vmm-g-") else cluster.network
         return libvirt_client.agent_exec(router_vm_name(group), "/bin/sh", ["-c", script], timeout=timeout)
 
+    @staticmethod
+    def node_ip6(cluster: Cluster, node: ClusterNode) -> Optional[str]:
+        """A node's IPv6 address (paired with its IPv4 one in the group /64)"""
+        return GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).spec().ip6_of(node.ip)
+
     def _watcher_token(self, cluster: Cluster) -> Optional[str]:
         state = openshift_service.cluster_dir(cluster.name) / ".openshift_install_state.json"
         try:
@@ -1339,7 +1371,10 @@ class OpenShiftInstaller:
         if first is None:
             return None
         token = self._watcher_token(cluster)
-        url = f"http://{first.ip}:{ASSISTED_PORT}/api/assisted-install/v2/clusters?with_hosts=true"
+        host = first.ip
+        if ipv6_service.is_ipv6_only(cluster):  # the rendezvous host only has its IPv6 address
+            host = f"[{self.node_ip6(cluster, first)}]"
+        url = f"http://{host}:{ASSISTED_PORT}/api/assisted-install/v2/clusters?with_hosts=true"
         if self._is_bmh(cluster):
             # bare metal: the host reaches the node directly (no router to curl from)
             out = self._host_curl(url, token)
@@ -1574,6 +1609,8 @@ class OpenShiftInstaller:
             raise ValueError(refused)
         if is_okd(cluster.version) and okd_unsupported(request.kind):
             raise ValueError(okd_unsupported(request.kind))
+        if request.kind in ("metallb", "metallb-demo") and ipv6_service.is_ipv6_only(cluster):
+            raise ValueError("MetalLB on IPv6-only OpenShift is not done yet (its pools are IPv4)")
         if request.kind == "odf" and len(cluster.nodes) < 3:
             raise ValueError("ODF needs 3 nodes (Ceph replicates over 3): use LVMS on this cluster")
         if self.svc.to_dict(db, cluster)["status"] != "ready":

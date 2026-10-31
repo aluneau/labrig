@@ -305,6 +305,7 @@ class ClusterService:
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "dual_stack": is_dual_stack(cluster),
+            "ip_family": ipv6_service.ip_family(cluster),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
             "acm": self._acm(db, cluster),
         }

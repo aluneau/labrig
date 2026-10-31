@@ -89,6 +89,15 @@ class OpenShiftOptions(BaseModel):
     # Kubernetes), api / *.apps AAAA records, MetalLB L2 IPv6 pool. Needs a group with IPv6 (an auto-created
     # group gets it). Nodes take their IPv6 address from the group's DHCPv6 reservations.
     dual_stack: bool = False
+    # IP family of the cluster (docs/ipv6.md "IPv6-only OpenShift", create only). None = from dual_stack
+    # (dual_stack -> "dual_stack", else "ipv4"); "dual_stack" sets dual_stack; "ipv6" = single stack IPv6:
+    # machine network = the group /64, cluster fd01::/48 (hostPrefix 64), services fd02::/112, nodes with a
+    # static IPv6 address and no IPv4 at all. The host has no IPv6 internet: needs disconnected (the mirror
+    # registry on the router serves the nodes over IPv6)
+    ip_family: Optional[Literal["ipv4", "dual_stack", "ipv6"]] = Field(None, description=(
+        "ipv4 (default) | dual_stack (= dual_stack: true) | ipv6 = IPv6 single stack (IPv6-only nodes, pods and "
+        "services). ipv6 needs disconnected: true (no IPv6 internet: everything comes from the router's mirror "
+        "registry) and platform none; no MetalLB"))
     # Stop offering updates (clusterversion channel cleared)
     disable_updates: bool = True
     # Disconnected install (create time only, docs/disconnected.md): the group router runs a mirror
@@ -106,6 +115,22 @@ class OpenShiftOptions(BaseModel):
             raise ValueError('api_vip / ingress_vip only apply to "platform": "baremetal"')
         if self.api_vip and self.api_vip == self.ingress_vip:
             raise ValueError("api_vip and ingress_vip must differ")
+        if self.ip_family is None:
+            self.ip_family = "dual_stack" if self.dual_stack else "ipv4"
+        elif self.ip_family == "dual_stack":
+            self.dual_stack = True
+        elif self.dual_stack:
+            raise ValueError(f'"ip_family": "{self.ip_family}" contradicts "dual_stack": true (leave dual_stack out)')
+        if self.ip_family == "ipv6":
+            if not self.disconnected:
+                raise ValueError('IPv6-only OpenShift ("ip_family": "ipv6") needs "disconnected": true: the host has no '
+                                 "IPv6 internet, so IPv6-only nodes can't reach quay.io; the mirror registry on the "
+                                 "group router serves them the release and operators over IPv6")
+            if self.platform == "baremetal":
+                raise ValueError('IPv6-only OpenShift is supported with "platform": "none" only (baremetal would need '
+                                 "IPv6 API / ingress VIPs)")
+            if self.metallb.enabled:
+                raise ValueError("MetalLB on IPv6-only OpenShift is not done yet (its pools are IPv4): leave metallb off")
         if self.dual_stack and self.platform == "baremetal":
             # dual stack on platform baremetal needs an IPv6 API / ingress VIP pair too: not done yet
             raise ValueError('IPv6 dual stack is supported with "platform": "none" only (baremetal would need IPv6 VIPs too)')

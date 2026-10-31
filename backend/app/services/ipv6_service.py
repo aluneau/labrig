@@ -180,6 +180,16 @@ def is_dual_stack(cluster: Any) -> bool:
     return bool(spec.get("dual_stack") or (spec.get("openshift") or {}).get("dual_stack"))
 
 
+def is_ipv6_only(cluster: Any) -> bool:
+    """IPv6 single stack OpenShift (openshift.ip_family ipv6): nodes, pods and services IPv6 only"""
+    return ((cluster.spec or {}).get("openshift") or {}).get("ip_family") == "ipv6"
+
+
+def ip_family(cluster: Any) -> str:
+    """ipv4 | dual_stack | ipv6 of any cluster"""
+    return "ipv6" if is_ipv6_only(cluster) else "dual_stack" if is_dual_stack(cluster) else "ipv4"
+
+
 def check_dual_stack(spec: GroupSpec, wanted: Optional[bool], cidrs: Dict[str, str],
                      pod_prefix: tuple = (48, 64), service_prefix: tuple = (108, 120)) -> bool:
     """Whether a new cluster in the group `spec` is dual stack: `wanted` (None = when the group has IPv6),
