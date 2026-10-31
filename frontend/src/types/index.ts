@@ -436,6 +436,7 @@ export interface Cluster {
   ctlplanes: number;
   workers: number;
   dual_stack?: boolean; // IPv6 dual stack (pods / services of both families)
+  ip_family?: IpFamily; // OpenShift ipv6 = IPv6 only (nodes' `ip` reserved but unused, `ip6` is their address)
   spec?: Record<string, any> | null;
   nodes: ClusterNode[];
   created_at: string;
@@ -485,6 +486,8 @@ export type OdfProfile = 'lab' | 'lean';
 export type OpenShiftDistribution = 'ocp' | 'okd';
 export type OpenShiftPlatform = 'none' | 'baremetal';
 
+export type IpFamily = 'ipv4' | 'dual_stack' | 'ipv6';
+
 export interface OpenShiftOptions {
   // ocp = OpenShift (pull secret), okd = OKD on CentOS Stream CoreOS (no pull secret, community operators)
   distribution?: OpenShiftDistribution;
@@ -503,6 +506,8 @@ export interface OpenShiftOptions {
   metallb: MetalLBOptions;
   acm?: boolean; // Advanced Cluster Management hub (operator + MultiClusterHub)
   dual_stack?: boolean; // IPv6 dual stack (create only; the group needs IPv6, a new group gets it)
+  // ipv4 | dual_stack | ipv6 = IPv6 single stack (needs disconnected, platform none, no MetalLB); null = from dual_stack
+  ip_family?: IpFamily | null;
   disable_updates: boolean;
   // Disconnected install (create time only): mirror registry on the group router, group egress blocked
   disconnected?: boolean;
