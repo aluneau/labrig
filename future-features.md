@@ -8,7 +8,7 @@
 Each section gives the design, the API / UI / OpenTofu impact and a rough effort (S ≤ 1 day,
 M ≈ 2–4 days, L ≈ 1–2 weeks).
 
-## Status at a glance (2026-10-05)
+## Status at a glance (2026-10-31)
 
 | Area | State |
 |---|---|
@@ -26,7 +26,9 @@ M ≈ 2–4 days, L ≈ 1–2 weeks).
 | IPv6 dual stack lab groups (RA + DHCPv6 reservations, AAAA, IPv6 egress drop/reject, WireGuard + BGP over IPv6) + template `ipv6-dual-stack` (docs/ipv6.md) | ✅ done (2026-10-09); dual stack kubeadm / OpenShift clusters (2026-10-27) |
 | Authentication: Linux accounts via PAM, groups -> admin / viewer, API tokens, CLI, can be disabled (docs/auth.md) | ✅ done (2026-10-09) |
 | Host resource budget before every create (RAM / vCPU / pool space, 409 + force, UI line; docs/budget.md) | ✅ done (2026-10-31) |
-| CI | open (§4) |
+| CI (.github/workflows/ci.yml: Python 3.9 check, import, pytest, tsc + build, go vet) + releases | ✅ done |
+| Snapshots (VM + group, docs/snapshots.md), host resource budget before creates (docs/budget.md) | ✅ done (2026-10-31) |
+| OpenShift IPv6: dual stack MetalLB BGP + BFD over IPv6, dual stack baremetal VIPs, IPv6-only disconnected SNO (docs/ipv6.md) | ✅ done (2026-10-31) |
 
 OpenTofu covers every feature above: `vmmanager_cloud_image`, `_network` (incl. `mode = "hostdev"` VF pools),
 `_vm` (`boot_order`, `cdrom`, `iommu`, `guest_kernel_args`), `_disk`, `_nic`, `_group` (members with
@@ -505,7 +507,7 @@ A per-cluster SSH key pair is generated (`sshKey`, for `agent-gather` / debug; p
 5. eject + delete the ISO, approve pending CSRs, run the add-ons (below), store kubeconfig + kubeadmin
    password (DB, never in list responses), console URL `https://console-openshift-console.apps.<cluster>.<domain>`.
 Start = masters first, approve CSRs until all nodes Ready; stop = ACPI shutdown (warn during the first 24 h).
-No "add workers" in v1 (`oc adm node-image create` later).
+Add workers: done in day 2 (`oc adm node-image create`, docs/openshift.md).
 
 **Add-ons** (`addons` in the create request, also installable day-2 from the cluster page):
 - *Operators*: curated list (LVMS, ODF, LSO, SR-IOV, MetalLB, NMState, OpenShift Virtualization, GitOps,
