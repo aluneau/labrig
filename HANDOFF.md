@@ -13,14 +13,15 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   stop not exercised here (would stop the owner's libvirt) — `e2e/libvirtctl.js` on a nested install covers it.
 - ACM spokes on emulated BMCs: verified for real (acm.js 2026-10-15, gitops.js 2026-10-16).
 
-## In progress (worktree agents, 2026-10-31)
+## Done 2026-10-31 (merged, verified on :8000)
 
-| Feature | Plan | Branch / port |
-|---|---|---|
-| Snapshots (VM + group, internal qcow2, revert + clock sync) | future-features.md §2.5 | worktree agent, :8301 |
-| Host resource budget before create (RAM / vCPU / pool disk, 409 + force) | future-features.md §4.4 | worktree agent, :8302 |
-
-Merge one at a time into main, rebuild UI, restart `vm-manager`, re-run `smoke.js` + the feature's e2e.
+- **Snapshots** (docs/snapshots.md): VM + group, internal qcow2, memory when running, group revert = resume router
+  first + clock sync, refused when members changed. `snapshots.js` + `smoke.js` passed on main. Not tested: groups
+  with cluster nodes, EL guests refusing set-time, cancel mid-run.
+- **Host resource budget** (docs/budget.md): RAM blocks (409 + `force=true`, `force_budget` in MCP / OpenTofu), vCPU
+  and thin disks warn, "Host resources" line in create modals. `budget.js` refusal path verified on a sandbox backend
+  with a huge reserve; `groups.js` passed on main. Not run for real: forced group / cluster create, member add, add
+  worker.
 
 ## Next candidates (roadmap)
 
