@@ -58,6 +58,7 @@ type clusterModel struct {
 	ExtraArgs      types.String    `tfsdk:"extra_args"`
 	Disconnected   types.Bool      `tfsdk:"disconnected"`
 	DualStack      types.Bool      `tfsdk:"dual_stack"`
+	IPFamily       types.String    `tfsdk:"ip_family"`
 	MirrorImages   types.List      `tfsdk:"mirror_images"`
 	Username       types.String    `tfsdk:"username"`
 	Password       types.String    `tfsdk:"password"`
@@ -136,6 +137,7 @@ type apiCluster struct {
 	Workers       int64            `json:"workers"`
 	Spec          map[string]any   `json:"spec"`
 	DualStack     bool             `json:"dual_stack"`
+	IPFamily      string           `json:"ip_family"`
 	ConsoleURL    *string          `json:"console_url"`
 	Nodes         []apiClusterNode `json:"nodes"`
 }
@@ -222,6 +224,11 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: []planmodifier.Bool{boolplanmodifier.UseStateForUnknown(), boolplanmodifier.RequiresReplace()},
 				Description: "kubeadm / openshift: IPv6 dual stack (pods, services, nodes of both families, MetalLB IPv6 pool; the kubeconfig stays IPv4). " +
 					"Needs a group with IPv6 (vmmanager_group ipv6); true with an auto-created group gives it IPv6. Default: kubeadm = on when the group has IPv6, openshift = off."},
+			"ip_family": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr,
+				Description: "openshift: ipv4 (default) | dual_stack (= dual_stack = true) | ipv6 = IPv6 single stack: IPv6-only nodes (DHCPv6 " +
+					"reservations in the group /64, no IPv4), pods fd01::/48, services fd02::/112. ipv6 needs openshift.disconnected = true (the host has no " +
+					"IPv6 internet: the router's mirror registry serves the nodes over IPv6), platform none and no MetalLB. The kubeconfig still " +
+					"reaches the API through the router's IPv4 uplink address."},
 			"mirror_images": schema.ListAttribute{Optional: true, ElementType: types.StringType,
 				PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplace()},
 				Description:   "kubeadm disconnected: extra images mirrored at create, e.g. docker.io/library/redis:7-alpine (more later: POST /clusters/{id}/mirror)."},
@@ -485,6 +492,9 @@ func (r *clusterResource) Create(ctx context.Context, req resource.CreateRequest
 		if !plan.DualStack.IsNull() && !plan.DualStack.IsUnknown() {
 			opts["dual_stack"] = plan.DualStack.ValueBool()
 		}
+		if v := strPtr(plan.IPFamily); v != nil {
+			opts["ip_family"] = *v
+		}
 		body["openshift"] = opts
 	}
 	if plan.Kubeadm != nil {
@@ -608,6 +618,11 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 		m.OpenShift = nil
 	}
 	m.DualStack = types.BoolValue(c.DualStack)
+	if c.IPFamily != "" {
+		m.IPFamily = types.StringValue(c.IPFamily)
+	} else {
+		m.IPFamily = types.StringValue("ipv4")
+	}
 	if d, ok := c.Spec["disconnected"].(bool); ok {
 		m.Disconnected = types.BoolValue(d)
 	} else if m.Disconnected.IsNull() || m.Disconnected.IsUnknown() {

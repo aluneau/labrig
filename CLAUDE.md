@@ -254,6 +254,16 @@ e2e/                  Playwright browser tests against the real app (see below)
   `LAB6` gets `ebgp-multihop 2` + static `peer <v6> multihop local-address <router v6>` (`router_ipv6.frr_bfd_*`).
   OpenShift `platform: baremetal` dual stack: `api_vip6`/`ingress_vip6` = twins of the v4 VIPs, `apiVIPs`/`ingressVIPs`
   `[v4, v6]`, AAAA -> v6 VIPs. e2e `kubeadm-ipv6.js`, `openshift-ipv6.js`.
+  **IPv6-only OpenShift** (`openshift.ip_family` ipv4|dual_stack|ipv6, None = from `dual_stack`; `ipv6_service.is_ipv6_only`
+  / `ip_family`): ipv6 needs `disconnected` (no IPv6 internet), platform none, no MetalLB. install-config v6 entries only;
+  agent-config rendezvous = master-0 v6, NTP = router v6, no networkConfig (DHCPv6 + RA; no nmstatectl on the host).
+  Node reservations `ipv6_only` (`dhcp-host=mac,[v6],name` + `dhcp-mac=set:vmm-v6only,mac` + `dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6`:
+  DHCPv4 ignored; AAAA only; v4 stays reserved for the host number), records
+  `publish(ipv6_only=True)`, LB backends `[v6]:port` (rendered `v6:port`: haproxy's last colon = port), chrony allows the
+  /64, Assisted curl `[v6]:8090`. Registry over IPv6 (every IPv6 group with the registry): haproxy `vmm-registry6`
+  `[::]:8443 v6only` TLS with Quay's cert (`/etc/haproxy/vmm-registry.pem`, `haproxy_pem` in vmm-registry.sh), backend
+  Quay v4, `WWW-Authenticate` realm `<uplink_ip>` -> `registry.<domain>` (Quay's realm is the v4 uplink literal).
+  e2e `openshift-ipv6only.js`.
 - **Topology view** (`components/topology/LabTopology.tsx` + `flows.ts`, group Topology tab and OpenShift cluster
   Topology tab): one `GET /groups/{id}/topology` (live WireGuard peers, BGP sessions/routes, MetalLB L2 announcer via
   `oc`), inline SVG laid out per width (laptop/host column, router, L2 bus with machines, virtual IPs; stacked < 820 px),
@@ -450,6 +460,7 @@ scripts/check-templates.py                                      # validate templ
 node bgp.js                                                     # BGP: FRR members, ECMP, filter, WireGuard client VM (created), Topology tab shots, failover
 node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
 node kubeadm-ipv6.js                                            # dual stack kubeadm: node/pod/Service v4+v6, pod->pod v6, MetalLB v6 L2 + BGP from a member (REUSE=1 KEEP=1)
+node openshift-ipv6only.js                                      # IPv6-only disconnected SNO: InternalIP v6 only, no v4 on br-ex, pod from the mirror, console via router (REUSE=1 KEEP=1, ~2 h)
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
 node acm.js                                                     # ACM hub (SNO) + import kubeadm / k3s, Available, refused k3s on own NAT, detach (REUSE=1 KEEP=1, ~2 h fresh)

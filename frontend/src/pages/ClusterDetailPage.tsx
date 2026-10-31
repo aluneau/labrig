@@ -263,6 +263,9 @@ export const ClusterDetailPage: React.FC = () => {
               {cluster.dual_stack && (
                 <Label id="cluster-dual-stack" color="cyan" isCompact style={{ marginLeft: 8 }}>IPv6 dual stack</Label>
               )}
+              {cluster.ip_family === 'ipv6' && (
+                <Label id="cluster-ipv6-only" color="cyan" isCompact style={{ marginLeft: 8 }}>IPv6 only</Label>
+              )}
             </div>
           </FlexItem>
           <FlexItem>
@@ -488,7 +491,8 @@ export const ClusterDetailPage: React.FC = () => {
                         <Td dataLabel="Name"><strong>{n.name}</strong></Td>
                         <Td dataLabel="Role">{n.role === 'ctlplane' ? 'control plane' : 'worker'}</Td>
                         <Td dataLabel="State"><StatusLabel status={n.state} /></Td>
-                        <Td dataLabel="IP">{n.ip || '—'}{n.ip6 && <div className="node-ip6"><small>{n.ip6}</small></div>}</Td>
+                        <Td dataLabel="IP">{cluster.ip_family === 'ipv6' && n.ip6 ? n.ip6
+                          : <>{n.ip || '—'}{n.ip6 && <div className="node-ip6"><small>{n.ip6}</small></div>}</>}</Td>
                         <Td dataLabel="DNS name">{n.fqdn || '—'}</Td>
                         <Td dataLabel="MAC"><code>{n.mac || '—'}</code></Td>
                         <Td isActionCell>

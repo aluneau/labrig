@@ -50,6 +50,12 @@ group needs IPv6 (an auto-created group gets it); install-config adds the group 
 IPv4 pool; BGP: an IPv6 announce /64 + IPv6 sessions, BFD included); platform baremetal: IPv6 twins of the VIPs.
 See docs/ipv6.md "Dual stack clusters".
 
+**IPv6 only** (`openshift.ip_family: ipv6`, create only; UI *IP family* → *IPv6 only*, OpenTofu `ip_family`): single
+stack IPv6 nodes, pods and Services, no IPv4 on the nodes (DHCPv6 reservations; the router ignores their DHCPv4).
+Needs `disconnected: true` (no IPv6 internet on the host: the router's mirror registry serves the nodes over IPv6),
+platform none, no MetalLB. The kubeconfig still points at the router's IPv4 uplink (haproxy -> node IPv6). See
+docs/ipv6.md "IPv6-only OpenShift".
+
 ## Reaching the cluster
 
 - **kubeconfig** (cluster page): `server: https://<router uplink IP>:6443` with

@@ -26,7 +26,7 @@ import {
 } from '@patternfly/react-core';
 import { CheckCircleIcon, ExclamationTriangleIcon } from '@patternfly/react-icons';
 import {
-  CatalogOperator, HostResources, MetalLBOptions, OdfProfile, OpenShiftChannel, OpenShiftDistribution, OpenShiftOptions,
+  CatalogOperator, HostResources, IpFamily, MetalLBOptions, OdfProfile, OpenShiftChannel, OpenShiftDistribution, OpenShiftOptions,
   OpenShiftPlatform, OpenShiftStorage, OpenShiftTopology, OpenShiftVersion, PullSecretStatus, SriovOptions,
 } from '../../types';
 import { hostApi, openshiftApi } from '../../services/api';
@@ -144,7 +144,7 @@ const toResources = (r: Role, odf: OdfProfile | null = null) => ({
 });
 
 /** The request parts the draft drives: counts, sizes and the `openshift` options */
-export const osRequest = (d: OsDraft, catalog: CatalogOperator[], dualStack = false) => {
+export const osRequest = (d: OsDraft, catalog: CatalogOperator[], ipFamily: IpFamily = 'ipv4') => {
   const { ctlplanes, workers } = nodeCounts(d);
   const source = (name: string) => catalog.find((o) => o.name === name)?.source || 'redhat-operators';
   const names = [...d.operators, ...d.extraOperators.filter((n) => !d.operators.includes(n))];
@@ -164,7 +164,8 @@ export const osRequest = (d: OsDraft, catalog: CatalogOperator[], dualStack = fa
       bfd: d.metallb.mode === 'bgp' && !!d.metallb.bfd,
     },
     acm: d.acm,
-    dual_stack: dualStack,
+    dual_stack: ipFamily === 'dual_stack',
+    ip_family: ipFamily,
     disable_updates: d.disableUpdates,
     disconnected: d.disconnected,
   };

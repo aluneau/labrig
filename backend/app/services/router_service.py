@@ -46,6 +46,7 @@ rm -f "$TMP/vmm-reserved" "$TMP/vmm-leases"
 # router never OOMs while installing packages (see ROUTER_MEMORY_DEFAULT in schemas/group.py)
 SWAP_SIZE = "1G"
 STATE_DIR = "/var/lib/vmm-router"
+V6ONLY_TAG = "vmm-v6only"  # dnsmasq tag of IPv6-only reservations (IPv6-only OpenShift nodes)
 
 
 @dataclass
@@ -130,8 +131,19 @@ class ELRouterBackend(RouterBackend):
         for r in spec.reservations:
             if r.owner:
                 lines.append(f"# {r.owner}")
+            ip6 = spec.ip6_of(r.ip) if r.ipv6_only else None
+            if ip6:  # IPv6-only host: its DHCPv4 requests are ignored (V6ONLY_TAG), no A record
+                lines.append(f"dhcp-host={r.mac},[{ip6}],{r.name}")
+                lines.append(f"dhcp-mac=set:{V6ONLY_TAG},{r.mac}")
+                lines.append(f"host-record={r.name}.{domain},{r.name},{ip6}")
+                continue
             lines.append(f"dhcp-host={r.mac},{v6.dhcp_addrs(spec, r.ip)},{r.name}")
             lines.append(f"host-record={r.name}.{domain},{r.name},{v6.record_addrs(spec, r.ip)}")
+        if any(r.ipv6_only for r in spec.reservations) and v6.prefix(spec) is not None:
+            # dnsmasq tags DHCPv6 requests "dhcpv6": ignore only the DHCPv4 ones of IPv6-only hosts. The tag
+            # comes from dhcp-mac: a `set:` on a v6-only dhcp-host isn't applied to DHCPv4 requests (the host is
+            # "known-othernet" there)
+            lines.append(f"dhcp-ignore=tag:{V6ONLY_TAG},tag:!dhcpv6")
         lines += ["", "# records"]
         lines += [self._record(r, domain) for r in spec.router.dns.records]
         lines += self._dhcp_host_lines(spec)
@@ -236,7 +248,10 @@ class ELRouterBackend(RouterBackend):
         for lb in spec.load_balancers:
             lines += ["", f"# {lb.owner or lb.name}", f"listen {lb.name}", v6.haproxy_bind(spec, lb.port),
                       f"    mode {lb.mode}", "    balance roundrobin"]
-            lines += [f"    server {lb.name}-{i} {backend} check" for i, backend in enumerate(lb.backends)]
+            # haproxy takes the last colon as the port separator: "[fd00::21]:6443" -> "fd00::21:6443"
+            lines += [f"    server {lb.name}-{i} {backend.replace('[', '').replace(']', '')} check"
+                      for i, backend in enumerate(lb.backends)]
+        lines += registry_router.haproxy_lines(spec)
         return "\n".join(lines) + "\n"
 
     def wg_conf(self, spec: GroupSpec) -> str:
@@ -386,9 +401,12 @@ class ELRouterBackend(RouterBackend):
     def ntp_command(spec: GroupSpec) -> str:
         """The router (synced to the public pools through its uplink) serves NTP to the lab: OpenShift's
         installer checks the nodes' clock against it, and labs keep time without internet NTP."""
-        allow = f"allow {spec.cidr}"
-        return (f"{{ grep -qx '{allow}' /etc/chrony.conf || {{ echo '{allow}' >> /etc/chrony.conf"
-                " && systemctl restart chronyd; }; true; }")
+        cmd = ""
+        for net in [spec.cidr] + ([spec.ipv6_prefix()] if spec.ipv6_prefix() else []):  # + the IPv6 /64
+            allow = f"allow {net}"
+            cmd += (f"{{ grep -qx '{allow}' /etc/chrony.conf || {{ echo '{allow}' >> /etc/chrony.conf"
+                    " && systemctl restart chronyd; }; true; }; ")
+        return cmd.rstrip("; ")
 
     def apply_command(self, spec: GroupSpec) -> str:
         # IPv6 (router_ipv6) first: dnsmasq needs the LAN's IPv6 address; a failure fails the apply at the end
@@ -404,7 +422,7 @@ class ELRouterBackend(RouterBackend):
             base += " && " + self._bgp_apply(spec)
         if registry_router.apply_command(spec):
             base += " && " + registry_router.apply_command(spec)
-        if not spec.load_balancers:
+        if not spec.load_balancers and not registry_router.ipv6_front(spec):
             return base + " && { systemctl disable --now haproxy >/dev/null 2>&1; true; }"
         # Routers created before load balancers existed have no haproxy yet: install it once.
         # haproxy_connect_any lets haproxy bind / connect to any port (-P: persistent, set only once

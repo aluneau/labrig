@@ -240,8 +240,9 @@ class ClusterService:
                      "stopped": "shutoff"}.get(cluster.status, "missing")
         group = db.query(Group).filter(Group.id == cluster.group_id).first() if cluster.group_id else None
         v6 = group_ip6(group.spec if group is not None else None)
+        v6only = bool(v6) and ipv6_service.is_ipv6_only(cluster)  # the reserved IPv4 address is never used
         nodes = [{
-            "name": n.name, "role": n.role, "ip": n.ip, "mac": n.mac, "vm_id": vm_ids.get(n.name),
+            "name": n.name, "role": n.role, "ip": None if v6only else n.ip, "mac": n.mac, "vm_id": vm_ids.get(n.name),
             "ip6": ip6_for(n.ip, *v6) if v6 else None,
             "state": bmh_state if bmh else states.get(n.name, "missing"), "fqdn": f"{n.name}.{zone}",
         } for n in cluster.nodes]
@@ -305,6 +306,7 @@ class ClusterService:
             "ctlplanes": sum(1 for n in cluster.nodes if n.role == "ctlplane"),
             "workers": sum(1 for n in cluster.nodes if n.role == "worker"),
             "dual_stack": is_dual_stack(cluster),
+            "ip_family": ipv6_service.ip_family(cluster),
             "spec": spec, "nodes": nodes, "created_at": cluster.created_at, "updated_at": cluster.updated_at,
             "acm": self._acm(db, cluster),
         }

@@ -15,12 +15,13 @@ import {
   HelperTextItem,
   Modal,
   ModalVariant,
+  Radio,
   Switch,
   TextArea,
   TextInput,
   Title,
 } from '@patternfly/react-core';
-import { BareMetalHost, CatalogOperator, CloudImage, ClusterCreate, Group, MetalLBOptions, Network } from '../../types';
+import { BareMetalHost, CatalogOperator, CloudImage, ClusterCreate, Group, IpFamily, MetalLBOptions, Network } from '../../types';
 import { bareMetalApi, clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
 import { HostBudget, budgetBlocks, useHostBudget } from '../common/HostBudget';
@@ -125,6 +126,8 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const [disconnected, setDisconnected] = useState(false);
   // IPv6 dual stack: null = the default (kubeadm: on in an IPv6 group; OpenShift: off)
   const [dualStack, setDualStack] = useState<boolean | null>(null);
+  // OpenShift: IPv4 / dual stack / IPv6 only (IPv6 only = disconnected, no MetalLB)
+  const [ipFamily, setIpFamily] = useState<IpFamily>('ipv4');
   const [mirrorImages, setMirrorImages] = useState('');
   // OpenShift
   const [os, setOs] = useState<OsDraft>(defaultOsDraft);
@@ -185,7 +188,11 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   // shown for a new group (gets IPv6 when on) or a group with IPv6
   const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6);
   const dualStackOn = dualStackShown && (dualStack ?? (type === 'kubeadm' && groupHasV6));
-  const osErrors = isOpenShift ? osDraftErrors(os) : [];
+  const osFamily: IpFamily = dualStackShown ? ipFamily : 'ipv4';
+  const osErrors = isOpenShift ? [...osDraftErrors(os), ...(osFamily === 'ipv6' ? [
+    ...(!os.disconnected ? ['IPv6 only needs Disconnected (no IPv6 internet: everything comes from the mirror registry).'] : []),
+    ...(os.metallb.enabled ? ['MetalLB is not available on IPv6-only OpenShift yet.'] : []),
+  ] : [])] : [];
   const groupTaken = inGroup && !!pickedGroup && hasOpenShift(pickedGroup);
   const bmhValid = !!bmhId && !!bmhIp.trim() && !!bmhGateway.trim() && !!bmhDns.trim()
     && Number(bmhPrefix) >= 1 && Number(bmhPrefix) <= 32;
@@ -215,7 +222,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     group_id: bareMetal ? null : (groupId ? Number(groupId) : null),
     cidr: !bareMetal && autoGroup ? cidr.trim() || null : null,
     ssh_keys: sshKeys.split('\n').map((k) => k.trim()).filter(Boolean),
-    ...osRequest(os, catalog, dualStackOn),
+    ...osRequest(os, catalog, osFamily),
     ...(bareMetal ? {
       bare_metal: {
         hosts: [{ host_id: Number(bmhId), ip: bmhIp.trim() }],
@@ -389,7 +396,31 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                 </HelperTextItem></HelperText></FormHelperText>
               </FormGroup>
             ) : null}
-            {dualStackShown && (
+            {dualStackShown && isOpenShift && (
+              <FormGroup label="IP family" fieldId="cl-ip-family" role="radiogroup" isInline style={{ marginTop: 8 }}>
+                {([['ipv4', 'IPv4'], ['dual_stack', 'Dual stack'], ['ipv6', 'IPv6 only']] as [IpFamily, string][]).map(([value, label]) => (
+                  <Radio key={value} id={`cl-ip-family-${value}`} name="cl-ip-family" label={label} isChecked={ipFamily === value}
+                    // IPv6-only VIPs on platform baremetal are not done (the backend refuses it)
+                    isDisabled={value === 'ipv6' && os.platform === 'baremetal'}
+                    onChange={() => {
+                      setIpFamily(value);
+                      // IPv6 only: the host has no IPv6 internet, the nodes pull everything from the router's mirror
+                      if (value === 'ipv6') setOs((d) => ({ ...d, disconnected: true, metallb: { ...d.metallb, enabled: false } }));
+                    }} />
+                ))}
+                <FormHelperText><HelperText><HelperTextItem id="cl-ip-family-help">
+                  {ipFamily === 'ipv4' ? 'Nodes, pods and services on IPv4.'
+                    : ipFamily === 'dual_stack'
+                    ? `${autoGroup ? 'The new group gets IPv6 (a /64, DHCPv6 reservations): ' : 'The group has IPv6: '}`
+                      + 'machine / cluster / service networks of both families, MetalLB an IPv6 pool too. The kubeconfig stays on IPv4.'
+                    : `${autoGroup ? 'The new group gets IPv6. ' : ''}IPv6 single stack: nodes get their IPv6 address from DHCPv6 and no IPv4, `
+                      + 'pods fd01::/48, services fd02::/112. Needs Disconnected (no IPv6 internet): the router\'s mirror registry, '
+                      + 'DNS, NTP and load balancers serve the nodes over IPv6; the kubeconfig still reaches the API through the '
+                      + 'router\'s IPv4 uplink address. No MetalLB.'}
+                </HelperTextItem></HelperText></FormHelperText>
+              </FormGroup>
+            )}
+            {dualStackShown && !isOpenShift && (
               <FormGroup fieldId="cl-dual-stack" style={{ marginTop: 8 }}>
                 <Switch id="cl-dual-stack" label="IPv6 dual stack" isChecked={dualStackOn}
                   onChange={(_e, v) => setDualStack(v)} />

@@ -366,8 +366,9 @@ idea as the live DHCP reservations, but with the router as the target.
 > switch, addresses everywhere, BGP tab, topology), `vmmanager_group.ipv6`, template `ipv6-dual-stack`, `e2e/ipv6.js`.
 > Dual stack clusters done (2026-10, docs/ipv6.md "Dual stack clusters"): kubeadm (`kubeadm.dual_stack`, Flannel
 > IPv6, MetalLB IPv6 pools L2 + BGP, `e2e/kubeadm-ipv6.js`), OpenShift (`openshift.dual_stack`, v6 machine / cluster /
-> service networks). Next: NAT66 /
-> NPTv6 when an uplink has IPv6, IPv6-only groups.
+> service networks). IPv6-only OpenShift done (2026-10, docs/ipv6.md "IPv6-only OpenShift": `openshift.ip_family: ipv6`,
+> disconnected only, IPv6-only node reservations (DHCPv4 ignored), IPv6 haproxy backends, registry IPv6 front with token realm rewrite,
+> `e2e/openshift-ipv6only.js`). Next: NAT66 / NPTv6 when an uplink has IPv6, IPv6-only groups.
 
 > **BGP + Topology view — ✅ done** (2026-10, docs/bgp.md): `router.bgp` rendered as FRR (dynamic neighbors on the
 > group CIDR, AS 64512 ← 64513, announce ranges from `BGP_ANNOUNCE_POOL` filtered `le 32`, ECMP over ports), live

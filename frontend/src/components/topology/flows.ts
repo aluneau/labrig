@@ -85,7 +85,7 @@ function serviceFlow(t: GroupTopology, vip: TopologyVip): Flow | null {
     });
     steps.push({
       title: `Delivered to ${target.name}`,
-      text: `To reach ${target.name} (${target.ip}) the router uses the lab network directly: an ARP request finds its MAC address, `
+      text: `To reach ${target.name} (${labAddr(target)}) the router uses the lab network directly: an ARP request finds its MAC address, `
         + `and the packet (still addressed to ${ip}) is handed to it.`,
       active: ['router', 'lan', 'bus', `drop:${target.name}`, `m:${target.name}`],
       move: [{ seg: 'lan' }, { seg: `drop:${target.name}` }],
@@ -139,6 +139,9 @@ function flowLabel(vip: TopologyVip, ip: string): string {
   if (vip.hostname) return `Your laptop reaches ${vip.hostname} (${ip})`;
   return `Your laptop reaches ${ip} (announced by ${list(vip.via)})`;
 }
+
+/** A machine's address inside the lab (IPv6-only nodes: their IPv6 address) */
+const labAddr = (m: TopologyMachine) => (m.ipv6_only ? m.ip6 : m.ip) || m.name;
 
 function memberFlow(t: GroupTopology, m: TopologyMachine): Flow {
   const fqdn = m.fqdn || `${m.name}.${t.domain}`;
@@ -226,6 +229,7 @@ function kubectlFlow(t: GroupTopology, clusterName: string, url: string, port: n
   const lb = t.router.load_balancers.find((x) => x.port === port);
   const first = nodes.find((m) => m.state === 'running') || nodes[0];
   const uplink = t.router.uplink_ip || '?';
+  const v6only = nodes.some((n) => n.ipv6_only);
   const steps: Step[] = [
     {
       title: 'Where is the API?',
@@ -237,7 +241,9 @@ function kubectlFlow(t: GroupTopology, clusterName: string, url: string, port: n
     {
       title: 'Load balancer on the router',
       text: `haproxy on the router listens on port ${port} (on every router address). It picks a healthy control plane `
-        + `(${lb ? lb.backends.join(', ') : nodes.map((n) => n.ip).join(', ')}), round robin, and opens a TCP connection to it.`,
+        + `(${lb ? lb.backends.join(', ') : nodes.map(labAddr).join(', ')}), round robin, and opens a TCP connection to it`
+        + (v6only ? ` over IPv6, from its LAN address ${t.router.lan_ip6}: the nodes are IPv6 only. The host side stays IPv4 `
+          + `(${uplink}), haproxy bridges the two families (neighbor discovery finds the node's MAC address).` : '.'),
       active: ['router', 'badge:lb', 'lan', 'bus', ...nodes.map((n) => `drop:${n.name}`), ...nodes.map((n) => `m:${n.name}`)],
       move: first ? [{ seg: 'lan' }, { seg: `drop:${first.name}` }] : [{ seg: 'lan' }],
     },

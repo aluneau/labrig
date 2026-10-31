@@ -215,6 +215,8 @@ class Cluster(BaseModel):
     workers: int = 0
     # IPv6 dual stack cluster (pods / services of both families)
     dual_stack: bool = False
+    # ipv4 | dual_stack | ipv6 (IPv6-only OpenShift: nodes' `ip` is reserved but unused, `ip6` is their address)
+    ip_family: str = "ipv4"
     spec: Optional[Dict[str, Any]] = None
     # ACM: {role: hub | managed | spoke, hub_id, hub_name, state} (GET /clusters/{hub_id}/acm for the details)
     acm: Optional[Dict[str, Any]] = None

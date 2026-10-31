@@ -640,12 +640,13 @@ class OpenShiftService:
     def install_config(name: str, base_domain: str, machine_cidr: str, masters: int, workers: int,
                        pull_secret: str, ssh_key: str, mirror: Optional[Dict[str, Any]] = None,
                        vips: Optional[Dict[str, str]] = None,
-                       machine_cidr6: Optional[str] = None) -> Dict[str, Any]:
+                       machine_cidr6: Optional[str] = None, ipv6_only: bool = False) -> Dict[str, Any]:
         """mirror (disconnected): {image_digest_sources: [{source, mirrors}], ca_pem}: the release comes
         from the group's mirror registry, whose CA every node trusts (additionalTrustBundlePolicy Always:
         also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it).
         vips {api, ingress (+ api6, ingress6)}: platform baremetal (in-cluster keepalived + haproxy on those
-        addresses)"""
+        addresses)
+        machine_cidr6: the group /64 (dual stack: after the IPv4 entries; ipv6_only: the only entries)"""
         config = {
             "apiVersion": "v1",
             "baseDomain": base_domain,
@@ -666,7 +667,14 @@ class OpenShiftService:
             "pullSecret": pull_secret,
             "sshKey": ssh_key,
         }
-        if machine_cidr6:
+        if ipv6_only:
+            # IPv6 single stack (docs/ipv6.md "IPv6-only OpenShift"): the nodes have no IPv4 at all
+            if not machine_cidr6:
+                raise ValueError("IPv6-only install without the group's IPv6 network")
+            config["networking"].update(machineNetwork=[{"cidr": machine_cidr6}],
+                                        clusterNetwork=[{"cidr": POD_CIDR6, "hostPrefix": 64}],
+                                        serviceNetwork=[SERVICE_CIDR6])
+        elif machine_cidr6:
             # dual stack, IPv4 first (primary family): the nodes' IPv6 addresses come from DHCPv6 (group /64)
             net = config["networking"]
             net["machineNetwork"].append({"cidr": machine_cidr6})
@@ -681,7 +689,8 @@ class OpenShiftService:
     @staticmethod
     def agent_config(name: str, rendezvous_ip: str, ntp: Optional[str],
                      hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """hosts: [{name, role: master|worker, mac}] (addresses come from the router's DHCP reservations)"""
+        """hosts: [{name, role: master|worker, mac}] (addresses come from the router's DHCP / DHCPv6
+        reservations; IPv6-only: rendezvous_ip and ntp are IPv6 addresses, the router serves the nodes no IPv4)"""
         config: Dict[str, Any] = {
             "apiVersion": "v1beta1", "kind": "AgentConfig", "metadata": {"name": name},
             "rendezvousIP": rendezvous_ip,
