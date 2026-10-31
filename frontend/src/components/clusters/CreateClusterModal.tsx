@@ -183,8 +183,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
   const pickedGroup = groups.find((g) => String(g.id) === groupId);
   const groupHasV6 = !!pickedGroup?.spec?.network?.ipv6?.enabled;
   // shown for a new group (gets IPv6 when on) or a group with IPv6
-  const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6)
-    && !(isOpenShift && os.platform === 'baremetal' && os.topology !== 'sno'); // baremetal VIPs: IPv4 only
+  const dualStackShown = inGroup && !bareMetal && (autoGroup || groupHasV6);
   const dualStackOn = dualStackShown && (dualStack ?? (type === 'kubeadm' && groupHasV6));
   const osErrors = isOpenShift ? osDraftErrors(os) : [];
   const groupTaken = inGroup && !!pickedGroup && hasOpenShift(pickedGroup);

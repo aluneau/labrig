@@ -644,7 +644,8 @@ class OpenShiftService:
         """mirror (disconnected): {image_digest_sources: [{source, mirrors}], ca_pem}: the release comes
         from the group's mirror registry, whose CA every node trusts (additionalTrustBundlePolicy Always:
         also the cluster-wide trust bundle, for OLM catalogs / operators pulling from it).
-        vips {api, ingress}: platform baremetal (in-cluster keepalived + haproxy on those addresses)"""
+        vips {api, ingress (+ api6, ingress6)}: platform baremetal (in-cluster keepalived + haproxy on those
+        addresses)"""
         config = {
             "apiVersion": "v1",
             "baseDomain": base_domain,
@@ -657,7 +658,10 @@ class OpenShiftService:
                 "clusterNetwork": [{"cidr": POD_CIDR, "hostPrefix": 23}],
                 "serviceNetwork": [SERVICE_CIDR],
             },
-            "platform": {"baremetal": {"apiVIPs": [vips["api"]], "ingressVIPs": [vips["ingress"]]}}
+            # dual stack: both families, IPv4 first (primary)
+            "platform": {"baremetal": {"apiVIPs": [vips["api"]] + ([vips["api6"]] if vips.get("api6") else []),
+                                       "ingressVIPs": [vips["ingress"]]
+                                       + ([vips["ingress6"]] if vips.get("ingress6") else [])}}
             if vips else {"none": {}},
             "pullSecret": pull_secret,
             "sshKey": ssh_key,

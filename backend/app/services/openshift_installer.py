@@ -506,8 +506,8 @@ class OpenShiftInstaller:
             # DNS points at them. The router only forwards its uplink :6443 / :80 / :443 to them: the host (and the
             # kubeconfig) reach the cluster through the router's uplink address, as with platform none.
             vips = self._assign_vips(db, cluster, network, gspec, [n.ip for n in nodes])
-            network.publish(vips["api"], [f"api.{zone}", f"api-int.{zone}"])
-            network.publish(vips["ingress"], [f"*.apps.{zone}"])
+            network.publish(vips["api"], [f"api.{zone}", f"api-int.{zone}"], ip6=vips.get("api6"))
+            network.publish(vips["ingress"], [f"*.apps.{zone}"], ip6=vips.get("ingress6"))
             network.publish_lb(f"{cluster.name}-api", LB_PORTS["api"], [f"{vips['api']}:6443"])
             network.publish_lb(f"{cluster.name}-http", LB_PORTS["http"], [f"{vips['ingress']}:80"])
             network.publish_lb(f"{cluster.name}-https", LB_PORTS["https"], [f"{vips['ingress']}:443"])
@@ -535,26 +535,36 @@ class OpenShiftInstaller:
         db.commit()
         return nodes
 
-    @staticmethod
-    def _metallb_pool6(cluster: Cluster, mode: str, pool: str) -> Optional[str]:
-        """Dual stack, L2: the IPv6 addresses paired with the IPv4 pool (BGP stays IPv4 on OpenShift)"""
-        if not ipv6_service.is_dual_stack(cluster) or mode != "l2" or not pool:
+    def _metallb_pool6(self, db: Session, cluster: Cluster, network: GroupClusterNetwork, mode: str,
+                       pool: str) -> Optional[str]:
+        """Dual stack: the IPv6 side of the MetalLB pool (shared with kubeadm: metallb.dual_stack_pool): L2 = the
+        IPv6 twins of the IPv4 pool, BGP = a range of the cluster's own IPv6 announce /64 (<cluster>-metallb6,
+        released when going back to L2). Stored with the cluster (pool6, range6: MetalLB lab checks)."""
+        if not ipv6_service.is_dual_stack(cluster):
             return None
-        gspec = GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).spec()
-        return metallb.pool6_for(gspec, mode, pool)
+        os_spec = cluster.spec.get("openshift") or {}
+        mlb = os_spec.get("metallb") or {}
+        pool6, range6 = metallb.dual_stack_pool(db, network, cluster.name, mode, pool, mlb.get("range6"))
+        self._update_spec(db, cluster, openshift={**os_spec, "metallb": {**mlb, "pool6": pool6, "range6": range6}})
+        return pool6
 
     @staticmethod
     def vips(cluster: Cluster) -> Optional[Dict[str, str]]:
-        """platform baremetal: {api, ingress} once assigned, else None"""
+        """platform baremetal: {api, ingress (+ api6, ingress6: dual stack)} once assigned, else None"""
         os_spec = (cluster.spec or {}).get("openshift") or {}
         if os_spec.get("platform") != "baremetal" or not os_spec.get("api_vip"):
             return None
-        return {"api": os_spec["api_vip"], "ingress": os_spec["ingress_vip"]}
+        vips = {"api": os_spec["api_vip"], "ingress": os_spec["ingress_vip"]}
+        if os_spec.get("api_vip6"):
+            vips.update(api6=os_spec["api_vip6"], ingress6=os_spec["ingress_vip6"])
+        return vips
 
     def _assign_vips(self, db: Session, cluster: Cluster, network: GroupClusterNetwork, gspec,
                      node_ips: List[str]) -> Dict[str, str]:
         """platform baremetal: the API / ingress VIPs (the request's, else free addresses of the group network),
-        recorded in spec.openshift and reserved as one-address pools owned by the cluster"""
+        recorded in spec.openshift and reserved as one-address pools owned by the cluster. Dual stack: + their
+        IPv6 twins (api_vip6 / ingress_vip6, <prefix>::<host number>): free since the IPv4 VIP is (no
+        reservation pairs with it) and outside the dynamic DHCPv6 range (::dc:0-ffff)"""
         os_spec = dict(cluster.spec.get("openshift") or {})
         net = ipaddress.IPv4Network(gspec.cidr, strict=False)
         used = set(node_ips) | {gspec.router.ip}
@@ -571,9 +581,11 @@ class OpenShiftInstaller:
             used.add(vip)
             vips[kind] = vip
             network.set_address_pool(f"{cluster.name}-{kind}-vip", vip, vip)
-        if os_spec.get("api_vip") != vips["api"] or os_spec.get("ingress_vip") != vips["ingress"]:
-            self._update_spec(db, cluster, openshift={**os_spec, "api_vip": vips["api"],
-                                                      "ingress_vip": vips["ingress"]})
+        if os_spec.get("dual_stack") and gspec.ipv6_prefix():
+            vips.update(api6=gspec.ip6_of(vips["api"]), ingress6=gspec.ip6_of(vips["ingress"]))
+        if any(os_spec.get(f"{k}_vip{v}") != vips.get(f"{k}{v}") for k in ("api", "ingress") for v in ("", "6")):
+            self._update_spec(db, cluster, openshift={**os_spec, "api_vip": vips["api"], "ingress_vip": vips["ingress"],
+                                                      "api_vip6": vips.get("api6"), "ingress_vip6": vips.get("ingress6")})
         return vips
 
     @staticmethod
@@ -1524,16 +1536,16 @@ class OpenShiftInstaller:
             pool, mode = mlb.get("pool"), mlb.get("mode") or "l2"
             if not pool:
                 raise ValueError("No MetalLB address pool assigned")
-            bgp = None
-            if mode == "bgp":
-                bgp = metallb.bgp_params(GroupClusterNetwork(cluster.group_id, cluster.name, owned=False).spec())
-            runner.metallb(pool, mode, bgp, self._metallb_pool6(cluster, mode, pool))
+            network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
+            pool6 = self._metallb_pool6(db, cluster, network, mode, pool)
+            bgp = metallb.bgp_params(network.spec()) if mode == "bgp" else None
+            runner.metallb(pool, mode, bgp, pool6)
             if mlb.get("service_ip"):  # day 2 (e.g. L2 -> BGP): the demo moves to the new pool
                 self.run_addon(db, cluster, runner, "metallb-demo", "hello", opts)
         elif kind == "metallb-demo":
             mlb = (cluster.spec.get("openshift") or {}).get("metallb", {})
             old_ip = mlb.get("service_ip")
-            dual = self._metallb_pool6(cluster, mlb.get("mode") or "l2", mlb.get("pool") or "") is not None
+            dual = ipv6_service.is_dual_stack(cluster)
             ip = runner.metallb_demo(pool=mlb.get("pool"), mode=mlb.get("mode") or "l2", dual_stack=dual)
             ip6 = runner.service_ip6() if dual else None
             network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
