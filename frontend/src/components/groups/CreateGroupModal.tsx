@@ -21,6 +21,7 @@ import { MinusCircleIcon, PlusCircleIcon } from '@patternfly/react-icons';
 import { CloudImage, Group, GroupSpec, Network } from '../../types';
 import { groupApi, networkApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
+import { HostBudget, budgetBlocks, useHostBudget } from '../common/HostBudget';
 import { KEYBOARD_LAYOUTS, defaultKeyboard } from '../vms/CreateVMModal';
 
 const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
@@ -86,6 +87,15 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
   const nameValid = LABEL_RE.test(name);
   const membersValid = members.every((m) => LABEL_RE.test(m.name) && m.image && Number(m.memoryGiB) > 0);
   const canSubmit = nameValid && cidr && routerImage && membersValid && !busy;
+  // Host resources line: router + members, as the create will count them
+  const budget = useHostBudget(isOpen && routerImage ? {
+    group: {
+      router: { image: routerImage },
+      members: members.filter((m) => m.image && Number(m.memoryGiB) > 0)
+        .map((m) => ({ image: m.image, memory: Math.round(Number(m.memoryGiB) * 1024) })),
+    },
+  } : null);
+  const [force, setForce] = useState(false);
 
   const submit = async () => {
     const spec: GroupSpec = {
@@ -103,7 +113,7 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
     setBusy(true);
     setError(null);
     try {
-      const { group } = await groupApi.create(spec);
+      const { group } = await groupApi.create(spec, force);
       setName('');
       setMembers([]);
       setCidr('');
@@ -119,7 +129,7 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
   return (
     <Modal variant={ModalVariant.medium} title="Create lab group" isOpen={isOpen} onClose={onClose}
       actions={[
-        <Button key="create" onClick={submit} isDisabled={!canSubmit} isLoading={busy}>Create</Button>,
+        <Button key="create" onClick={submit} isDisabled={!canSubmit || budgetBlocks(budget, force)} isLoading={busy}>Create</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}>
@@ -226,6 +236,7 @@ export const CreateGroupModal: React.FC<{ isOpen: boolean; groups: Group[]; onCl
             name: `node${ms.length + 1}`, image: ms[ms.length - 1]?.image || (images[0] ? imageSlug(images[0]) : ''), memoryGiB: '1', ip: '',
           }])}>Add member</Button>
         </div>
+        <HostBudget result={budget} force={force} onForce={setForce} />
       </Form>
     </Modal>
   );

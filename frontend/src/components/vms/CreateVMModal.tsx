@@ -22,7 +22,8 @@ import {
   TextArea,
   TextInput,
 } from '@patternfly/react-core';
-import { CloudImage, Group, GroupCloudInit, ISOImage, MemberSpec, Network, NicModel, VMCreate } from '../../types';
+import { BudgetRequest, CloudImage, Group, GroupCloudInit, ISOImage, MemberSpec, Network, NicModel, VMCreate } from '../../types';
+import { HostBudget, budgetBlocks, useHostBudget } from '../common/HostBudget';
 import { NIC_MODELS, networkLabel } from './VmDevices';
 import { groupApi, networkApi, storageApi, vmApi } from '../../services/api';
 import { errorText } from '../../utils/format';
@@ -133,6 +134,23 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
     (source !== 'iso' || isoPath) &&
     (source === 'iso' || Number(diskGiB) > 0);
 
+  // Host resources line (same planner as the create): the member of the group, or the standalone VM
+  const sizes = { memory: Math.round(Number(memoryGiB) * 1024), vcpu: Number(vcpu), disk_size: Number(diskGiB) || 0 };
+  const budgetImage = cloudImages.find((i) => String(i.id) === cloudImageId);
+  const budgetReq: BudgetRequest | null = !isOpen || !(sizes.memory >= 128) || !(sizes.vcpu >= 1) ? null
+    : group ? {
+      group_id: group.id,
+      members: [{
+        ...sizes,
+        source: source === 'cloud' ? 'cloud_image' : source,
+        image: source === 'cloud' && budgetImage ? `${budgetImage.distribution}-${budgetImage.version}` : null,
+        iso: source === 'iso' ? isoPath || 'x' : null,
+      }],
+    }
+      : { vm: { ...sizes, cloud_image_id: source === 'cloud' && cloudImageId ? Number(cloudImageId) : undefined } };
+  const budget = useHostBudget(budgetReq);
+  const [force, setForce] = useState(false);
+
   const submitMember = async (g: Group) => {
     const member: MemberSpec = {
       name,
@@ -158,7 +176,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
     } else if (source === 'iso') {
       member.iso = isoPath;
     }
-    await groupApi.addMember(g.id, member);
+    await groupApi.addMember(g.id, member, force);
     return `Member ${name} added to ${g.name}`;
   };
 
@@ -206,7 +224,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
     setSubmitting(true);
     setError(null);
     try {
-      await vmApi.create(data);
+      await vmApi.create(data, force);
       setName('');
       setPassword('');
       setExtraNics([]);
@@ -227,7 +245,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
       isOpen={isOpen}
       onClose={onClose}
       actions={[
-        <Button key="create" variant="primary" onClick={submit} isDisabled={!canSubmit || submitting} isLoading={submitting}>
+        <Button key="create" variant="primary" onClick={submit} isDisabled={!canSubmit || submitting || budgetBlocks(budget, force)} isLoading={submitting}>
           Create
         </Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
@@ -468,6 +486,7 @@ export const CreateVMModal: React.FC<Props> = ({ isOpen, onClose, onCreated, gro
           <Checkbox id="vm-autostart" label="Start automatically when the host boots" isChecked={autostart} onChange={(_e, v) => setAutostart(v)} />
         </FormGroup>
         </>}
+        <HostBudget result={budget} force={force} onForce={setForce} />
       </Form>
     </Modal>
   );

@@ -13,7 +13,7 @@ import {
   ImageCopyRequest, RegistryImages, RegistryCredentials,
   VMNicCreate, VMNicUpdate, SriovStatus, SriovPF, SriovPFUpdate,
   AuthStatus, ApiToken, ApiTokenCreated,
-  UpdateStatus,
+  UpdateStatus, BudgetRequest, BudgetResult,
   TemplateList, TemplateDetail, TemplateRender, TemplateCreated, TemplateSave,
   BareMetalHost, BareMetalHostCreate, BareMetalHostUpdate, BareMetalHostNicInfo, IronicImageProxyStatus, IronicImageProxyConfig, BareMetalLinuxInstall, BareMetalInstallStatus,
 } from '../types';
@@ -76,6 +76,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
+/** ?force=true on a create: skip the host resource budget refusal (409, docs/budget.md) */
+const forceQ = (force: boolean) => (force ? '?force=true' : '');
+
 const post = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'POST', body: data === undefined ? undefined : JSON.stringify(data) });
 const del = <T = void>(path: string) => request<T>(path, { method: 'DELETE' });
@@ -83,7 +86,7 @@ const del = <T = void>(path: string) => request<T>(path, { method: 'DELETE' });
 export const vmApi = {
   list: () => request<VM[]>('/vms'),
   get: (id: number) => request<VMDetail>(`/vms/${id}`),
-  create: (data: VMCreate) => post<VM>('/vms', data),
+  create: (data: VMCreate, force = false) => post<VM>(`/vms${forceQ(force)}`, data),
   update: (id: number, data: VMUpdate) =>
     request<VM>(`/vms/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: number, deleteDisks = false) => del(`/vms/${id}?delete_disks=${deleteDisks}`),
@@ -161,13 +164,14 @@ export const groupApi = {
   addSpokes: (id: number, data: { count: number; memory: number; vcpu: number; disk_size: number; prefix?: string }) =>
     post<GroupDetail>(`/groups/${id}/bmc/spokes`, data),
   get: (id: number) => request<GroupDetail>(`/groups/${id}`),
-  create: (spec: GroupSpec) => post<{ group: Group; task_id: number }>('/groups', spec),
+  create: (spec: GroupSpec, force = false) => post<{ group: Group; task_id: number }>(`/groups${forceQ(force)}`, spec),
   update: (id: number, spec: GroupSpec) =>
     request<GroupDetail>(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(spec) }),
   delete: (id: number, deleteDisks = true) => del(`/groups/${id}?delete_disks=${deleteDisks}`),
   start: (id: number) => post<Task>(`/groups/${id}/start`),
   stop: (id: number, force = false) => post<Task>(`/groups/${id}/stop?force=${force}`),
-  addMember: (id: number, member: MemberSpec) => post<GroupDetail>(`/groups/${id}/members`, member),
+  addMember: (id: number, member: MemberSpec, force = false) =>
+    post<GroupDetail>(`/groups/${id}/members${forceQ(force)}`, member),
   removeMember: (id: number, name: string, deleteDisks = true) =>
     del<GroupDetail>(`/groups/${id}/members/${encodeURIComponent(name)}?delete_disks=${deleteDisks}`),
   setRecord: (id: number, record: DNSRecord) => post<GroupDetail>(`/groups/${id}/dns-records`, record),
@@ -234,12 +238,12 @@ export const taskApi = {
 export const clusterApi = {
   list: () => request<Cluster[]>('/clusters'),
   get: (id: number) => request<Cluster>(`/clusters/${id}`),
-  create: (data: ClusterCreate) => post<Cluster>('/clusters', data),
+  create: (data: ClusterCreate, force = false) => post<Cluster>(`/clusters${forceQ(force)}`, data),
   delete: (id: number) => del(`/clusters/${id}`),
   start: (id: number) => post<Task>(`/clusters/${id}/start`),
   stop: (id: number) => post<Task>(`/clusters/${id}/stop`),
-  addWorkers: (id: number, count = 1, worker?: NodeResources) =>
-    post<Task>(`/clusters/${id}/workers`, worker ? { count, worker } : { count }),
+  addWorkers: (id: number, count = 1, worker?: NodeResources, force = false) =>
+    post<Task>(`/clusters/${id}/workers${forceQ(force)}`, worker ? { count, worker } : { count }),
   /** OpenShift: ClusterVersion view (channel, updates, conditional risks, progress) */
   upgrades: (id: number) => request<ClusterUpgrades>(`/clusters/${id}/upgrades`),
   setUpgrade: (id: number, data: { channel?: string; version?: string; accept_risks?: boolean }) =>
@@ -314,6 +318,8 @@ export const openshiftApi = {
 export const hostApi = {
   info: () => request<HostInfo>('/hosts/info'),
   resources: () => request<HostResources>('/hosts/resources'),
+  /** Dry run of the create-time host resource budget (same planners as the creates) */
+  budget: (body: BudgetRequest) => post<BudgetResult>('/hosts/budget', body),
   dns: () => request<HostDnsStatus>('/hosts/dns'),
   dnsRecords: () => request<HostDnsRecord[]>('/hosts/dns/records'),
   addDnsRecord: (record: HostDnsRecordCreate) => post<HostDnsRecord>('/hosts/dns/records', record),

@@ -804,6 +804,57 @@ export interface HostResources {
   disk_usage_percent: number;
 }
 
+/** POST /hosts/budget (services/budget.py): ONE of the create forms, names may be left out */
+export interface BudgetRequest {
+  vm?: Partial<VMCreate>;
+  group?: { name?: string; router?: Partial<GroupSpec['router']>; members?: Partial<MemberSpec>[] };
+  group_id?: number;
+  members?: Partial<MemberSpec>[];
+  cluster?: Partial<ClusterCreate>;
+  cluster_id?: number;
+  count?: number;
+  worker?: NodeResources;
+  items?: BudgetItem[];
+  starting?: string[];
+}
+
+export interface BudgetItem {
+  name: string;
+  memory_mib: number;
+  vcpus: number;
+  disk_gib: number;
+  /** written at creation (cloud image copies) */
+  copy_gib: number;
+  pool?: string;
+}
+
+export interface BudgetResult {
+  ok: boolean;
+  /** problems would refuse the create (409) unless forced */
+  blocking: boolean;
+  forced: boolean;
+  enforced: boolean;
+  problems: string[];
+  warnings: string[];
+  message: string;
+  note?: string | null;
+  need: { memory_mib: number; vcpus: number; disk_gib: number; copy_gib: number };
+  host: {
+    memory_total_mib: number | null;
+    memory_available_mib: number | null;
+    reserve_mib: number;
+    running_growth_mib: number;
+    starting_mib: number;
+    starting: string[];
+    usable_mib: number | null;
+    cpus: number;
+    vcpus_allocated: number;
+    vcpu_overcommit: number;
+    pools: { name: string; free_gib: number | null; disk_gib: number; copy_gib: number }[];
+  };
+  items: BudgetItem[];
+}
+
 export interface HostInfo {
   hostname: string;
   arch: string;

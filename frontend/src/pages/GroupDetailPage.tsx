@@ -49,6 +49,7 @@ import { GroupMtu } from '../components/groups/GroupMtu';
 import { LabTopology } from '../components/topology/LabTopology';
 import { GroupWireGuard, LaptopCommands, wgConnectionName } from '../components/groups/GroupWireGuard';
 import { CreateVMModal, MEMBER_NAME_RE } from '../components/vms/CreateVMModal';
+import { HostBudget, budgetBlocks, useHostBudget } from '../components/common/HostBudget';
 import { groupStatus } from './GroupsPage';
 import { Markdown } from '../components/common/Markdown';
 import { SaveTemplateModal } from '../components/groups/SaveTemplateModal';
@@ -140,10 +141,13 @@ const AddMemberForm: React.FC<{
   }, [images, image]);
 
   const nameValid = MEMBER_NAME_RE.test(name.trim());
+  const memMib = Math.round(Number(memory) * 1024);
+  const budget = useHostBudget(image && memMib >= 128 ? { group_id: groupId, members: [{ image, memory: memMib }] } : null);
+  const [force, setForce] = useState(false);
   const submit = async () => {
     setBusy(true);
     try {
-      await groupApi.addMember(groupId, { name: name.trim(), image, memory: Math.round(Number(memory) * 1024) });
+      await groupApi.addMember(groupId, { name: name.trim(), image, memory: memMib }, force);
       onDone(`Member ${name} added`);
       setName('');
     } catch (err) {
@@ -170,8 +174,9 @@ const AddMemberForm: React.FC<{
           </FormGroup>
         </FlexItem>
         <FlexItem><FormGroup label="Memory (GiB)" fieldId="am-mem"><TextInput id="am-mem" type="number" value={memory} onChange={(_e, v) => setMemory(v)} style={{ width: 90 }} /></FormGroup></FlexItem>
-        <FlexItem><Button type="submit" isDisabled={!nameValid || !image || !(Number(memory) > 0) || busy || disabled} isLoading={busy}>Add member</Button></FlexItem>
+        <FlexItem><Button type="submit" isDisabled={!nameValid || !image || !(Number(memory) > 0) || busy || disabled || budgetBlocks(budget, force)} isLoading={busy}>Add member</Button></FlexItem>
       </Flex>
+      <HostBudget result={budget} force={force} onForce={setForce} />
       {name && !nameValid && (
         <div id="am-name-help" style={{ color: 'var(--pf-v5-global--danger-color--100)', fontSize: 14 }}>
           Lowercase letters, digits and '-' (max 32), also the member's hostname.

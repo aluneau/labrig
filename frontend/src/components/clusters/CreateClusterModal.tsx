@@ -23,6 +23,7 @@ import {
 import { BareMetalHost, CatalogOperator, CloudImage, ClusterCreate, Group, MetalLBOptions, Network } from '../../types';
 import { bareMetalApi, clusterApi, groupApi, networkApi, openshiftApi, storageApi } from '../../services/api';
 import { errorText } from '../../utils/format';
+import { HostBudget, budgetBlocks, useHostBudget } from '../common/HostBudget';
 import { defaultKeyboard } from '../vms/CreateVMModal';
 import {
   AcmSection, DisconnectedSection, MetalLBSection, OperatorsSection, OsDraft, PullSecretSection, ResourceSummary, SriovSection, StorageSection,
@@ -193,6 +194,21 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     ? nameValid && (pullSecretOk || os.distribution === 'okd') && !osErrors.length && !groupTaken && (!bareMetal || bmhValid)
     : nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
 
+  // Host resources line (k3s / kubeadm: nodes + an auto-created group's router; OpenShift: its own rule at create)
+  const budget = useHostBudget(!isOpen || bareMetal ? null : isOpenShift ? { cluster: { type: 'openshift' } } : {
+    cluster: {
+      type: type as ClusterCreate['type'],
+      ctlplanes: Number(ctlplanes) || 1,
+      workers: Number(workers) || 0,
+      ctlplane: toResources(ctl),
+      worker: toResources(wrk),
+      cloud_image_id: imageId ? Number(imageId) : null,
+      group_id: inGroup && groupId ? Number(groupId) : null,
+      disconnected: type === 'kubeadm' && disconnected,
+    },
+  });
+  const [force, setForce] = useState(false);
+
   const openshiftData = (): ClusterCreate => ({
     name,
     type: 'openshift',
@@ -239,7 +255,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     setBusy(true);
     setError(null);
     try {
-      const cluster = await clusterApi.create(data);
+      const cluster = await clusterApi.create(data, force);
       setName('');
       setPassword('');
       setOs(defaultOsDraft());
@@ -256,7 +272,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     <Modal variant={isOpenShift ? ModalVariant.large : ModalVariant.medium}
       title={isOpenShift ? 'Create OpenShift cluster' : 'Create Kubernetes cluster'} isOpen={isOpen} onClose={onClose}
       actions={[
-        <Button key="create" onClick={submit} isDisabled={!canSubmit || busy} isLoading={busy}>Create</Button>,
+        <Button key="create" onClick={submit} isDisabled={!canSubmit || busy || budgetBlocks(budget, force)} isLoading={busy}>Create</Button>,
         <Button key="cancel" variant="link" onClick={onClose}>Cancel</Button>,
       ]}>
       <Form onSubmit={(e) => { e.preventDefault(); if (canSubmit) submit(); }}>
@@ -541,6 +557,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
             </GridItem>
           </Grid>
         </ExpandableSection>
+        <HostBudget result={budget} force={force} onForce={setForce} />
       </Form>
     </Modal>
   );
