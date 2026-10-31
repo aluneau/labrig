@@ -183,7 +183,12 @@ Verified with `e2e/kubeadm-ipv6.js` (1 control plane + 1 worker, Debian 13): bot
 of both families, pod → pod over IPv6 across nodes, the IPv6 ClusterIP, a member resolving `hello` to A + AAAA and
 reaching the IPv6 LB address (L2 and BGP) and the API over IPv6. OpenShift 4.20.41 SNO dual stack installed for real
 (InternalIP v4 + v6, cluster / service networks of both families, PreferDualStack MetalLB demo with an IPv6 LB address,
-console and API answering on the router's IPv6 address).
+console and API answering on the router's IPv6 address). `e2e/openshift-ipv6.js` (REUSE=1 KEEP=1): OpenShift 4.20.41
+SNO dual stack with MetalLB BGP + BFD: IPv4 and IPv6 sessions Established, BFD up on both (IPv6 multihop, 600 ms
+detection), /128 route via the node's global address, a member and the router reaching the IPv6 LB address, then
+L2 (IPv6 range released, NDP) and back to BGP. kubeadm-ipv6.js with BFD on the IPv6 sessions too. Dual stack platform
+baremetal (compact): install-config with two-element VIP lists accepted by `openshift-install agent create image`
+4.20.41; no full install run yet.
 
 ## Topology, API
 
