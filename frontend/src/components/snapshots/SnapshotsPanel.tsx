@@ -221,7 +221,7 @@ export const SnapshotsPanel: React.FC<Props> = ({ kind, targetName, vmUuid, load
           <Tbody>
             {rows.map((row) => (
               <Tr key={row.name} data-snapshot={row.name}>
-                <Td dataLabel="Name">
+                <Td dataLabel="Name" modifier="nowrap">
                   {row.name}{row.current && <> <Label isCompact color="blue">current</Label></>}
                 </Td>
                 <Td dataLabel="Description">{row.description || '—'}</Td>
