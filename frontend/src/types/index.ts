@@ -1288,6 +1288,8 @@ export interface TopologyCluster {
   metallb_mode?: 'l2' | 'bgp' | null;
   metallb_pool?: string | null;
   service_ip?: string | null;
+  service_ip6?: string | null; // dual stack: the demo Service's IPv6 address
+  dual_stack?: boolean;
   service_hostname?: string | null;
 }
 
