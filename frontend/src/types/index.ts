@@ -1259,6 +1259,7 @@ export interface TopologyMachine {
   cluster?: string | null;
   ip?: string | null;
   ip6?: string | null;
+  ipv6_only?: boolean; // IPv6-only OpenShift node: ip is null, ip6 is its only address
   mac?: string | null;
   fqdn?: string | null;
   state: string;
@@ -1293,6 +1294,7 @@ export interface TopologyCluster {
   metallb_pool?: string | null;
   service_ip?: string | null;
   service_hostname?: string | null;
+  ip_family?: IpFamily;
 }
 
 export interface GroupTopology {

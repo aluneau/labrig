@@ -136,7 +136,8 @@ function routeLines(t: GroupTopology): Line[] {
 function machineLines(m: TopologyMachine): Line[] {
   const role = m.kind === 'node' ? `${m.role === 'ctlplane' ? 'control plane' : m.role || 'node'} · ${m.cluster}`
     : m.kind === 'member' ? (m.role && m.role !== 'member' ? m.role : 'member') : 'reserved address';
-  const lines: Line[] = [{ text: `${m.ip || '?'} · ${role}` }];
+  const lines: Line[] = [{ text: `${m.ipv6_only ? m.ip6 : m.ip || '?'} · ${role}` }];
+  if (m.ipv6_only) lines.push({ text: 'IPv6 only (no IPv4)', color: C.arp, bold: true });
   if (m.bgp_state) {
     lines.push({ text: (m.bgp_state === 'Established' ? 'BGP session up' : `BGP ${m.bgp_state}`) + (m.bfd_state ? ` · BFD ${m.bfd_state}` : ''),
       color: m.bgp_state === 'Established' && (!m.bfd_state || m.bfd_state === 'up') ? C.bgp : C.warn });
@@ -443,7 +444,10 @@ function tipFor(key: string, t: GroupTopology): Tip | null {
     if (!m) return null;
     const what = m.kind === 'node' ? `${m.role === 'ctlplane' ? 'Control plane' : 'Worker'} node of cluster ${m.cluster}`
       : m.kind === 'member' ? 'Lab member' : 'A machine with a reserved address';
-    const parts = [`${what}, ${m.ip}${m.ip6 ? ` and ${m.ip6}` : ''} (${m.fqdn}), ${m.state}.`];
+    const parts = [m.ipv6_only
+      ? `${what}, ${m.ip6} (${m.fqdn}), ${m.state}. IPv6 only: it has no IPv4 address at all (the router ignores its `
+        + `DHCPv4 requests and its DNS name has only an AAAA record); the router reaches it over IPv6 from ${t.router.lan_ip6}.`
+      : `${what}, ${m.ip}${m.ip6 ? ` and ${m.ip6}` : ''} (${m.fqdn}), ${m.state}.`];
     if (m.bgp_state) {
       parts.push(m.bgp_state === 'Established'
         ? `It has a BGP session with the router${m.bgp_prefixes.length ? ` and tells it "send traffic for ${m.bgp_prefixes.join(', ')} to me"` : ' but announces nothing'}.`

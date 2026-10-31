@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.libvirt_client import libvirt_client
 from app.models import Cluster, Group, VM
 from app.schemas.group import GroupSpec
+from app.services import ipv6_service
 from app.services import bgp_service as bgps
 
 logger = logging.getLogger(__name__)
@@ -100,11 +101,14 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
     machines: List[Dict[str, Any]] = []
 
     def machine(kind: str, name: str, vm_name: str, ip: Optional[str], mac: Optional[str], role: Optional[str],
-                cluster: Optional[str] = None, fqdn: Optional[str] = None) -> Dict[str, Any]:
+                cluster: Optional[str] = None, fqdn: Optional[str] = None, ipv6_only: bool = False) -> Dict[str, Any]:
         ip6 = spec.ip6_of(ip)
+        if ipv6_only and ip6:  # IPv6-only host (IPv6-only OpenShift node): its reserved IPv4 address is never used
+            ip = None
         s = sessions.get(ip or "") or sessions.get(ip6 or "")
         m = {"kind": kind, "name": name, "vm_name": vm_name, "vm_id": vm_ids.get(vm_name), "role": role,
-             "cluster": cluster, "ip": ip, "ip6": ip6, "mac": mac, "fqdn": fqdn or f"{name}.{spec.domain}",
+             "cluster": cluster, "ip": ip, "ip6": ip6, "ipv6_only": bool(ipv6_only and ip6), "mac": mac,
+             "fqdn": fqdn or f"{name}.{spec.domain}",
              "state": (states.get(vm_name) or {}).get("state", "missing"),
              "bgp_state": s["state"] if s else None, "bfd_state": bfd_peers.get(ip or ""),
              "bgp_prefixes": [r["prefix"] for r in routes if any(h["ip"] in (ip, ip6) for h in r["nexthops"] if h["ip"])],
@@ -118,7 +122,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
     for r in spec.reservations:
         c, n = node_cluster.get(r.name, (None, None))
         machine("node" if c else "reservation", r.name, r.name, r.ip, r.mac, n.role if n else None,
-                c.name if c else (r.owner or "").replace("cluster:", "") or None)
+                c.name if c else (r.owner or "").replace("cluster:", "") or None, ipv6_only=r.ipv6_only)
     on_net = (group_service._network_vms(network_name(spec.name)) or {}) if spec.dhcp_hosts else {}
     for h in spec.dhcp_hosts:
         vm = (on_net.get(h.mac) or {}).get("vm") or ""
@@ -148,6 +152,7 @@ def topology(db: Session, group: Group) -> Dict[str, Any]:
             "load_balancer_ports": sorted(lb_ports), "metallb_enabled": bool(mlb.get("enabled")),
             "metallb_mode": mode, "metallb_pool": mlb.get("pool"), "service_ip": ip, "service_ip6": ip6,
             "dual_stack": bool((c.spec or {}).get("dual_stack") or ((c.spec or {}).get("openshift") or {}).get("dual_stack")),
+            "ip_family": ipv6_service.ip_family(c),
             "service_hostname": f"{mlb.get('hostname') or 'hello'}.{spec.domain}" if ip else None,
         })
         os_spec = ((c.spec or {}).get("openshift") or {}) if c.type == "openshift" else {}
