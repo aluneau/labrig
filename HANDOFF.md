@@ -1,58 +1,38 @@
-# Handoff: state on 2026-10-12 (evening, end of session)
+# Handoff: state on 2026-10-31
 
-Read `CLAUDE.md` first (layout, verify commands, architecture rules incl. the **ACM** and **Emulated BMCs**
-paragraphs), then `docs/openshift.md` "ACM hub" and "Spoke machines (BMC) and provisioning a spoke".
-Earlier handoffs are in git history (`git log -p HANDOFF.md`).
+Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF.md`).
 
 ## Where we are
 
-- `main` = GitHub `aluneau/labrig`, release **v0.1.3** published (stable channel), CI + release green.
-  The rig runs `main` in checkout mode (`vm-manager` service restarted on it). No `e2e-acm-*` VMs/networks left.
-- 0.1.2: update UI (masthead "Update available", Host page Update now; hidden on git checkouts).
-- 0.1.3: ACM (below) + OpenShift day-2 MetalLB demo fix.
+- `main` = GitHub `aluneau/labrig`, pushed, CI green. Releases up to **v0.1.5**; `main` (0.1.6-dev) adds since then:
+  OKD + platform baremetal (VIPs), OpenShift day 2 (add/remove workers, upgrades), dual stack kubeadm / OpenShift,
+  bare-metal unattended Linux installs + BMC media fixes (pushed Oct 27–28 from another checkout, merged 2026-10-31).
+- 2026-10-31 fixes: a multi-line f-string in `acm_spokes.py` broke Python < 3.12 (CI had been red since Oct 28);
+  libvirt start from the app failed on systemd 262 ("Failed to enqueue jobs: Access denied": one `systemctl` call
+  with several units = one polkit check without the unit name) -> one call per unit. Start verified on the rig;
+  stop not exercised here (would stop the owner's libvirt) — `e2e/libvirtctl.js` on a nested install covers it.
+- ACM spokes on emulated BMCs: verified for real (acm.js 2026-10-15, gitops.js 2026-10-16).
 
-## ACM: what is verified and what is NOT
+## In progress (worktree agents, 2026-10-31)
 
-| Part | State |
-|---|---|
-| ACM hub add-on (`openshift.acm`, Operators tab, ACM tab) | **Verified for real**: SNO 4.20.40 (32 GiB / 12 vCPU, LVMS), MultiClusterHub Running, ACM 2.17.3. Measured Basic requests ~2.8 vCPU / 8.9 GiB. |
-| Import / detach (`/clusters/{hub}/acm/managed`) | **Verified for real**: kubeadm (own group, auto-import-secret, UI) and k3s on `default` (import manifests, API) both JOINED/AVAILABLE; detach clean. k3s on its own NAT network refused (plain words). |
-| UI relations (list labels, "Managed by" banner, "Import into ACM hub") | **Verified** by `e2e/acm.js` (screenshots in the agent worktree, see below). |
-| Emulated BMC (sushy-tools per group, `bmc: true` members, BMC tab) | **Partly**: emulator checked **from the host only** (401 without creds, only the group's spoke listed, 404 for other VMs). sushy-tools 2.1.0 works on Python 3.9. Never reached **from the hub**. |
-| Spoke provisioning (`/clusters/{hub}/acm/spokes`, spokes = cluster rows with `spec.openshift.provisioner`) | **NOT verified**: no spoke ever installed. Code + `SPOKE=1` e2e path exist, shipped in 0.1.3 untested. |
-| OpenTofu `vmmanager_acm_managed_cluster`, `vmmanager_acm_spoke`, member `bmc` | Builds, example validates (`tofu fmt`/validate); not applied for real. |
+| Feature | Plan | Branch / port |
+|---|---|---|
+| Snapshots (VM + group, internal qcow2, revert + clock sync) | future-features.md §2.5 | worktree agent, :8301 |
+| Host resource budget before create (RAM / vCPU / pool disk, 409 + force) | future-features.md §4.4 | worktree agent, :8302 |
 
-### The firewall blocker is resolved
-The hub's metal3/Ironic must reach the emulator on the uplink gateway `192.168.122.1:<BMC_HOST_PORTS 8180-8199>`, and
-ufw dropped VM -> host TCP. **Done on this rig on 2026-10-12** (`ufw status` shows it):
+Merge one at a time into main, rebuild UI, restart `vm-manager`, re-run `smoke.js` + the feature's e2e.
 
-```
-sudo ufw allow in on virbr+ to any port 8180:8199 proto tcp comment 'vm-manager BMC (Redfish emulator)'
-```
+## Next candidates (roadmap)
 
-The session has **passwordless sudo** on this rig: host-side fixes like this can be applied directly (say so to the
-owner) instead of waiting. New hosts get the rule from `scripts/setup.sh` (default `--bmc-ports 8180-8199`, ufw or
-firewalld zone `libvirt`, `--bmc-ports none` to skip); release installs get it on their next update (the updater
-re-runs setup.sh with the same `--bmc-ports`).
-
-## Next session (owner said: do it tomorrow; needs ~2–3 h and ~50–60 GiB free RAM)
-
-1. Check from a group router (rule already added): `curl -sk -o /dev/null -w '%{http_code}' http://192.168.122.1:8180/redfish/v1/Systems` -> 401
-   (plain http unless the emulator got a cert; the group's port is in `GET /groups/{id}/bmc`).
-2. Run with a fresh token: `cd e2e && VMM_TOKEN=… SPOKE=1 KEEP=1 node acm.js` (hub SNO + BMC machine + spoke;
-   `REUSE=1` reuses an existing hub). Watch: BareMetalHost `provisioned`/agent registered via virtual media, assisted
-   install progress, spoke row in Clusters with kubeconfig / logs / MCP `oc`, delete through the hub (machine stays).
-   Likely weak spots (unverified code): Ironic image server ports 6180/6183 forwarded by the hub router + emulator
-   redirect (commit 50f724b), virtual media download from the host (getaddrinfo patch -> lab zones via router),
-   `ensure_cim` AgentServiceConfig storage on LVMS, BMH `bootMode legacy`.
-3. Fix what breaks, then OpenTofu: apply `examples/opentofu/acm` once (hub + import + spoke), destroy.
-4. Until verified: consider marking spoke provisioning **experimental** in docs/openshift.md + ACM tab (offered,
-   not done). Then secret-scan, push, release 0.1.4.
-5. Clean up `e2e-acm-*` / `tofu-acm-*` at the end (delete clusters through the API: owned groups go with them).
+- Clone / export a group with disks (share a reproducer with a colleague on a RHEL lab host).
+- Inter-group connectivity (BGP over an interconnect network, or WireGuard between routers / hosts).
+- k3s air gap (needs k3s in a lab group), NAT66 / IPv6-only groups, TLS-intercepting proxy, VLANs.
+- Release 0.1.6 once the above is merged and verified.
 
 ## Notes
-- The ACM agent's worktree is still at `.claude/worktrees/agent-a03663a218382d2da` (branch merged; screenshots in
-  its `e2e/screenshots/acm-*.png`). Safe to remove with `git worktree remove` once no longer useful.
 - npm/npx aren't in PATH: `node node_modules/typescript/bin/tsc --noEmit -p .`,
   `CI=true node node_modules/react-scripts/bin/react-scripts.js build`.
-- Pushing needs `gh` logged in (token was refreshed today); scan before every push (memory: public repo).
+- libvirt is not started at boot on this rig: e2e against :8000 gives 503 until it's started (Host page or API).
+- Many merged agent worktrees remain under `.claude/worktrees/` (`git worktree list`); remove with
+  `git worktree remove` when not needed.
+- Scan for secrets before every push (public repo; OKD's `aWQ6cGFzcwo=` placeholder is expected).
