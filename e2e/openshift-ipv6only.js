@@ -31,7 +31,12 @@ const t0 = Date.now();
 const log = (...a) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0)}s]`, ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const api = async (p, opts) => {
-  const r = await fetch(`${BASE}/api/v1${p}`, opts);
+  let r;
+  try {
+    r = await fetch(`${BASE}/api/v1${p}`, opts);
+  } catch (e) {  // a kept-alive socket the server closed while oc ran (uvicorn's 5 s keep-alive): once more
+    r = await fetch(`${BASE}/api/v1${p}`, opts);
+  }
   if (!r.ok) {
     const e = new Error(`${opts?.method || 'GET'} ${p}: ${r.status} ${await r.text()}`);
     e.status = r.status;
@@ -116,7 +121,7 @@ async function topologyChecks(page, cluster, shot, tag) {
     log('create dialog: IP family choice OK');
 
     // --- refusals in plain words (nothing created)
-    for (const [extra, re] of [[{}, /needs "disconnected": true/], [{ disconnected: true, metallb: { enabled: true } }, /MetalLB/]]) {
+    for (const [extra, re] of [[{}, /needs \W*disconnected/], [{ disconnected: true, metallb: { enabled: true } }, /MetalLB/]]) {
       try {
         await api('/clusters', json('POST', { name: 'e2e-v6o-refused', type: 'openshift', openshift: { ip_family: 'ipv6', ...extra } }));
         throw new Error('an IPv6-only create was accepted: ' + JSON.stringify(extra));
