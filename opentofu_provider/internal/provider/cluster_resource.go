@@ -225,8 +225,8 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Description: "kubeadm / openshift: IPv6 dual stack (pods, services, nodes of both families, MetalLB IPv6 pool; the kubeconfig stays IPv4). " +
 					"Needs a group with IPv6 (vmmanager_group ipv6); true with an auto-created group gives it IPv6. Default: kubeadm = on when the group has IPv6, openshift = off."},
 			"ip_family": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr,
-				Description: "openshift: ipv4 (default) | dual_stack (= dual_stack = true) | ipv6 = IPv6 single stack: IPv6-only nodes (static " +
-					"address in the group /64, no IPv4), pods fd01::/48, services fd02::/112. ipv6 needs openshift.disconnected = true (the host has no " +
+				Description: "openshift: ipv4 (default) | dual_stack (= dual_stack = true) | ipv6 = IPv6 single stack: IPv6-only nodes (DHCPv6 " +
+					"reservations in the group /64, no IPv4), pods fd01::/48, services fd02::/112. ipv6 needs openshift.disconnected = true (the host has no " +
 					"IPv6 internet: the router's mirror registry serves the nodes over IPv6), platform none and no MetalLB. The kubeconfig still " +
 					"reaches the API through the router's IPv4 uplink address."},
 			"mirror_images": schema.ListAttribute{Optional: true, ElementType: types.StringType,

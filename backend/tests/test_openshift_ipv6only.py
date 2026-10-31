@@ -72,40 +72,26 @@ def test_install_config_dual_stack_unchanged():
     assert [m["cidr"] for m in net["machineNetwork"]] == ["10.62.0.0/24", PREFIX]
 
 
-def test_agent_config_static_ipv6():
+def test_agent_config_ipv6_only():
     config = openshift_service.agent_config(
         "c", "fd00:1:2:3::10", "fd00:1:2:3::1",
-        [{"name": "c-master-0", "role": "master", "mac": "52:54:00:00:00:10", "ip6": "fd00:1:2:3::10"}],
-        ipv6={"gateway": "fd00:1:2:3::1", "dns": ["fd00:1:2:3::1"], "search": ["g.lab"]})
+        [{"name": "c-master-0", "role": "master", "mac": "52:54:00:00:00:10"}])
     assert config["rendezvousIP"] == "fd00:1:2:3::10"
     assert config["additionalNTPSources"] == ["fd00:1:2:3::1"]
-    host = config["hosts"][0]
-    nm = host["networkConfig"]
-    iface = nm["interfaces"][0]
-    assert iface["name"] == host["interfaces"][0]["name"]
-    assert iface["mac-address"] == "52:54:00:00:00:10"
-    assert iface["ipv4"] == {"enabled": False}
-    assert iface["ipv6"]["address"] == [{"ip": "fd00:1:2:3::10", "prefix-length": 64}]
-    assert iface["ipv6"]["dhcp"] is False and iface["ipv6"]["autoconf"] is False
-    assert nm["routes"]["config"][0]["destination"] == "::/0"
-    assert nm["dns-resolver"]["config"] == {"server": ["fd00:1:2:3::1"], "search": ["g.lab"]}
-
-
-def test_agent_config_ipv4_has_no_network_config():
-    config = openshift_service.agent_config("c", "10.62.0.10", "10.62.0.1",
-                                            [{"name": "n", "role": "master", "mac": "52:54:00:00:00:10"}])
-    assert "networkConfig" not in config["hosts"][0]
+    assert "networkConfig" not in config["hosts"][0]  # DHCPv6 reservation (no nmstatectl needed on the host)
 
 
 # router render
 
 def test_dnsmasq_ipv6_only_reservation():
     conf = ELRouterBackend().dnsmasq_conf(group())
-    assert "dhcp-host=52:54:00:00:00:10,[fd00:1:2:3::10],c-master-0" in conf
+    assert "dhcp-host=52:54:00:00:00:10,set:vmm-v6only,[fd00:1:2:3::10],c-master-0" in conf
+    assert "dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6" in conf  # DHCPv4 only
     assert "host-record=c-master-0.g.lab,c-master-0,fd00:1:2:3::10\n" in conf
     assert "10.62.0.10," not in conf and "10.62.0.10\n" not in conf  # no IPv4 lease, no A record
     # a normal reservation keeps both families
     assert "dhcp-host=52:54:00:00:00:11,10.62.0.11,[fd00:1:2:3::11],other" in conf
+    assert "dhcp-ignore" not in ELRouterBackend().dnsmasq_conf(group(reservations=[]))
 
 
 def test_lb_backend_ipv6():

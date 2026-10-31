@@ -412,7 +412,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                     : ipFamily === 'dual_stack'
                     ? `${autoGroup ? 'The new group gets IPv6 (a /64, DHCPv6 reservations): ' : 'The group has IPv6: '}`
                       + 'machine / cluster / service networks of both families, MetalLB an IPv6 pool too. The kubeconfig stays on IPv4.'
-                    : `${autoGroup ? 'The new group gets IPv6. ' : ''}IPv6 single stack: nodes get a static IPv6 address and no IPv4, `
+                    : `${autoGroup ? 'The new group gets IPv6. ' : ''}IPv6 single stack: nodes get their IPv6 address from DHCPv6 and no IPv4, `
                       + 'pods fd01::/48, services fd02::/112. Needs Disconnected (no IPv6 internet): the router\'s mirror registry, '
                       + 'DNS, NTP and load balancers serve the nodes over IPv6; the kubeconfig still reaches the API through the '
                       + 'router\'s IPv4 uplink address. No MetalLB.'}

@@ -835,14 +835,12 @@ class OpenShiftInstaller:
             ssh_key, self.install_mirror(mirror) if mirror else None,
             self.vips(cluster), gspec.ipv6_prefix() if opts.dual_stack or v6only else None,
             ipv6_only=v6only)
-        hosts = [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac,
-                  "ip6": gspec.ip6_of(n.ip)} for n in nodes]
+        hosts = [{"name": n.name, "role": "master" if n.role == "ctlplane" else "worker", "mac": n.mac} for n in nodes]
         if v6only:
-            # static IPv6 per node; rendezvous, NTP (chrony on the router), DNS: the router's IPv6 address
-            rip6 = gspec.ip6_of(gspec.router.ip)
-            agent = openshift_service.agent_config(
-                cluster.name, gspec.ip6_of(first.ip), rip6, hosts,
-                ipv6={"gateway": rip6, "dns": [rip6], "search": [cluster.domain]})
+            # the nodes take their IPv6 address from their DHCPv6 reservation (RA M flag; the router ignores their
+            # DHCPv4 requests); rendezvous = master-0's IPv6 address, NTP = chrony on the router's IPv6 address
+            agent = openshift_service.agent_config(cluster.name, gspec.ip6_of(first.ip),
+                                                   gspec.ip6_of(gspec.router.ip), hosts)
         else:
             agent = openshift_service.agent_config(
                 cluster.name, first.ip, network.gateway(), hosts)  # NTP: chrony on the router

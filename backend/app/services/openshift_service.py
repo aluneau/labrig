@@ -684,10 +684,9 @@ class OpenShiftService:
 
     @staticmethod
     def agent_config(name: str, rendezvous_ip: str, ntp: Optional[str],
-                     hosts: List[Dict[str, Any]], ipv6: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """hosts: [{name, role: master|worker, mac}] (addresses come from the router's DHCP reservations).
-        ipv6 (IPv6-only cluster): {gateway, dns: [...], search: [...]} and hosts carry `ip6`: a static IPv6
-        address per node (nmstate, IPv4 off), applied by the agent ISO and kept by the installed system"""
+                     hosts: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """hosts: [{name, role: master|worker, mac}] (addresses come from the router's DHCP / DHCPv6
+        reservations; IPv6-only: rendezvous_ip and ntp are IPv6 addresses, the router serves the nodes no IPv4)"""
         config: Dict[str, Any] = {
             "apiVersion": "v1beta1", "kind": "AgentConfig", "metadata": {"name": name},
             "rendezvousIP": rendezvous_ip,
@@ -697,35 +696,9 @@ class OpenShiftService:
                 "interfaces": [{"name": "enp1s0", "macAddress": h["mac"]}],
             } for h in hosts],
         }
-        if ipv6:
-            for host, h in zip(config["hosts"], hosts):
-                host["networkConfig"] = OpenShiftService.nmstate_static6(
-                    "enp1s0", h["mac"], h["ip6"], ipv6["gateway"], ipv6["dns"], ipv6.get("search"))
         if ntp:
             config["additionalNTPSources"] = [ntp]
         return config
-
-    @staticmethod
-    def nmstate_static6(iface: str, mac: str, ip6: str, gateway: str, dns: List[str],
-                        search: Optional[List[str]] = None) -> Dict[str, Any]:
-        """IPv6-only node: static <ip6>/64 (the group /64 is on link), default route via the router's IPv6
-        address, IPv4 disabled (no DHCPv4 try, no IPv4 on br-ex), router advertisements ignored (the
-        address and route are static: nothing depends on RA / DHCPv6 timing)"""
-        dns_config: Dict[str, Any] = {"server": list(dns)}
-        if search:
-            dns_config["search"] = list(search)
-        return {
-            "interfaces": [{
-                "name": iface, "type": "ethernet", "state": "up",
-                "identifier": "mac-address", "mac-address": mac,
-                "ipv4": {"enabled": False},
-                "ipv6": {"enabled": True, "dhcp": False, "autoconf": False,
-                         "address": [{"ip": ip6, "prefix-length": 64}]},
-            }],
-            "dns-resolver": {"config": dns_config},
-            "routes": {"config": [{"destination": "::/0", "next-hop-address": gateway,
-                                   "next-hop-interface": iface, "table-id": 254}]},
-        }
 
     BMH_IFACE = "bmhnet0"
 

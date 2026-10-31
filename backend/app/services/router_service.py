@@ -46,6 +46,7 @@ rm -f "$TMP/vmm-reserved" "$TMP/vmm-leases"
 # router never OOMs while installing packages (see ROUTER_MEMORY_DEFAULT in schemas/group.py)
 SWAP_SIZE = "1G"
 STATE_DIR = "/var/lib/vmm-router"
+V6ONLY_TAG = "vmm-v6only"  # dnsmasq tag of IPv6-only reservations (IPv6-only OpenShift nodes)
 
 
 @dataclass
@@ -131,12 +132,15 @@ class ELRouterBackend(RouterBackend):
             if r.owner:
                 lines.append(f"# {r.owner}")
             ip6 = spec.ip6_of(r.ip) if r.ipv6_only else None
-            if ip6:  # IPv6-only host: no IPv4 lease, no A record
-                lines.append(f"dhcp-host={r.mac},[{ip6}],{r.name}")
+            if ip6:  # IPv6-only host: its DHCPv4 requests are ignored (V6ONLY_TAG), no A record
+                lines.append(f"dhcp-host={r.mac},set:{V6ONLY_TAG},[{ip6}],{r.name}")
                 lines.append(f"host-record={r.name}.{domain},{r.name},{ip6}")
                 continue
             lines.append(f"dhcp-host={r.mac},{v6.dhcp_addrs(spec, r.ip)},{r.name}")
             lines.append(f"host-record={r.name}.{domain},{r.name},{v6.record_addrs(spec, r.ip)}")
+        if any(r.ipv6_only for r in spec.reservations) and v6.prefix(spec) is not None:
+            # dnsmasq tags DHCPv6 requests "dhcpv6": ignore only the DHCPv4 ones of IPv6-only hosts
+            lines.append(f"dhcp-ignore=tag:{V6ONLY_TAG},tag:!dhcpv6")
         lines += ["", "# records"]
         lines += [self._record(r, domain) for r in spec.router.dns.records]
         lines += self._dhcp_host_lines(spec)

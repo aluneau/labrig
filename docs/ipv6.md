@@ -195,7 +195,7 @@ host --(IPv4)--> router uplink 192.168.122.x :6443 / :443 / :8443
                     | haproxy (bind :::port v4v6) -> [node IPv6]:6443 / :443 ; registry front [::]:8443 (TLS)
                  [ router ]  fd00:564d:4d00:4::1   DNS (AAAA), NTP (chrony allow <group /64>), mirror registry
                     |
-                 master-0   fd00:564d:4d00:4::10/64 (static, nmstate)   no IPv4
+                 master-0   fd00:564d:4d00:4::10 (DHCPv6 reservation + RA)   no IPv4
 pods fd01::/48 (hostPrefix 64)   services fd02::/112   machine network = the group /64
 ```
 
@@ -203,12 +203,13 @@ What the app does differently from IPv4 / dual stack:
 
 - **install-config**: `machineNetwork` = the group /64 only, `clusterNetwork` `fd01::/48` (hostPrefix 64),
   `serviceNetwork` `fd02::/112` (OVN-Kubernetes single stack IPv6).
-- **agent-config**: `rendezvousIP` = master-0's IPv6 address, `additionalNTPSources` = the router's IPv6 address,
-  and a **static nmstate `networkConfig`** per node: `<ip6>/64`, default route and DNS = the router's IPv6
-  address, search domain, **IPv4 disabled** (no DHCPv4 attempt, nothing IPv4 on `br-ex`), RAs ignored. Static
-  rather than DHCPv6: an address and route that don't depend on RA / DHCPv6 timing, in the live ISO and on disk.
-- **Router**: the nodes' reservations are `ipv6_only` (`dhcp-host=<mac>,[<ip6>],<name>`, AAAA only: the IPv4
-  address stays reserved for its host number but is never leased nor in DNS); `api` / `api-int` / `*.apps` and
+- **agent-config**: `rendezvousIP` = master-0's IPv6 address, `additionalNTPSources` = the router's IPv6 address.
+  No static `networkConfig`: the nodes take their address from their DHCPv6 reservation like dual stack nodes
+  (RHCOS NetworkManager follows the RA's M flag; default route from the RA). No `nmstatectl` needed on the host.
+- **Router**: the nodes' reservations are `ipv6_only` (`dhcp-host=<mac>,set:vmm-v6only,[<ip6>],<name>` +
+  `dhcp-ignore=tag:vmm-v6only,tag:!dhcpv6`: dnsmasq tags DHCPv6 requests `dhcpv6`, so only the nodes' DHCPv4
+  requests are ignored; NetworkManager's IPv4 may fail, the connection stays up on IPv6: nothing IPv4 on `br-ex`).
+  AAAA only: the IPv4 address stays reserved for its host number but is never leased nor in DNS; `api` / `api-int` / `*.apps` and
   the node names are AAAA only (the router's / the node's IPv6 address); haproxy backends are `[<node ip6>]:port`
   (`LoadBalancerSpec.backends` accepts `[ipv6]:port`) while its front still listens on every address, so the host's
   kubeconfig keeps `https://<uplink_ip>:6443`; chrony also `allow`s the group /64; the Assisted Service progress is
