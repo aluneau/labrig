@@ -18,11 +18,14 @@ import {
   PageSection,
   Spinner,
   Switch,
+  Tab,
+  TabTitleText,
+  Tabs,
   Title,
 } from '@patternfly/react-core';
 import { ActionsColumn, ExpandableRowContent, IAction, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { DesktopIcon, VirtualMachineIcon } from '@patternfly/react-icons';
-import { DeviceChange, VM, VMDetail, VMPowerAction } from '../types';
+import { DeviceChange, SnapshotCreate, VM, VMDetail, VMPowerAction } from '../types';
 import { BootControl, CdromControl, DisksTable, IommuControl, NicsTable } from '../components/vms/VmDevices';
 import { vmApi } from '../services/api';
 import { usePolling } from '../hooks/usePolling';
@@ -33,8 +36,32 @@ import { PageHeader } from '../components/common/PageHeader';
 import { StatusLabel } from '../components/common/StatusLabel';
 import { ConfirmModal } from '../components/common/ConfirmModal';
 import { CreateVMModal } from '../components/vms/CreateVMModal';
+import { SnapshotsPanel } from '../components/snapshots/SnapshotsPanel';
 
-const VMDetails: React.FC<{ vmId: number; uuid?: string | null; onError: (msg: string) => void }> = ({ vmId, uuid, onError }) => {
+type DetailsProps = { vmId: number; name: string; uuid?: string | null; onError: (msg: string) => void };
+
+/** Expanded row of a VM: overview (devices) and snapshots */
+const VMDetails: React.FC<DetailsProps> = ({ vmId, name, uuid, onError }) => {
+  const [tab, setTab] = useState<string | number>('overview');
+  const load = React.useCallback(() => vmApi.snapshots(vmId), [vmId]);
+  const create = React.useCallback((d: SnapshotCreate) => vmApi.createSnapshot(vmId, d), [vmId]);
+  const revert = React.useCallback((n: string) => vmApi.revertSnapshot(vmId, n), [vmId]);
+  const remove = React.useCallback((n: string) => vmApi.deleteSnapshot(vmId, n), [vmId]);
+  return (
+    <Tabs activeKey={tab} onSelect={(_e, k) => setTab(k)} mountOnEnter unmountOnExit isBox={false} id={`vm-tabs-${vmId}`}>
+      <Tab eventKey="overview" title={<TabTitleText>Overview</TabTitleText>}>
+        <div style={{ paddingTop: 12 }}><VMOverview vmId={vmId} name={name} uuid={uuid} onError={onError} /></div>
+      </Tab>
+      <Tab eventKey="snapshots" title={<TabTitleText>Snapshots</TabTitleText>}>
+        <div style={{ paddingTop: 12 }}>
+          <SnapshotsPanel kind="vm" targetName={name} vmUuid={uuid} load={load} create={create} revert={revert} remove={remove} />
+        </div>
+      </Tab>
+    </Tabs>
+  );
+};
+
+const VMOverview: React.FC<DetailsProps> = ({ vmId, uuid, onError }) => {
   const { data: vm, error, reload } = usePolling<VMDetail>(() => vmApi.get(vmId), 10000);
   const [result, setResult] = useState<DeviceChange | null>(null);
   useLiveEvents(['vm'], (event) => {
@@ -271,7 +298,7 @@ export const VMsPage: React.FC = () => {
                   <Td colSpan={8}>
                     {expanded.has(vm.id) && (
                       <ExpandableRowContent>
-                        <VMDetails vmId={vm.id} uuid={vm.uuid} onError={setError} />
+                        <VMDetails vmId={vm.id} name={vm.name} uuid={vm.uuid} onError={setError} />
                       </ExpandableRowContent>
                     )}
                   </Td>
@@ -294,7 +321,7 @@ export const VMsPage: React.FC = () => {
         <p>The VM is powered off if it is running, then removed from libvirt.</p>
         <Checkbox
           id="delete-disks"
-          label="Also delete its disks (data is lost; install ISOs are kept)"
+          label="Also delete its disks (data is lost; install ISOs are kept). Kept disks lose the VM's snapshots"
           isChecked={deleteDisks}
           onChange={(_e, v) => setDeleteDisks(v)}
           style={{ marginTop: 12 }}
