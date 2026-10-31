@@ -1537,7 +1537,9 @@ class OpenShiftInstaller:
             if not pool:
                 raise ValueError("No MetalLB address pool assigned")
             network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
+            metallb.record_pool(network, cluster.name, mode, pool, bool(mlb.get("bfd")))
             pool6 = self._metallb_pool6(db, cluster, network, mode, pool)
+            network.commit()  # dual stack: already committed with the IPv6 range (no-op then)
             bgp = metallb.bgp_params(network.spec()) if mode == "bgp" else None
             runner.metallb(pool, mode, bgp, pool6)
             if mlb.get("service_ip"):  # day 2 (e.g. L2 -> BGP): the demo moves to the new pool
@@ -1635,10 +1637,12 @@ class OpenShiftInstaller:
                 network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
                 mlb["pool"] = self._assign_pool(network, network.spec(), mode, int(mlb.get("addresses") or 16),
                                                 [n.ip for n in cluster.nodes], cluster.name, bool(mlb.get("bfd")))
+                # the new pool (and the other mode's entry dropped) in the group spec + router: BGP announce
+                # range accepted by FRR, L2 range kept out of DHCP
+                network.commit()
             elif mode == "bgp" and mlb.get("bfd"):  # BFD asked on an existing BGP pool: turn it on on the router
                 network = GroupClusterNetwork(cluster.group_id, cluster.name, owned=bool(cluster.group_owned))
                 network.enable_bfd()
-                network.commit()
                 network.commit()
             os_spec["metallb"] = mlb
             name = "metallb-operator"

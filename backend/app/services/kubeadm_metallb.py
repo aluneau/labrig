@@ -123,12 +123,7 @@ def apply(db: Session, task: Task, cluster: Cluster) -> Dict[str, Any]:
             mlb["pool"] = metallb.assign_pool(network, gspec, mode, int(mlb.get("addresses") or 16),
                                               [n.ip for n in cluster.nodes], cluster.name, bool(mlb.get("bfd")))
         else:  # (re)record the pool in the group spec: idempotent, repairs a spec edited meanwhile
-            name = f"{cluster.name}-metallb"
-            if mode == "bgp":
-                network.set_bgp_range(name, mlb["pool"], bfd=bool(mlb.get("bfd")))
-            else:
-                start, end = mlb["pool"].split("-")
-                network.set_address_pool(name, start, end)
+            metallb.record_pool(network, cluster.name, mode, mlb["pool"], bool(mlb.get("bfd")))
         dual = is_dual_stack(cluster)
         pool6, range6 = None, None
         if dual:

@@ -196,6 +196,19 @@ def assign_pool(network: Any, gspec: Any, mode: str, size: int, node_ips: List[s
     return pool
 
 
+def record_pool(network: Any, cluster_name: str, mode: str, pool: str, bfd: bool = False) -> None:
+    """(Re)record an assigned pool in the group spec (queued, applied by commit()): idempotent, repairs a spec
+    edited meanwhile; the other mode's entry is dropped"""
+    name = f"{cluster_name}-metallb"
+    if mode == "bgp":
+        network.remove_address_pool(name)
+        network.set_bgp_range(name, pool, bfd=bfd)
+    else:
+        start, end = pool.split("-")
+        network.remove_bgp_range(name)
+        network.set_address_pool(name, start, end)
+
+
 def assign_range6(db: Any, network: Any, gspec: Any, cluster_name: str, previous: Optional[str] = None) -> str:
     """Dual stack, bgp mode: the cluster's IPv6 announce range (a /64 of IPV6_ULA_POOL, `<cluster>-metallb6`,
     owned by the cluster, kept across applies; `previous` = the one stored with the cluster). Queued on the
