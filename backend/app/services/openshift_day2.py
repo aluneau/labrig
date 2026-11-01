@@ -132,7 +132,7 @@ class OpenShiftDay2:
             db.commit()
             for node in added:
                 network.reserve(node.name, node.mac, node.ip)
-                network.publish(node.ip, [f"{node.name}.{zone}", node.name])
+                network.publish(node.ip, [f"{node.name}.{zone}", node.name], paired=bool(opts.dual_stack))
             self._publish_ingress(network, cluster, opts.topology)
             network.commit()
             try:
