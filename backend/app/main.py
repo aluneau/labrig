@@ -197,6 +197,16 @@ def serve_bmh_installer(token: str, request: Request):
     return FileResponse(str(iso), media_type="application/octet-stream", filename="installer.iso")
 
 
+@app.post("/bmh-install/{token}/done", include_in_schema=False)
+def bmh_install_done(token: str):
+    """Called by the installer's %post (same opaque token as the ISO URL): marks the install done"""
+    from app.services.baremetal_install_service import baremetal_install_service
+    with SessionLocal() as db:
+        if not baremetal_install_service.finish(db, token):
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+    return {"status": "installed"}
+
+
 # Serve the built frontend (npm run build) from the same origin, if present
 _frontend = settings.FRONTEND_DIR.resolve()
 if (_frontend / "index.html").is_file():

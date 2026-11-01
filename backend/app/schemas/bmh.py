@@ -75,8 +75,9 @@ class BareMetalLinuxInstall(BaseModel):
     iso_name: str = Field(..., min_length=5, max_length=255)
     target_disk: str = Field("/dev/sda", min_length=5, max_length=255, pattern=r"^/dev/[A-Za-z0-9._/-]+$")
     admin_username: str = Field("admin", min_length=1, max_length=32, pattern=r"^[a-z_][a-z0-9_-]*$")
-    ssh_authorized_key: str = Field(..., min_length=20, max_length=16384)
-    repo_url: Optional[str] = Field(None, max_length=2048)
+    # One line each: they go into the kickstart as is
+    ssh_authorized_key: str = Field(..., min_length=20, max_length=16384, pattern=r'^\s*[^\r\n"]+?\s*$')
+    repo_url: Optional[str] = Field(None, max_length=2048, pattern=r'^(https?|ftp|nfs)://[^\s"]+$')
 
 
 class BareMetalInstallStatus(BaseModel):

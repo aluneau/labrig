@@ -78,6 +78,18 @@ GitOps (Argo CD); deleting that directory in git deprovisions the spoke. Install
 CD and deploy the Application from the hub's ACM tab → *Deploy from git (GitOps)*. See `docs/openshift.md` →
 *GitOps / ZTP (deploy a spoke from git)*.
 
+## Install Enterprise Linux (Kickstart)
+
+Host page → *Install Linux*: pick an EL installer ISO from Storage (DVD, or boot ISO + `repo_url`), the target
+disk (wiped), an admin user and its SSH public key. The app builds a Kickstart ISO with `mkksiso` (package
+`lorax`, on the VM Manager host) through the helper and boots it once over the BMC's virtual media
+(`/bmh-install/<token>/installer.iso`, same unguessable-token pattern as the agent ISO). The installed system:
+root locked, the admin logs in with the key only and has passwordless sudo (`/etc/sudoers.d/vmm-<user>`).
+At the end the installer's `%post` calls `POST /bmh-install/<token>/done`: the install becomes `installed`, the
+host `available` again, the ISO is deleted (its URL stops working) and the media ejected. If the callback never
+comes (the installer can't reach the app), *Cancel installation* ejects the media and powers the host off.
+API: `POST /api/v1/bare-metal-hosts/{id}/linux-install`, `GET …/linux-installs`, `POST …/linux-installs/{iid}/cancel`.
+
 ## Limitations (first step)
 
 - Single node only (no compact/HA yet); no LVMS/ODF storage, SR-IOV, MetalLB or disconnected installs on bare
