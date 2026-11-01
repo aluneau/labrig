@@ -467,7 +467,9 @@ node acm.js                                                     # ACM hub (SNO) 
 node disconnected-kubeadm.js                                    # air-gapped kubeadm: mirrored pod Running, un-mirrored ImagePullBackOff, no internet, day-2 mirror (~30 min)
 node logs.js                                                    # logs + diagnostics: sources, filters, rules, MCP, UI (EL_IMAGE=almalinux-9 CLUSTER=<name>: EL + pod logs)
 node budget.js                                                  # host budget: dry run vs /proc/meminfo, 409 + nothing left, force, MCP, modal lines (backend with BUDGET_MEMORY_RESERVE_MIB=200000)
+node budget-force.js                                            # forced group / member / k3s / add worker past a refusal (same backend setting)
 node snapshots.js                                               # VM + group snapshots: memory revert (file back, clock), shut-off, refusal on added member, spec back
+node snapshots-cluster.js                                       # EL guest memory revert + clock; group snapshot with kubeadm nodes: ConfigMap gone, nodes Ready (KUBECTL)
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host

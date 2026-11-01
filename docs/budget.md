@@ -44,4 +44,5 @@ Nothing is created. `?force=true` on the same request creates it anyway (writes 
 - OpenTofu: the apply fails with the message; `force_budget = true` on `vmmanager_vm`, `vmmanager_group`,
   `vmmanager_cluster` (also for members / workers added later).
 
-Code: `backend/app/services/budget.py`; e2e: `e2e/budget.js` (backend with a huge `BUDGET_MEMORY_RESERVE_MIB`).
+Code: `backend/app/services/budget.py`; e2e: `e2e/budget.js` and `e2e/budget-force.js` (forced group / member / k3s cluster / worker creates), both against
+a backend with a huge `BUDGET_MEMORY_RESERVE_MIB`.
