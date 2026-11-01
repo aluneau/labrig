@@ -47,6 +47,11 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   installed / ISO deleted, one-line key / repo URL; unit tests only, no BMC hardware here), AAAA for day-2 workers in
   dual stack (not run on a real cluster), topology shows IPv6 addresses in dual stack.
 - Rust rewrite feasibility (agent study, not in the repo): feasible, 30-50 person-weeks; not recommended now.
+- **Upgrades everywhere** (UI / API / MCP / OpenTofu): `openshift-day2.js` PASS (add / remove worker, upgrade 4.18.54 ->
+  4.18.55). MCP `cluster_upgrade` tool; OpenTofu `version` change on OpenShift = in-place upgrade (verified: SNO 4.18.54
+  -> 4.18.55 in 55 min, plan clean after), channel stored in the spec. Fixed on the way: node-image create retries on a
+  restarting API (EOF right after install), one agent ISO build at a time (parallel creates broke the shared installer
+  cache), OpenTofu `cloud_image_id` unknown after an OpenShift create.
 - Never run for real: libvirt stop (`libvirtctl.js`, nested install only), bare-metal Linux install on hardware.
 
 ## Next candidates (roadmap)
