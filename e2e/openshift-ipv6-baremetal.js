@@ -77,8 +77,17 @@ const KUBECTL = process.env.KUBECTL || 'kubectl';
     if (net.clusterNetwork.length !== 2 || net.serviceNetwork.length !== 2) throw new Error('networks not dual stack');
 
     // 3. router: DNS records, API + console over the IPv6 VIPs
-    const dns = await must(rtr, `for n in api api-int console-openshift-console.apps; do
-      echo "$n A $(getent ahostsv4 $n.${zone} | awk 'NR==1{print $1}') AAAA $(getent ahostsv6 $n.${zone} | awk 'NR==1{print $1}')"; done`);
+    // Ask the lab's dnsmasq itself (the router's own resolv.conf points at libvirt's): no dig on the router
+    const q = `import socket, struct, sys
+def ask(name, qtype):
+    q = struct.pack(">HHHHHH", 1, 0x100, 1, 0, 0, 0) + b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\\0" + struct.pack(">HH", qtype, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5); s.sendto(q, ("${group.spec.router.ip}", 53))
+    r = s.recv(512)
+    if struct.unpack(">H", r[6:8])[0] == 0: return ""
+    return socket.inet_ntop(socket.AF_INET if qtype == 1 else socket.AF_INET6, r[-4:] if qtype == 1 else r[-16:])
+for n in sys.argv[1:]:
+    print(n, "A", ask(n + ".${zone}", 1), "AAAA", ask(n + ".${zone}", 28))`;
+    const dns = await must(rtr, `python3 -c '${q}' api api-int console-openshift-console.apps`);
     log(`router DNS:\n${dns.trim()}`);
     const line = (n) => dns.split('\n').find((l) => l.trim().startsWith(`${n} `)) || '';
     if (!line('api').includes(`A ${vips.api} AAAA ${vips.api6}`)) throw new Error('api records');
@@ -89,7 +98,7 @@ const KUBECTL = process.env.KUBECTL || 'kubectl';
       return out.trim();
     }, 5 * 60000, 'API /readyz on the IPv6 VIP');
     log(`router -> https://[${vips.api6}]:6443/readyz: ${ready6}`);
-    const console6 = await must(rtr, `curl -sk -6 -o /dev/null -w '%{http_code}' -m 10 https://console-openshift-console.apps.${zone}/`);
+    const console6 = await must(rtr, `curl -sk -6 -o /dev/null -w '%{http_code}' -m 10 --resolve console-openshift-console.apps.${zone}:443:[${vips.ingress6}] https://console-openshift-console.apps.${zone}/`);
     log(`router -> console over IPv6 (ingress VIP6): HTTP ${console6}`);
     if (!/^(200|302)$/.test(console6.trim())) throw new Error('console over IPv6');
     log('PASS');

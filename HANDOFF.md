@@ -19,7 +19,7 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   first + clock sync, refused when members changed. `snapshots.js` + `smoke.js` passed on main. Not tested: groups
   with cluster nodes, EL guests refusing set-time, cancel mid-run. 2026-11-01: `snapshots-cluster.js` PASS (AlmaLinux 9
   memory revert, clock skew 0 s; group snapshot of a kubeadm cluster: ConfigMap gone after revert, nodes Ready). Cancel
-  mid-run still untested.
+  mid-run: `snapshots-cancel.js` PASS.
 - **Host resource budget** (docs/budget.md): RAM blocks (409 + `force=true`, `force_budget` in MCP / OpenTofu), vCPU
   and thin disks warn, "Host resources" line in create modals. `budget.js` refusal path verified on a sandbox backend
   with a huge reserve; `groups.js` passed on main. 2026-11-01: `budget-force.js` PASS (group, member, k3s, add worker:
@@ -40,8 +40,14 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   `synchronous=FULL` fsyncs on every commit while holding the write lock. Now `synchronous=NORMAL` (WAL: commits
   don't fsync, still consistent after a crash) + 30 s busy timeout (`database.py`).
 - Version bumped to 0.1.7, CI green; the tag (= release) is left to the owner (0.1.6 was tagged on Oct 27 from another checkout).
-- Never run for real: 3-node dual stack baremetal OpenShift (not enough RAM), libvirt stop (`libvirtctl.js`, nested
-  install only).
+- Compact dual stack `platform: baremetal` OpenShift installed for real: `openshift-ipv6-baremetal.js` PASS (4.20.44, 56 min:
+  v4+v6 VIPs in Infrastructure, nodes v4+v6, AAAA, API /readyz + console on the IPv6 VIPs). `snapshots-cancel.js` PASS.
+- Review of the 0.1.7 code (worth its size; ~50 lines trimmed in budget / snapshots, budget dry run lost the unused
+  `items` / `starting` inputs and `note`). Fixed: bare-metal Linux installs (admin sudo, `%post` done callback ->
+  installed / ISO deleted, one-line key / repo URL; unit tests only, no BMC hardware here), AAAA for day-2 workers in
+  dual stack (not run on a real cluster), topology shows IPv6 addresses in dual stack.
+- Rust rewrite feasibility (agent study, not in the repo): feasible, 30-50 person-weeks; not recommended now.
+- Never run for real: libvirt stop (`libvirtctl.js`, nested install only), bare-metal Linux install on hardware.
 
 ## Next candidates (roadmap)
 
