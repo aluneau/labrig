@@ -3,15 +3,15 @@
 vm_router is mounted under /vms before the vms router (its POST /{vm_id}/{action} would catch
 POST /{vm_id}/snapshots). Creating, reverting and deleting run as tasks (202 + the task).
 """
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, Path
 from sqlalchemy.orm import Session
 
+from app.api.v1.endpoints.groups import _group_or_404 as _group
+from app.api.v1.endpoints.vm_devices import _run, _vm
 from app.database import get_db
 from app.schemas import Task
 from app.schemas.snapshot import SNAPSHOT_NAME, GroupSnapshotList, SnapshotCreate, VMSnapshotList
-from app.services.group_service import group_service
 from app.services.snapshot_service import snapshot_service
-from app.services.vm_service import vm_service
 
 vm_router = APIRouter()
 group_router = APIRouter()
@@ -19,52 +19,29 @@ group_router = APIRouter()
 SnapName = Path(..., pattern=SNAPSHOT_NAME)
 
 
-def _run(func, *args):
-    try:
-        return func(*args)
-    except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-def _vm(db: Session, vm_id: int):
-    vm = vm_service.get_vm(db, vm_id)
-    if not vm:
-        raise HTTPException(status_code=404, detail="VM not found")
-    return vm
-
-
-def _group(db: Session, group_id: int):
-    group = group_service.get_group(db, group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    return group
-
-
 @vm_router.get("/{vm_id}/snapshots", response_model=VMSnapshotList)
 def list_vm_snapshots(vm_id: int, db: Session = Depends(get_db)):
     """The VM's snapshots (oldest first), and whether it can have any (`reasons` in plain words if not)"""
-    return snapshot_service.list_vm(_vm(db, vm_id))
+    return snapshot_service.list_vm(_vm(vm_id, db))
 
 
 @vm_router.post("/{vm_id}/snapshots", response_model=Task, status_code=202)
 def create_vm_snapshot(vm_id: int, data: SnapshotCreate, db: Session = Depends(get_db)):
     """Snapshot the VM: its disks, plus its memory when it runs (a revert then resumes it where it was)"""
-    return _run(snapshot_service.create_vm, db, _vm(db, vm_id), data)
+    return _run(snapshot_service.create_vm, db, _vm(vm_id, db), data)
 
 
 @vm_router.post("/{vm_id}/snapshots/{name}/revert", response_model=Task, status_code=202)
 def revert_vm_snapshot(vm_id: int, name: str = SnapName, db: Session = Depends(get_db)):
     """Revert the VM to a snapshot: everything written since is lost. Memory snapshots come back running
     (clock set to the host's through the guest agent), disk-only ones shut off."""
-    return _run(snapshot_service.revert_vm, db, _vm(db, vm_id), name)
+    return _run(snapshot_service.revert_vm, db, _vm(vm_id, db), name)
 
 
 @vm_router.delete("/{vm_id}/snapshots/{name}", response_model=Task, status_code=202)
 def delete_vm_snapshot(vm_id: int, name: str = SnapName, db: Session = Depends(get_db)):
     """Delete a snapshot (the VM's current state is not touched)"""
-    return _run(snapshot_service.delete_vm, db, _vm(db, vm_id), name)
+    return _run(snapshot_service.delete_vm, db, _vm(vm_id, db), name)
 
 
 @group_router.get("/{group_id}/snapshots", response_model=GroupSnapshotList)

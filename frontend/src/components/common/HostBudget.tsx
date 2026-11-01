@@ -42,9 +42,7 @@ interface Props {
 export const HostBudget: React.FC<Props> = ({ result, force, onForce }) => {
   if (!result) return null;
   const { need, host } = result;
-  if (!need.memory_mib && !need.vcpus && !need.disk_gib) {
-    return result.note ? <HelperText data-testid="host-budget"><HelperTextItem>{result.note}</HelperTextItem></HelperText> : null;
-  }
+  if (!need.memory_mib && !need.vcpus && !need.disk_gib) return null;
   const pool = host.pools[0];
   const variant = result.problems.length ? 'error' : result.warnings.length ? 'warning' : 'success';
   return (
@@ -59,7 +57,6 @@ export const HostBudget: React.FC<Props> = ({ result, force, onForce }) => {
         </HelperTextItem>
         {result.problems.map((p) => <HelperTextItem key={p} variant="error" hasIcon>{p}</HelperTextItem>)}
         {result.warnings.map((w) => <HelperTextItem key={w} variant="warning" hasIcon>{w}</HelperTextItem>)}
-        {result.note && <HelperTextItem>{result.note}</HelperTextItem>}
       </HelperText>
       {result.blocking && (
         <Checkbox

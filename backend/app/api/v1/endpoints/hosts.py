@@ -70,7 +70,7 @@ def get_host_resources():
 
 class BudgetRequest(BaseModel):
     """Dry run of the host resource budget (services/budget.py): give ONE of vm / group / group_id + members /
-    cluster / cluster_id + count / items, as the create request would (names may be left out)"""
+    cluster / cluster_id + count, as the create request would (names may be left out)"""
     vm: Optional[Dict[str, Any]] = None
     group: Optional[Dict[str, Any]] = None
     group_id: Optional[int] = None
@@ -79,8 +79,6 @@ class BudgetRequest(BaseModel):
     cluster_id: Optional[int] = None
     count: int = Field(1, ge=1, le=20)
     worker: Optional[Dict[str, int]] = None
-    items: List[Dict[str, Any]] = []
-    starting: List[str] = []
 
 
 @router.post("/budget")

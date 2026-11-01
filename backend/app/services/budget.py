@@ -215,8 +215,6 @@ def enforce(items: List[Dict[str, Any]], starting: Iterable[str] = ()) -> Option
     state["done"] = True
     try:
         result = check(items, starting)
-    except BudgetExceeded:
-        raise
     except Exception as e:  # never block a create on a failed reading (e.g. libvirt stopped: it fails itself)
         logger.warning(f"Host budget check skipped: {e}")
         return None
@@ -282,7 +280,7 @@ def plan_cluster(db, data) -> Dict[str, Any]:
     """ClusterCreate (k3s / kubeadm; OpenShift has its own stricter check): nodes, + the router of an
     auto-created group (kubeadm), or the stopped router of the group it joins (starting).
     Returns {items, starting}."""
-    from app.schemas.group import GroupSpec, RouterSpec
+    from app.schemas.group import GroupSpec, RegistrySpec, RouterSpec
     from app.services.group_service import group_service, router_vm_name
     if data.type == "openshift":
         return {"items": [], "starting": []}
@@ -300,14 +298,11 @@ def plan_cluster(db, data) -> Dict[str, Any]:
             items.append(item(f"{data.name}-{role}-{i}", res.memory, res.vcpu, max(float(res.disk_size), copy), copy))
     starting: List[str] = []
     if data.type == "kubeadm":
+        from app.services.k8s_mirror import REGISTRY_SIZES
         if data.group_id is None:
             router = RouterSpec(memory=data.router_memory) if getattr(data, "router_memory", None) else RouterSpec()
             if data.disconnected:
-                from app.services.k8s_mirror import REGISTRY_SIZES
-                router.registry.enabled = True
-                router.registry.memory_mb = REGISTRY_SIZES["memory_mb"]
-                router.registry.vcpus = REGISTRY_SIZES["vcpus"]
-                router.registry.disk_gb = REGISTRY_SIZES["disk_gb"]
+                router.registry = RegistrySpec(enabled=True, **REGISTRY_SIZES)
             items.insert(0, plan_router(db, data.name, router))
         else:
             group = group_service.get_group(db, data.group_id)
@@ -315,7 +310,6 @@ def plan_cluster(db, data) -> Dict[str, Any]:
                 starting.append(router_vm_name(group.name))
                 gspec = GroupSpec.model_validate(group.spec)
                 if data.disconnected and not gspec.router.registry.enabled:
-                    from app.services.k8s_mirror import REGISTRY_SIZES
                     extra = max(0, REGISTRY_SIZES["memory_mb"] - gspec.router.memory)
                     if extra:
                         items.append(item(f"{router_vm_name(group.name)} (mirror registry)", extra, 0,
@@ -326,7 +320,7 @@ def plan_cluster(db, data) -> Dict[str, Any]:
 def dry_run(db, body: Dict[str, Any]) -> Dict[str, Any]:
     """POST /hosts/budget: the same planners as the creates, on a partial form (names may be missing while
     the user types). One of: vm (VMCreate), group (GroupSpec: router + members), group_id + members (add
-    members), cluster (ClusterCreate), cluster_id + count (add workers), items (explicit); + starting."""
+    members), cluster (ClusterCreate), cluster_id + count (add workers). OpenShift has its own rule: no items."""
     from app.schemas import ClusterCreate, VMCreate
     from app.schemas.group import MemberSpec, RouterSpec
     from app.services.group_service import group_service
@@ -334,8 +328,8 @@ def dry_run(db, body: Dict[str, Any]) -> Dict[str, Any]:
     def members(raw: List[Dict[str, Any]]) -> list:
         return [MemberSpec.model_validate({**m, "name": m.get("name") or f"m{i}"}) for i, m in enumerate(raw or [])]
 
-    starting = list(body.get("starting") or [])
-    note = None
+    starting: List[str] = []
+    items: List[Dict[str, Any]] = []
     if body.get("vm") is not None:
         vm = VMCreate.model_validate({**body["vm"], "name": body["vm"].get("name") or "new-vm"})
         items = plan_vm(db, vm)
@@ -352,24 +346,15 @@ def dry_run(db, body: Dict[str, Any]) -> Dict[str, Any]:
     elif body.get("cluster") is not None:
         data = ClusterCreate.model_validate({**body["cluster"], "name": body["cluster"].get("name") or "cluster"})
         plan = plan_cluster(db, data)
-        items, starting = plan["items"], starting + plan["starting"]
-        if data.type == "openshift":
-            note = "OpenShift checks its own RAM rule at create (no overcommit: etcd)"
+        items, starting = plan["items"], plan["starting"]
     elif body.get("cluster_id") is not None:
         from app.services.cluster_service import cluster_service
         cluster = cluster_service.get_cluster(db, int(body["cluster_id"]))
         if cluster is None:
             raise LookupError("Cluster not found")
-        items = [] if cluster.type == "openshift" else plan_workers(db, cluster, int(body.get("count") or 1),
-                                                                     body.get("worker"))
-        if cluster.type == "openshift":
-            note = "OpenShift checks its own RAM rule when adding workers"
-    else:
-        items = [item(i.get("name") or f"item{n}", i.get("memory_mib", 0), i.get("vcpus", 0), i.get("disk_gib", 0),
-                      i.get("copy_gib", 0), i.get("pool")) for n, i in enumerate(body.get("items") or [])]
-    result = check(items, starting)
-    result["note"] = note
-    return result
+        if cluster.type != "openshift":
+            items = plan_workers(db, cluster, int(body.get("count") or 1), body.get("worker"))
+    return check(items, starting)
 
 
 def plan_workers(db, cluster, count: int, worker: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:

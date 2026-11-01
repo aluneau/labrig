@@ -1268,7 +1268,6 @@ class TopologyCluster(BaseModel):
     metallb_pool: Optional[str] = None
     service_ip: Optional[str] = None
     service_ip6: Optional[str] = None    # dual stack: the demo Service's IPv6 address
-    dual_stack: bool = False
     service_hostname: Optional[str] = None
     apps_domain: Optional[str] = None
     dual_stack: bool = False

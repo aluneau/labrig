@@ -28,9 +28,6 @@ from app.services.task_service import task_service
 
 logger = logging.getLogger(__name__)
 
-# Group task types that must not overlap (start / stop / snapshot operations of one group)
-GROUP_TASK_TYPES = ["group_start", "group_stop", "group_snapshot", "group_snapshot_revert", "group_snapshot_delete"]
-
 
 def _when(epoch: Optional[int]) -> Optional[datetime]:
     return datetime.fromtimestamp(epoch, timezone.utc) if epoch else None
@@ -175,11 +172,8 @@ class SnapshotService:
     def _check_group(self, db: Session, group: Group) -> GroupSpec:
         if group.status in ("creating", "deleting", "missing"):
             raise ValueError(f"Group is {group.status}")
-        busy = db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id,
-                                     Task.type.in_(GROUP_TASK_TYPES),
-                                     Task.status.in_(["pending", "running"])).first()
-        if busy is not None:
-            raise ValueError(f"'{busy.name}' is still running: wait for it to finish")
+        from app.services.group_service import group_service
+        group_service._check_no_power_task(db, group)
         return GroupSpec.model_validate(group.spec)
 
     def _group_snapshots(self, spec: GroupSpec, vms: List[str]) -> List[Dict[str, Any]]:
