@@ -474,6 +474,13 @@ updated) until the version is `Completed`, approving CSRs after the reboots; the
 `spec.openshift.upgrade` records the run (`target`, `from`, `state` running / completed / failed / unfollowed): after a
 server restart the app follows a running upgrade again (it goes on in the cluster by itself). SNO reboots once:
 the API is away a few minutes. Disconnected clusters: refused for now (the new release must be mirrored first).
+A channel set this way is stored in `spec.openshift.channel` too.
+
+- **MCP**: `cluster_upgrade(cluster)` = the status; `channel=` sets it; `version=` starts the upgrade (call again
+  without arguments to follow it).
+- **OpenTofu**: changing `version` of an installed `vmmanager_cluster` of type openshift upgrades it **in place** (k3s /
+  kubeadm are still recreated) and waits until it completed; the channel is `openshift.channel`, else
+  `stable-<target minor>`. Changing `openshift.channel` alone sets the update channel in place.
 
 Not yet: disconnected OKD, day-2 workers / upgrades on disconnected clusters.
 

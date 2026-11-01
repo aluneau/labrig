@@ -195,7 +195,10 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"name":    schema.StringAttribute{Required: true, PlanModifiers: replaceStr, Description: "DNS label; nodes are <name>-ctlplane-N / <name>-worker-N."},
 			"force_budget": forceBudgetAttribute(),
 			"type":    schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("k3s"), PlanModifiers: replaceStr, Description: "k3s (standalone network), kubeadm or openshift (in a lab group with a router)."},
-			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replaceKeepStr, Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 (default: latest of openshift.channel). The installed version is read back."},
+			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.String{
+				stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIf(replaceUnlessOpenShift,
+					"Recreates k3s / kubeadm clusters; upgrades OpenShift in place", "Recreates k3s / kubeadm clusters; upgrades OpenShift in place")},
+				Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 (default: latest of openshift.channel); changing it on an installed cluster upgrades it in place (to an update offered in openshift.channel, default stable-<target minor>; waits until the upgrade completed, ~1 h per z-stream). The installed version is read back."},
 			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt,
 				Description: "Control planes: 1, or 3/5 with embedded etcd (default 1). openshift: set by openshift.topology."},
 			"workers": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
@@ -261,11 +264,11 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"openshift": schema.SingleNestedAttribute{
 				Optional: true,
 				Description: "type = openshift (agent-based installer, needs vmmanager_openshift_pull_secret). Unset fields take the " +
-					"server defaults. Changed in place on an installed cluster: adding `operators`, enabling `metallb` / " +
+					"server defaults. Changed in place on an installed cluster: `channel`, adding `operators`, enabling `metallb` / " +
 					"`metallb_demo`, switching `metallb_mode`; anything else recreates the cluster.",
 				Attributes: map[string]schema.Attribute{
 					"distribution":      osStr("ocp (default: OpenShift, needs the pull secret) or okd (OKD on CentOS Stream CoreOS, no pull secret; no ODF / SR-IOV / ACM / disconnected)."),
-					"channel":           osStr("e.g. stable-4.20 (default). okd: stable-<minor> of the OKD releases, e.g. stable-4.22."),
+					"channel":           liveStr("e.g. stable-4.20 (default). okd: stable-<minor> of the OKD releases, e.g. stable-4.22. Changed in place on an installed cluster (the update channel)."),
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
 					"platform":          osStr("none (default: the group router fronts api / *.apps) or baremetal (keepalived API + ingress VIPs in the cluster; compact / ha only)."),
 					"api_vip":           osStr("platform baremetal: API virtual IP on the group network (default: assigned, read back)."),
@@ -593,6 +596,8 @@ func (r *clusterResource) refresh(ctx context.Context, m *clusterModel, d diags)
 	}
 	if img, ok := c.Spec["cloud_image_id"].(float64); ok {
 		m.CloudImageID = types.StringValue(strconv.FormatInt(int64(img), 10))
+	} else if m.CloudImageID.IsUnknown() {
+		m.CloudImageID = types.StringNull() // OpenShift nodes boot an ISO: no image
 	}
 	for key, attrs := range map[string][3]*types.Int64{
 		"ctlplane": {&m.CtlplaneMemory, &m.CtlplaneVCPU, &m.CtlplaneDisk},
@@ -741,6 +746,9 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 		if !r.openshiftAddons(ctx, id, state.OpenShift, plan.OpenShift, &resp.Diagnostics) {
 			return
 		}
+		if !r.openshiftUpgrade(ctx, id, &state, &plan, &resp.Diagnostics) {
+			return
+		}
 	}
 	if plan.Type.ValueString() == "kubeadm" && plan.Kubeadm != nil && kubeadmChanged(state.Kubeadm, plan.Kubeadm) {
 		var task struct {
@@ -774,6 +782,65 @@ func (r *clusterResource) Update(ctx context.Context, req resource.UpdateRequest
 
 	r.refresh(ctx, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
+}
+
+// replaceUnlessOpenShift: a version change recreates k3s / kubeadm clusters, OpenShift upgrades in place
+func replaceUnlessOpenShift(ctx context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	var t types.String
+	req.Plan.GetAttribute(ctx, path.Root("type"), &t)
+	resp.RequiresReplace = t.ValueString() != "openshift"
+}
+
+// openshiftUpgrade applies a changed openshift.channel and / or version through POST /clusters/{id}/upgrades and
+// waits for the upgrade task. Without a channel the target's stable-<minor> is used (the app clears it at install).
+func (r *clusterResource) openshiftUpgrade(ctx context.Context, id string, state, plan *clusterModel, d diags) bool {
+	body := map[string]any{}
+	var channel string
+	if plan.OpenShift != nil && !plan.OpenShift.Channel.IsUnknown() {
+		channel = plan.OpenShift.Channel.ValueString()
+		if state.OpenShift == nil || channel != state.OpenShift.Channel.ValueString() {
+			body["channel"] = channel
+		}
+	}
+	version := plan.Version.ValueString()
+	if !plan.Version.IsUnknown() && version != "" && version != state.Version.ValueString() {
+		body["version"] = version
+		if channel == "" {
+			if parts := strings.Split(version, "."); len(parts) >= 2 {
+				body["channel"] = "stable-" + parts[0] + "." + parts[1]
+			}
+		} else {
+			body["channel"] = channel
+		}
+	}
+	if len(body) == 0 {
+		return true
+	}
+	if err := r.client.Do(ctx, "POST", "/clusters/"+id+"/upgrades", body, nil); err != nil {
+		d.AddError("Cannot change the OpenShift update channel / version", err.Error())
+		return false
+	}
+	if body["version"] == nil {
+		return true
+	}
+	if err := r.waitIdle(ctx, id); err != nil {
+		d.AddError("OpenShift upgrade failed", err.Error())
+		return false
+	}
+	var up struct {
+		Version *string        `json:"version"`
+		Upgrade map[string]any `json:"upgrade"`
+	}
+	if err := r.client.Do(ctx, "GET", "/clusters/"+id+"/upgrades", nil, &up); err != nil {
+		d.AddError("Cannot read the upgrade result", err.Error())
+		return false
+	}
+	if up.Version == nil || *up.Version != version {
+		d.AddError("OpenShift upgrade failed", fmt.Sprintf("the cluster runs %q after the upgrade task, not %s: %v",
+			strOrNull(up.Version).ValueString(), version, up.Upgrade["message"]))
+		return false
+	}
+	return true
 }
 
 func nodeIndex(name string) int {

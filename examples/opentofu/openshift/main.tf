@@ -56,16 +56,20 @@ resource "vmmanager_openshift_pull_secret" "this" {
   path = var.pull_secret_path
 }
 
-# Latest release of the channel at plan time, pinned in the cluster (a newer release later doesn't
-# recreate it unless you apply with -refresh and accept the replacement)
-data "vmmanager_openshift_release" "this" {
+variable "ocp_version" {
+  type    = string
+  default = null # null: the channel's latest at creation, then kept. Set e.g. "4.20.45" and apply: upgraded in place
+}
+
+# The channel's latest release (output only: following it automatically would upgrade on every new z-stream)
+data "vmmanager_openshift_release" "latest" {
   channel = var.channel
 }
 
 resource "vmmanager_cluster" "ocp" {
   name    = var.name
   type    = "openshift"
-  version = data.vmmanager_openshift_release.this.version
+  version = var.ocp_version
 
   openshift = {
     channel      = var.channel
@@ -73,7 +77,7 @@ resource "vmmanager_cluster" "ocp" {
     storage      = "lvms" # odf needs 3 nodes
     operators    = var.operators
     metallb      = true
-    metallb_mode = "l2" # bgp: a /27 announced to the group router (switch in place)
+    metallb_mode = "l2"  # bgp: a /27 announced to the group router (switch in place)
     sriov        = false # true: igb NICs + vIOMMU + SR-IOV Network Operator (dev mode)
     # disconnected = true # mirror registry on the group router (+8 GiB RAM), no internet for the nodes
   }
@@ -93,6 +97,10 @@ output "kubeadmin_password" {
 
 output "console_url" {
   value = vmmanager_cluster.ocp.console_url
+}
+
+output "latest_release" {
+  value = data.vmmanager_openshift_release.latest.version
 }
 
 output "api_endpoint" {
