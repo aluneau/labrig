@@ -464,7 +464,7 @@ class OpenShiftInstaller:
                     raise RuntimeError("The bare-metal host was deleted")
                 if (baremetal_service.client(db, host).power_state() or "").lower() != "on":
                     svc._check(task, cluster, db, 40, "Restarting the bare-metal host from the agent ISO")
-                    self._boot_bmh(db, cluster, (cluster.spec or {}).get("iso_path") or "")
+                    self._boot_bmh(db, cluster)
                 svc._check(task, cluster, db, 45, "Resuming after a server restart: following the install")
                 return self._finish(db, task, cluster, list(cluster.nodes), (cluster.spec or {}).get("iso_path"))
             missing = [n.name for n in cluster.nodes if libvirt_client.get_vm(n.name) is None]
@@ -1027,7 +1027,7 @@ class OpenShiftInstaller:
             svc._check(task, cluster, db, 28, "Building the agent ISO (openshift-install agent create image)")
             iso = self._create_image_bmh(db, task, cluster, nodes, opts)
             svc._check(task, cluster, db, 40, "Booting the bare-metal host from the agent ISO (virtual media)")
-            self._boot_bmh(db, cluster, iso)
+            self._boot_bmh(db, cluster)
             self._set_live(cluster.id, phase="booting")
             return self._finish(db, task, cluster, nodes, iso)
 
@@ -1163,7 +1163,7 @@ class OpenShiftInstaller:
                 return iso if iso.exists() else None
         return None
 
-    def _boot_bmh(self, db: Session, cluster: Cluster, iso: str) -> None:
+    def _boot_bmh(self, db: Session, cluster: Cluster) -> None:
         from app.services.baremetal_service import baremetal_service
         host = baremetal_service.get_host(db, cluster.spec["bare_metal"]["host_id"])
         if host is None:
@@ -1223,7 +1223,7 @@ class OpenShiftInstaller:
         agent_iso = (cluster.spec or {}).get("iso_path")
         if recovering_install and agent_iso and os.path.isfile(agent_iso):
             svc._check(task, cluster, db, 40, "Booting the bare-metal host from the agent ISO")
-            self._boot_bmh(db, cluster, agent_iso)
+            self._boot_bmh(db, cluster)
         else:
             baremetal_service.client(db, host).power_on()
         deadline = time.monotonic() + START_TIMEOUT

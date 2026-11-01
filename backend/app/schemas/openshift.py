@@ -92,8 +92,8 @@ class OpenShiftOptions(BaseModel):
     dual_stack: bool = False
     # IP family of the cluster (docs/ipv6.md "IPv6-only OpenShift", create only). None = from dual_stack
     # (dual_stack -> "dual_stack", else "ipv4"); "dual_stack" sets dual_stack; "ipv6" = single stack IPv6:
-    # machine network = the group /64, cluster fd01::/48 (hostPrefix 64), services fd02::/112, nodes with a
-    # static IPv6 address and no IPv4 at all. The host has no IPv6 internet: needs disconnected (the mirror
+    # machine network = the group /64, cluster fd01::/48 (hostPrefix 64), services fd02::/112, nodes on
+    # DHCPv6 reservations and no IPv4 at all. The host has no IPv6 internet: needs disconnected (the mirror
     # registry on the router serves the nodes over IPv6)
     ip_family: Optional[Literal["ipv4", "dual_stack", "ipv6"]] = Field(None, description=(
         "ipv4 (default) | dual_stack (= dual_stack: true) | ipv6 = IPv6 single stack (IPv6-only nodes, pods and "

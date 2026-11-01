@@ -201,7 +201,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
     : nameValid && imageId && Number(ctlplanes) >= 1 && Number(workers) >= 0;
 
   // Host resources line (k3s / kubeadm: nodes + an auto-created group's router; OpenShift: its own rule at create)
-  const budget = useHostBudget(!isOpen || bareMetal ? null : isOpenShift ? { cluster: { type: 'openshift' } } : {
+  const budget = useHostBudget(!isOpen || isOpenShift ? null : {
     cluster: {
       type: type as ClusterCreate['type'],
       ctlplanes: Number(ctlplanes) || 1,
@@ -426,8 +426,7 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
                   onChange={(_e, v) => setDualStack(v)} />
                 <FormHelperText><HelperText><HelperTextItem>
                   {autoGroup ? 'The new group gets IPv6 (a /64, DHCPv6 reservations); ' : 'The group has IPv6: '}
-                  pods and services get an IPv4 and an IPv6 address, nodes both families
-                  {isOpenShift ? ' (machine / cluster / service networks of both families)' : ' (Flannel, kube-proxy)'},
+                  pods and services get an IPv4 and an IPv6 address, nodes both families (Flannel, kube-proxy),
                   MetalLB an IPv6 pool too. The kubeconfig stays on IPv4.
                 </HelperTextItem></HelperText></FormHelperText>
               </FormGroup>
@@ -587,6 +586,11 @@ export const CreateClusterModal: React.FC<Props> = ({ isOpen, onClose, onCreated
             </GridItem>
           </Grid>
         </ExpandableSection>
+        {isOpenShift && !bareMetal && (
+          <HelperText data-testid="host-budget"><HelperTextItem>
+            OpenShift checks its own RAM rule at create (no overcommit: etcd)
+          </HelperTextItem></HelperText>
+        )}
         <HostBudget result={budget} force={force} onForce={setForce} />
       </Form>
     </Modal>

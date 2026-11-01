@@ -53,6 +53,8 @@ ROUTER_RESTART_TIMEOUT = 5 * 60
 SHUTDOWN_TIMEOUT = 120
 LEASES_FILE = "/var/lib/dnsmasq/dnsmasq.leases"
 
+# Group task types that must not overlap (start / stop / snapshot operations of one group)
+GROUP_TASK_TYPES = ["group_start", "group_stop", "group_snapshot", "group_snapshot_revert", "group_snapshot_delete"]
 # Member fields that can't change in place (the VM must be recreated)
 MEMBER_IMMUTABLE = ("source", "image", "iso", "memory", "vcpu", "disk_size", "role", "mac", "cloud_init", "user_data")
 
@@ -973,8 +975,7 @@ class GroupService:
     def _check_no_power_task(db: Session, group: Group) -> None:
         """A start racing a stop still waiting on a VM would power that VM off again (and vice versa)"""
         busy = db.query(Task).filter(Task.target_type == "group", Task.target_id == group.id,
-                                     Task.type.in_(["group_start", "group_stop", "group_snapshot",
-                                                    "group_snapshot_revert", "group_snapshot_delete"]),
+                                     Task.type.in_(GROUP_TASK_TYPES),
                                      Task.status.in_(["pending", "running"])).first()
         if busy is not None:
             raise ValueError(f"'{busy.name}' is still running: wait for it to finish")

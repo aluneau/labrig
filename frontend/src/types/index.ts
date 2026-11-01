@@ -819,8 +819,6 @@ export interface BudgetRequest {
   cluster_id?: number;
   count?: number;
   worker?: NodeResources;
-  items?: BudgetItem[];
-  starting?: string[];
 }
 
 export interface BudgetItem {
@@ -842,7 +840,6 @@ export interface BudgetResult {
   problems: string[];
   warnings: string[];
   message: string;
-  note?: string | null;
   need: { memory_mib: number; vcpus: number; disk_gib: number; copy_gib: number };
   host: {
     memory_total_mib: number | null;

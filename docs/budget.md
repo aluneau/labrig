@@ -38,7 +38,7 @@ Nothing is created. `?force=true` on the same request creates it anyway (writes 
 - UI: every create form shows a "Host resources" line (needs / available, warnings in yellow, problems in red);
   when it would be refused, Create stays disabled until "Create anyway" is ticked.
 - API: `POST /api/v1/hosts/budget` is the dry run (body: one of `vm`, `group`, `group_id` + `members`, `cluster`,
-  `cluster_id` + `count`, or explicit `items`), same code as the creates.
+  `cluster_id` + `count`), same code as the creates.
 - MCP: the tools get the 409 message as their error; `create_vm`, `create_group`, `add_group_member`,
   `create_cluster` take `force_budget`.
 - OpenTofu: the apply fails with the message; `force_budget = true` on `vmmanager_vm`, `vmmanager_group`,
