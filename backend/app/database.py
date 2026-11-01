@@ -12,14 +12,18 @@ settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 if settings.DATABASE_URL.startswith("sqlite"):
     # One connection per session (requests run in a thread pool); WAL lets readers
     # and the writer work concurrently, busy_timeout waits instead of failing.
-    engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 15})
+    # synchronous=NORMAL: a commit doesn't fsync (checkpoints do; still consistent after a crash).
+    # With FULL, a commit holds the write lock during its fsync, and on a btrfs host busy
+    # copying VM disks that fsync took 15 s+: other writers failed with "database is locked".
+    engine = create_engine(settings.DATABASE_URL, connect_args={"check_same_thread": False, "timeout": 30})
 
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_conn, _record):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=15000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
 else:
     engine = create_engine(settings.DATABASE_URL)
