@@ -110,4 +110,5 @@ the RAM into the qcow2), `<memory snapshot='no'/>` when it is off; revert with `
 `hwclock -w`, which fails in guests without it). Code: `services/snapshot_service.py`, libvirt calls in
 `libvirt_client.py` (`create_snapshot`, `revert_snapshot`, `snapshot_blockers`, `set_guest_time`), endpoints
 `api/v1/endpoints/snapshots.py`, UI `components/snapshots/SnapshotsPanel.tsx`, tests `e2e/snapshots.js`,
-`e2e/snapshots-cluster.js` (AlmaLinux guest clock after a memory revert; group snapshot holding kubeadm nodes).
+`e2e/snapshots-cluster.js` (AlmaLinux guest clock after a memory revert; group snapshot holding kubeadm nodes),
+`e2e/snapshots-cancel.js` (group snapshot cancelled mid-run: rolled back everywhere; a started revert ignores a cancel).

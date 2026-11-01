@@ -461,6 +461,7 @@ node bgp.js                                                     # BGP: FRR membe
 node ipv6.js                                                    # dual stack: DHCPv6/RA, AAAA, EL lease, BGP over IPv6, egress drop/reject/blocked, live toggle (REUSE=1 KEEP=1)
 node kubeadm-ipv6.js                                            # dual stack kubeadm: node/pod/Service v4+v6, pod->pod v6, MetalLB v6 L2 + BGP from a member (REUSE=1 KEEP=1)
 node openshift-ipv6only.js                                      # IPv6-only disconnected SNO: InternalIP v6 only, no v4 on br-ex, pod from the mirror, console via router (REUSE=1 KEEP=1, ~2 h)
+KUBECTL=… node openshift-ipv6-baremetal.js                     # compact dual stack platform baremetal: v4+v6 VIPs (Infrastructure), nodes v4+v6, API / console on the v6 VIPs (~1 h 15)
 node bgp-bfd.js                                                 # BFD: failover timing without / with BFD (lib-router.js measures on the router)
 node kubeadm-metallb.js                                         # kubeadm + MetalLB BGP/BFD + demo, failover, switch to L2 (REUSE=1 KEEP=1)
 node acm.js                                                     # ACM hub (SNO) + import kubeadm / k3s, Available, refused k3s on own NAT, detach (REUSE=1 KEEP=1, ~2 h fresh)
@@ -470,6 +471,7 @@ node budget.js                                                  # host budget: d
 node budget-force.js                                            # forced group / member / k3s / add worker past a refusal (same backend setting)
 node snapshots.js                                               # VM + group snapshots: memory revert (file back, clock), shut-off, refusal on added member, spec back
 node snapshots-cluster.js                                       # EL guest memory revert + clock; group snapshot with kubeadm nodes: ConfigMap gone, nodes Ready (KUBECTL)
+node snapshots-cancel.js                                        # group snapshot cancelled mid-run: rolled back on every VM, all running, clocks; revert ignores cancel
 node router-cases.js                                            # split DNS via a member resolver, proxy-only egress (407/403, member env), PMTUD black hole + MSS clamp, MTU
 HOST_SH="ssh l1" PF=eth2 VM_NAME=… node sriov-real.js           # VF pools on an SR-IOV host (nested EL L1): checks, VF options, persistence, VLANs
 node libvirtctl.js       # STOPS libvirt: only against a nested install (ssh -L tunnel), never this host
