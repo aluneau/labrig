@@ -36,6 +36,8 @@ NODE_IMAGE_TIMEOUT = 30 * 60   # oc adm node-image create: pulls the node-joiner
 JOIN_TIMEOUT = 60 * 60         # node ISO boot -> RHCOS on disk -> reboot -> kubelet Ready
 UPGRADE_TIMEOUT = 5 * 3600     # z-stream on SNO ~1 h; minor upgrades / nested rigs take longer
 RETRIEVE_TIMEOUT = 2 * 60      # new channel -> CVO fetched its updates
+TRANSIENT_API_RE = re.compile(r"EOF|connection refused|i/o timeout|TLS handshake timeout|ServiceUnavailable|"
+                              r"the server is currently unable|connection reset by peer")
 SETTLE_TIMEOUT = 15 * 60       # oc adm upgrade refused while an operator is degraded (transient after node changes)
 CHANNEL_RE = re.compile(r"^[a-z]+-\d+(\.\d+)?$")  # stable-4.18, eus-4.18, OKD stable-4
 PERCENT_RE = re.compile(r"(\d+)% complete")
@@ -219,11 +221,18 @@ class OpenShiftDay2:
                              "interfaces": [{"name": "enp1s0", "macAddress": n.mac}]} for n in nodes],
                   "sshKey": ssh_key}
         (outdir / "nodes-config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
-        out = openshift_service.oc(
-            cluster.name, cluster.version,
-            ["adm", "node-image", "create", "--dir", str(outdir), "--report",
-             "-a", str(openshift_service._pull_secret_path)],
-            NODE_IMAGE_TIMEOUT, cwd=outdir, cancelled=lambda: task_service.is_cancelled(task.id))
+        for attempt in range(3):
+            out = openshift_service.oc(
+                cluster.name, cluster.version,
+                ["adm", "node-image", "create", "--dir", str(outdir), "--report",
+                 "-a", str(openshift_service._pull_secret_path)],
+                NODE_IMAGE_TIMEOUT, cwd=outdir, cancelled=lambda: task_service.is_cancelled(task.id))
+            # A fresh SNO's API server still restarts now and then: the node-joiner pod's watch gets EOF
+            if (out["exitcode"] == 0 or attempt == 2 or task_service.is_cancelled(task.id)
+                    or not TRANSIENT_API_RE.search((out["stderr"] or "") + (out["stdout"] or ""))):
+                break
+            self.svc._check(task, cluster, db, 10, f"API unavailable while building the node ISO, retry {attempt + 1}/2 in 1 min")
+            time.sleep(60)
         isos = sorted(outdir.glob("*.iso"))
         if out["exitcode"] != 0 or not isos:
             detail = (out["stderr"] or out["stdout"]).strip()[-800:]
@@ -424,6 +433,11 @@ class OpenShiftDay2:
         self.svc._ensure_idle(cluster)
         if channel is not None and channel != (self._summary(self._cv(cluster))["channel"]):
             self._patch_channel(cluster, channel)
+            # the spec follows (OpenTofu reads openshift.channel back)
+            os_spec = {**((cluster.spec or {}).get("openshift") or {}), "channel": channel}
+            cluster.spec = {**cluster.spec, "openshift": os_spec}
+            db.commit()
+            self.inst.save_spec(cluster)
         if not version:
             return self.upgrades(db, cluster)
         if not re.match(r"^\d+\.\d+\.\d+(-[a-z0-9.]+)?$", version):

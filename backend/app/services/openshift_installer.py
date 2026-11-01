@@ -109,6 +109,9 @@ def storage_roles(opts: OpenShiftOptions, workers: int) -> List[str]:
     return ["worker"] if workers >= 3 else ["ctlplane"]
 
 
+_IMAGE_LOCK = threading.Lock()
+
+
 class OpenShiftInstaller:
     def __init__(self) -> None:
         # Live install view per cluster id (Assisted Service snapshot, cluster operators), for the UI
@@ -900,6 +903,16 @@ class OpenShiftInstaller:
         env = {"PATH": f"{openshift_service.bin_dir(cluster.version)}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                "HOME": str(openshift_service.root), "XDG_CACHE_HOME": str(cache)}
         log_path = workdir / "create-image.log"
+        # One build at a time: parallel runs share the cache and collide extracting it (lstat …/agent-tui)
+        while not _IMAGE_LOCK.acquire(timeout=3):
+            svc._check(task, cluster, db, 32, "Building the agent ISO: waiting for another cluster's build (shared cache)")
+        try:
+            self._agent_create_image(task, cluster, db, binary, workdir, env, log_path)
+        finally:
+            _IMAGE_LOCK.release()
+
+    def _agent_create_image(self, task: Task, cluster: Cluster, db: Session, binary, workdir, env, log_path) -> None:
+        svc = self.svc
         with open(log_path, "w") as log:
             proc = subprocess.Popen([str(binary), "agent", "create", "image", "--dir", str(workdir),
                                      "--log-level", "info"], stdout=log, stderr=subprocess.STDOUT, env=env)
