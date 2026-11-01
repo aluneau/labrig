@@ -104,8 +104,7 @@ function routerLines(t: GroupTopology): Line[] {
     { text: `uplink ${r.uplink_ip || '(DHCP)'} · internet side` },
     { text: `LAN ${r.lan_ip} · lab gateway`, bold: true },
   ];
-  // IPv6-only machines reach the router on its IPv6 address only
-  if (r.lan_ip6 && t.machines.some((m) => m.ipv6_only)) lines.push({ text: `LAN ${r.lan_ip6} · IPv6 gateway` });
+  if (r.lan_ip6) lines.push({ text: `LAN ${r.lan_ip6} · ${t.machines.some((m) => m.ipv6_only) ? 'IPv6 gateway' : 'dual stack'}` });
   if (r.tunnel_ip) lines.push({ text: `tunnel ${r.tunnel_ip} · WireGuard` });
   return lines;
 }
@@ -140,6 +139,7 @@ function machineLines(m: TopologyMachine): Line[] {
     : m.kind === 'member' ? (m.role && m.role !== 'member' ? m.role : 'member') : 'reserved address';
   const lines: Line[] = [{ text: `${m.ipv6_only ? m.ip6 : m.ip || '?'} · ${role}` }];
   if (m.ipv6_only) lines.push({ text: 'IPv6 only (no IPv4)', color: C.arp, bold: true });
+  else if (m.ip6) lines.push({ text: m.ip6 });
   if (m.bgp_state) {
     lines.push({ text: (m.bgp_state === 'Established' ? 'BGP session up' : `BGP ${m.bgp_state}`) + (m.bfd_state ? ` · BFD ${m.bfd_state}` : ''),
       color: m.bgp_state === 'Established' && (!m.bfd_state || m.bfd_state === 'up') ? C.bgp : C.warn });
@@ -293,7 +293,7 @@ function computeLayout(t: GroupTopology, width: number): Layout {
     zones.push({ key: 'z-laptop', label: 'Your laptop', r: { x: cx - 8, y: lzTop, w: CW + 16, h: lzBottom - lzTop } });
     zones.push({ key: 'z-host', label: 'Host (this PC)', r: { x: cx - 8, y: hzTop, w: CW + 16, h: H - 8 - hzTop } });
     zones.push({ key: 'z-router', label: 'Router', sub: 'the lab\'s gateway', r: { x: rx - 8, y: 8, w: RW + 16, h: zh } });
-    zones.push({ key: 'z-lan', label: `Lab network ${t.cidr}`, sub: 'one L2 segment, like one switch', r: { x: nx - 8, y: 8, w: NW + 16, h: zh } });
+    zones.push({ key: 'z-lan', label: `Lab network ${t.cidr}`, sub: t.ipv6_prefix ? `+ ${t.ipv6_prefix} (IPv6)` : 'one L2 segment, like one switch', r: { x: nx - 8, y: 8, w: NW + 16, h: zh } });
     if (showVips) zones.push({ key: 'z-vip', label: 'Virtual IPs', sub: 'floating addresses', r: { x: vx - 8, y: 8, w: VW + 16, h: zh } });
     return { W, H, vertical, zones, boxes, segs, badges, bus };
   }
@@ -336,7 +336,7 @@ function computeLayout(t: GroupTopology, width: number): Layout {
   const lastMid = machines.length ? boxes[`m:${machines[machines.length - 1].name}`].y + 20 : nzTop + 50;
   const bus = { x1: spine, y1: nzTop + 30, x2: spine, y2: lastMid + 8 };
   y = Math.max(y, nzTop + 70);
-  zones.push({ key: 'z-lan', label: `Lab network ${t.cidr}`, sub: 'one L2 segment', r: { x: P, y: nzTop, w: W - 2 * P, h: y - nzTop }, indent: 18 });
+  zones.push({ key: 'z-lan', label: `Lab network ${t.cidr}`, sub: t.ipv6_prefix ? `+ ${t.ipv6_prefix}` : 'one L2 segment', r: { x: P, y: nzTop, w: W - 2 * P, h: y - nzTop }, indent: 18 });
   if (showVips) {
     y += 14;
     const vzTop = y;
