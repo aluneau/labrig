@@ -4,7 +4,7 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
 
 ## Where we are
 
-- `main` = GitHub `aluneau/labrig`, pushed, CI green. Releases up to **v0.1.7**, which added since 0.1.6 (Oct 27):
+- `main` = GitHub `aluneau/labrig`, pushed, CI green. Releases up to **v0.1.6** (Oct 27, fixes only); main = 0.1.7, ready to tag (`git tag -a v0.1.7 -m "VM Manager 0.1.7" && git push origin v0.1.7`), adds:
   OKD + platform baremetal (VIPs), OpenShift day 2 (add/remove workers, upgrades), dual stack kubeadm / OpenShift,
   bare-metal unattended Linux installs + BMC media fixes (pushed Oct 27–28 from another checkout, merged 2026-10-31).
 - 2026-10-31 fixes: a multi-line f-string in `acm_spokes.py` broke Python < 3.12 (CI had been red since Oct 28);
@@ -39,7 +39,7 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   on this btrfs rig, fsync of a small file stalls up to 7.5 s while VM disks are copied / written, and SQLite's default
   `synchronous=FULL` fsyncs on every commit while holding the write lock. Now `synchronous=NORMAL` (WAL: commits
   don't fsync, still consistent after a crash) + 30 s busy timeout (`database.py`).
-- Release 0.1.7 (0.1.6 had been tagged on Oct 27 from another checkout with fixes only).
+- Version bumped to 0.1.7, CI green; the tag (= release) is left to the owner (0.1.6 was tagged on Oct 27 from another checkout).
 - Never run for real: 3-node dual stack baremetal OpenShift (not enough RAM), libvirt stop (`libvirtctl.js`, nested
   install only).
 
