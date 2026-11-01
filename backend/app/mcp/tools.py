@@ -609,6 +609,29 @@ async def cluster_power(ctx: Ctx, cluster: Ref, action: Literal["start", "stop"]
 
 
 @tool
+async def cluster_upgrade(ctx: Ctx, cluster: Ref, version: Optional[str] = None, channel: Optional[str] = None,
+                          accept_risks: bool = False) -> Any:
+    """OpenShift updates. Without version / channel: the status in plain words (current version, channel,
+    recommended updates in `available`, `conditional` ones with their risks, a running upgrade's progress and
+    cluster operators updated, history). With channel: set it (e.g. stable-4.18; the app clears it at install, so
+    set it before asking for updates). With version: start the upgrade (a task: call again without arguments to
+    follow it, ~1 h for a z-stream). Upgrade only to a version listed in `available` (or `conditional` with
+    accept_risks, only when the user accepts those risks). Not for disconnected clusters.
+
+    Args:
+        cluster: cluster name or id
+        version: target version, e.g. 4.18.55
+        channel: update channel, e.g. stable-4.18 or fast-4.19 ("" = none)
+        accept_risks: upgrade to a conditional update whose known risks apply to this cluster
+    """
+    c = await _find(ctx, "clusters", cluster)
+    if version is None and channel is None:
+        return await ctx.api("GET", f"/clusters/{c['id']}/upgrades")
+    return await ctx.api("POST", f"/clusters/{c['id']}/upgrades",
+                         _clean({"version": version, "channel": channel, "accept_risks": accept_risks}))
+
+
+@tool
 async def get_kubeconfig(ctx: Ctx, cluster: Ref) -> Any:
     """The cluster's admin kubeconfig (YAML). Its server is the router's uplink address: reachable from the
     vm-manager host, and from a laptop through the group's WireGuard (wireguard_device).

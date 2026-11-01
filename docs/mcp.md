@@ -46,7 +46,7 @@ configuration below with the right URL and a token filled in.
 | Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host) |
 | Lab groups | `list_groups`, `get_group` (+ leases), `create_group`, `add_group_member`, `wireguard_device` |
 | Logs / diagnostics | `vm_logs` (admin), `vm_diagnostics`, `find_pods`, `pod_logs` (admin): server-side filters + known-problem rules, see [logs.md](logs.md) |
-| Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `get_kubeconfig`, `kubectl` (admin), `oc` (admin, OpenShift), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
+| Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `cluster_upgrade` (OpenShift: status, channel, upgrade), `get_kubeconfig`, `kubectl` (admin), `oc` (admin, OpenShift), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
 | Other | `list_cloud_images`, `list_networks`, `list_templates`, `create_from_template` (or `dry_run`), `list_tasks`, `wait_for_task` |
 
 - Resources are named by **name or id**. Long operations return a task: `wait_for_task` / `wait_for_cluster` wait up to
