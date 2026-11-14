@@ -81,7 +81,7 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
 - To verify after changes: recreate the same load (k3s + kubeadm clusters at once) while watching
   `/proc/pressure/io` and `iostat -x sda 5`; the desktop must stay responsive.
 
-## 2026-11-14: OpenShift 5.0 (UNCOMMITTED: whole working tree, owner to confirm the commit)
+## 2026-11-14: OpenShift 5.0 (committed d1725d6, not pushed)
 
 - Asked: deploy OCP 5.0. `stable-5.0` (5.0.0, 5.0.1) comes from the same update graph and the same
   `mirror.openshift.com/.../ocp/<ver>` client dirs (same archive names) -> channels / versions / binaries needed no
@@ -103,19 +103,16 @@ Read `CLAUDE.md` first. Earlier handoffs are in git history (`git log -p HANDOFF
   (RHCOS 10 base ISO `coreos10-x86_64.iso`, node v1.36.5), ClusterVersion Available, samples Removed, LVMS +
   MetalLB 5.0.0 from `cs-redhat-operator-index-v5-0`, hello demo, pod / node internet blocked. Cluster deleted,
   e2e token revoked, UI rebuilt, service restarted. tsc, go build, check-python, check-templates OK.
-- Not run on 5.0: connected install, compact / ha, platform baremetal, IPv6, OKD 5, ACM, day 2 workers,
-  upgrades 4.22 -> 5.0 (fast-5.0 / candidate-5.0 graphs contain 4.22.x, so the path exists).
-- **Open question to the owner** ("make it work on a disconnected env"): case 1 = cluster air-gapped, host +
-  router online (works, verified above) vs case 2 = the vm-manager host itself has no internet (not supported for
-  any version: installer / oc / oc-mirror / mirror-registry / release all downloaded). Case 2 would be an offline
-  bundle (built on a connected machine: binaries + oc-mirror mirror-to-disk archive + mirror-registry) imported
-  into the router registry (disk-to-mirror), install with no outbound call. Wait for the answer before building.
-- Rig: kernel 7.3.4 was installed while 7.3.3 ran -> no modules for the running kernel (bridge, sch_htb, nft
-  nat...): lab groups failed with "Le paquetage n'est pas installé" / "qdisc kind is unknown" / network
-  'default' not active. Worked around with the 7.3.3 package from the pacman cache bind-mounted read-only at
-  /usr/lib/modules/7.3.3-1-cachyos + libvirtd restart. **Owner is rebooting**: afterwards
-  `sudo rmdir /usr/lib/modules/7.3.3-1-cachyos`, then `sudo systemctl start vm-manager` (not at boot; libvirt
-  starts on demand). Symptom to recognise next time: any of those three errors right after a kernel update.
+- Verified after the reboot: `VERSION=5.0.0 CHANNEL=stable-5.0 node openshift-day2.js` PASS (93 min): connected SNO
+  5.0.0 ready in 37 min, add worker (Ready, ingress LB on both, console 200), remove worker, channel set from the UI,
+  in-place upgrade 5.0.0 -> 5.0.1 Completed (44 min), deleted.
+- Not run on 5.0: compact / ha, platform baremetal, IPv6, OKD 5, ACM, upgrades 4.22 -> 5.0 (fast-5.0 /
+  candidate-5.0 graphs contain 4.22.x, so the path exists).
+- Owner's answer on "disconnected": case 1 is enough (cluster air-gapped, host + router online; verified). No
+  offline bundle for a host without internet.
+- Rig: kernel 7.3.4 was installed while 7.3.3 ran -> no modules for the running kernel: lab groups failed with
+  "Le paquetage n'est pas installé" / "qdisc kind is unknown" / network 'default' not active. Recognise that symptom
+  after a kernel update; a reboot fixes it (done 2026-11-14, temp module mount removed).
 
 ## Next candidates (roadmap)
 
