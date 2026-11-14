@@ -58,7 +58,8 @@ router:
   saved config and the **setup task restarts the router once** (clean shutdown + start: ~1 min without
   DHCP / DNS / internet for the lab). A new group with the registry is created with them.
 - The setup (task "Set up mirror registry"): formats the disk, installs podman / skopeo, downloads
-  `mirror-registry` (~1.3 GB, mirror.openshift.com) and `oc-mirror` (stable, ~130 MB) **on the router**, makes a
+  `mirror-registry` (~1.3 GB, mirror.openshift.com) and `oc-mirror` (~130 MB; from `ocp/stable`, else `ocp/stable-4.22`: OpenShift 5.x client
+  directories don't ship it, and oc-mirror v2 mirrors 5.x releases fine) **on the router**, makes a
   CA + server certificate (SANs: `registry.<domain>`, the router LAN IP, its pinned uplink IP), installs Quay.
   Typical: 10–30 min, mostly the download. Re-running it is safe (each step is skipped when done).
 - The **CA** is read back into the spec (`router.registry.ca_pem`, `GET /groups/{id}/registry/ca.crt`, Download
@@ -221,6 +222,9 @@ What the create task does, in order:
      with a second mirror on `<router uplink IP>:8443`.
    - `additionalTrustBundle` = the registry CA, `additionalTrustBundlePolicy: Always` (also in the cluster-wide
      trust bundle, so OLM's catalog pods and operators trust the mirror).
+   - Day-1 manifest `openshift/99-vmm-samples-removed.yaml`: the samples operator `Config` with
+     `managementState: Removed` (samples can't import without registry.redhat.io). 4.x bootstraps itself that
+     way; 5.0.1 instead waited on its connection tests for over 90 min and blocked the ClusterVersion.
 5. **Agent ISO on the host**: `openshift-install agent create image` reads the release (release info, base
    ISO, agent tools) through the same mirror configuration, with `oc ... --insecure=true --icsp-file`
    (4.16 to 4.20 installers alike). The host can't resolve `registry.<domain>`, so it falls through to the

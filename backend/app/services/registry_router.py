@@ -27,7 +27,10 @@ SETUP_UNIT = "vmm-registry-setup"
 SETUP_LOG = "/var/log/vmm-registry-setup.log"
 MIRROR_RUNS = f"{DATA}/runs"
 MIRROR_REGISTRY_URL = "https://mirror.openshift.com/pub/cgw/mirror-registry/latest/mirror-registry-amd64.tar.gz"
-OC_MIRROR_URL = "https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/oc-mirror.rhel9.tar.gz"
+# oc-mirror is version-independent. OpenShift 5.x client dirs (and `ocp/stable` once it moved to 5.0) don't ship it:
+# try the newest stable first, then the last 4.x minor that has it (space-separated, tried in order).
+OC_MIRROR_URL = " ".join(f"https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/{d}/oc-mirror.rhel9.tar.gz"
+                         for d in ("stable", "stable-4.22"))
 QUAY_UNITS = "quay-pod quay-redis quay-app"
 HAPROXY_PEM = "/etc/haproxy/vmm-registry.pem"   # IPv6 front of the registry (haproxy_lines)
 
@@ -41,7 +44,7 @@ STATE=@STATE@
 DISK=/dev/disk/by-id/virtio-@SERIAL@
 MIRROR_ATTEMPTS=8
 MR_URL=@MR_URL@
-OCM_URL=@OCM_URL@
+OCM_URL="@OCM_URL@"
 UNITS="@UNITS@"
 [ -f $ENV ] && . $ENV
 mkdir -p $STATE
@@ -135,8 +138,11 @@ setup() {
         rm -f $DATA/tools/mirror-registry.tar.gz.part
     fi
     if [ ! -x /usr/local/bin/oc-mirror ]; then
-        curl -fsSL --retry 5 --retry-delay 5 -o $DATA/tools/oc-mirror.tar.gz "$OCM_URL" \
-            || fail "could not download oc-mirror from $OCM_URL"
+        ok=
+        for u in $OCM_URL; do
+            curl -fsSL --retry 5 --retry-delay 5 -o $DATA/tools/oc-mirror.tar.gz "$u" && { ok=1; break; }
+        done
+        [ -n "$ok" ] || fail "could not download oc-mirror from $OCM_URL"
         tar -xzf $DATA/tools/oc-mirror.tar.gz -C /usr/local/bin oc-mirror && chmod 755 /usr/local/bin/oc-mirror \
             || fail "oc-mirror archive is damaged"
         rm -f $DATA/tools/oc-mirror.tar.gz

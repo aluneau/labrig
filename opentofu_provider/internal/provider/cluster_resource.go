@@ -198,7 +198,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.String{
 				stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIf(replaceUnlessOpenShift,
 					"Recreates k3s / kubeadm clusters; upgrades OpenShift in place", "Recreates k3s / kubeadm clusters; upgrades OpenShift in place")},
-				Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 (default: latest of openshift.channel); changing it on an installed cluster upgrades it in place (to an update offered in openshift.channel, default stable-<target minor>; waits until the upgrade completed, ~1 h per z-stream). The installed version is read back."},
+				Description: "k3s: release, e.g. v1.33.5+k3s1 (default: stable channel). kubeadm: Kubernetes minor or patch, e.g. v1.37 or v1.37.1 (default: the server's pinned minor). openshift: release, e.g. 4.20.39 / 5.0.3 (default: latest of openshift.channel); changing it on an installed cluster upgrades it in place (to an update offered in openshift.channel, default stable-<target minor>; waits until the upgrade completed, ~1 h per z-stream). The installed version is read back."},
 			"ctlplanes": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: keepReplaceInt,
 				Description: "Control planes: 1, or 3/5 with embedded etcd (default 1). openshift: set by openshift.topology."},
 			"workers": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
@@ -268,7 +268,7 @@ func (r *clusterResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 					"`metallb_demo`, switching `metallb_mode`; anything else recreates the cluster.",
 				Attributes: map[string]schema.Attribute{
 					"distribution":      osStr("ocp (default: OpenShift, needs the pull secret) or okd (OKD on CentOS Stream CoreOS, no pull secret; no ODF / SR-IOV / ACM / disconnected)."),
-					"channel":           liveStr("e.g. stable-4.20 (default). okd: stable-<minor> of the OKD releases, e.g. stable-4.22. Changed in place on an installed cluster (the update channel)."),
+					"channel":           liveStr("e.g. stable-5.0, stable-4.20 (default). okd: stable-<minor> of the OKD releases, e.g. stable-4.22. Changed in place on an installed cluster (the update channel)."),
 					"topology":          osStr("sno (default), compact (3 schedulable masters) or ha (3 masters + workers)."),
 					"platform":          osStr("none (default: the group router fronts api / *.apps) or baremetal (keepalived API + ingress VIPs in the cluster; compact / ha only)."),
 					"api_vip":           osStr("platform baremetal: API virtual IP on the group network (default: assigned, read back)."),

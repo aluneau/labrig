@@ -36,7 +36,7 @@ import { GroupProxy } from './GroupProxy';
 
 const muted: React.CSSProperties = { fontSize: 'var(--pf-v5-global--FontSize--sm)', color: 'var(--pf-v5-global--Color--200)' };
 const CIDR_RE = /^(\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(\/\d{1,3})?)$/;
-const VERSION_RE = /^4\.\d+\.\d+(-[a-z]+\.\d+)?$/;
+const VERSION_RE = /^\d+\.\d+\.\d+(-[a-z]+\.\d+)?$/; // e.g. 4.19.10, 5.0.3
 
 const stateColor = (state: string) =>
   state === 'ready' ? 'green' : state === 'error' ? 'red' : state === 'disabled' || state === 'stopped' ? 'grey' : 'blue';
@@ -343,7 +343,7 @@ export const GroupRegistry: React.FC<{ group: GroupDetail; onDone: (msg: string)
           <Title headingLevel="h4" size="md" style={{ marginBottom: 8 }}>Mirror content</Title>
           <Form style={{ maxWidth: 900 }}>
             <FormGroup label="OpenShift release" fieldId="mirror-version">
-              <TextInput id="mirror-version" value={version} onChange={(_e, v) => setVersion(v)} placeholder="e.g. 4.19.10 (empty: no release)"
+              <TextInput id="mirror-version" value={version} onChange={(_e, v) => setVersion(v)} placeholder="e.g. 4.19.10 or 5.0.3 (empty: no release)"
                 validated={versionBad ? 'error' : 'default'} style={{ maxWidth: 300 }} />
               <FormHelperText><HelperText><HelperTextItem variant={versionBad ? 'error' : 'default'}>
                 One exact version (~20 GB, 30+ min). Needs the OpenShift pull secret.

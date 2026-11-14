@@ -8,8 +8,8 @@ resources: {vcpus: 13, memory_mb: 33280, disk_gb: 130}
 params:
   - {name: case, label: Case number, type: string, required: true, pattern: '^[0-9a-z][0-9a-z-]{0,11}$'}
   - {name: cidr, label: Group subnet, type: cidr, default: auto, help: 'auto = the first free /24 of 10.42.0.0/16'}
-  - {name: channel, label: Update channel, type: choice, choices: [stable-4.20, stable-4.19, stable-4.18], default: stable-4.20}
-  - {name: version, label: Exact release, type: string, pattern: '^\d+\.\d+\.\d+$', help: 'e.g. 4.20.40; empty = latest of the channel'}
+  - {name: channel, label: Update channel, type: choice, choices: [stable-5.0, stable-4.20, stable-4.19, stable-4.18], default: stable-4.20}
+  - {name: version, label: Exact release, type: string, pattern: '^\d+\.\d+\.\d+$', help: 'e.g. 4.20.40 / 5.0.1; empty = latest of the channel'}
   - {name: storage, label: Storage, type: choice, choices: [lvms, none], default: lvms,
      help: 'lvms adds a 100 GiB disk and a default StorageClass (for ACM add-ons that want volumes, e.g. observability)'}
   - {name: password, label: Login password (user admin), type: string, default: lab12345}
