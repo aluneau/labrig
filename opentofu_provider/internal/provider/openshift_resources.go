@@ -161,7 +161,7 @@ func (d *releaseDataSource) Schema(_ context.Context, _ datasource.SchemaRequest
 	resp.Schema = dschema.Schema{
 		Description: "OpenShift releases of an update channel (the server asks the upgrade graph): pin a cluster's version.",
 		Attributes: map[string]dschema.Attribute{
-			"channel": dschema.StringAttribute{Required: true, Description: "e.g. stable-4.20, fast-4.21, candidate-4.22."},
+			"channel": dschema.StringAttribute{Required: true, Description: "e.g. stable-5.0, fast-4.21, candidate-4.22."},
 			"distribution": dschema.StringAttribute{Optional: true, Description: "ocp (default) or okd: OKD releases of the " +
 				"minor (accepted SCOS releases, e.g. 4.22.0-okd-scos.10); give the cluster openshift.distribution = \"okd\" too."},
 			"version":  dschema.StringAttribute{Computed: true, Description: "Latest release of the channel."},

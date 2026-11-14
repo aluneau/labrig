@@ -41,6 +41,8 @@ cluster whose RAM doesn't fit next to the running VMs (no overcommit: an OOM-kil
    are approved.
 5. The ISO is ejected and deleted, updates are disabled (channel cleared), add-ons are installed.
 
+OpenShift 5.0.x works the same way: `stable-5.0` comes from the same update service and the clients from the same mirror, so a 5.0 cluster (connected or disconnected) is created exactly like a 4.x one.
+
 Typical times on a desktop: ISO 3–5 min (first time per release: + base ISO extraction), SNO install
 40–60 min, add-ons 5–15 min.
 

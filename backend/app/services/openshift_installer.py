@@ -251,8 +251,8 @@ class OpenShiftInstaller:
                                                                          "service network": SERVICE_CIDR6})
         if opts.disconnected:
             # the router becomes the lab's bastion: mirror registry (more RAM + a registry disk)
-            if not version.startswith("4."):
-                raise ValueError("Disconnected installs: OpenShift 4.x releases only")
+            if not version.startswith(("4.", "5.")):
+                raise ValueError("Disconnected installs: OpenShift 4.x / 5.x releases only")
             gspec.router.registry.enabled = True
         if gspec.router.wireguard and gspec.router.wireguard.subnet:
             for reserved in RESERVED_CIDRS:
@@ -1312,6 +1312,13 @@ class OpenShiftInstaller:
             roles = ["master"] if (cluster.spec or {}).get("workers", 0) == 0 else ["worker"]
             for mc in AddonRunner.sriov_machineconfigs(roles):
                 result[f"{mc['metadata']['name']}.yaml"] = mc
+        if opts.disconnected:
+            # Samples can't import without registry.redhat.io. 4.x bootstraps the samples operator as Removed by
+            # itself; 5.0.1 deleted its Config and waited on connection tests for 90+ min (ClusterVersion blocked
+            # on openshift-samples). Removed from day 1 = the end state 4.x reaches anyway.
+            result["99-vmm-samples-removed.yaml"] = {
+                "apiVersion": "samples.operator.openshift.io/v1", "kind": "Config",
+                "metadata": {"name": "cluster"}, "spec": {"managementState": "Removed"}}
         return result
 
     # -------------------------------------------------------------- the VMs

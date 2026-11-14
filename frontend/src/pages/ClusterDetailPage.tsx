@@ -428,7 +428,7 @@ export const ClusterDetailPage: React.FC = () => {
                       <DescriptionListGroup>
                         <DescriptionListTerm>Networking add-ons</DescriptionListTerm>
                         <DescriptionListDescription>
-                          MetalLB: {os.metallb?.enabled ? <>L2, pool <code>{os.metallb.pool || 'pending'}</code></> : 'off'}
+                          MetalLB: {os.metallb?.enabled ? <>{os.metallb.mode === 'bgp' ? `BGP${os.metallb.bfd ? ' + BFD' : ''}` : 'L2'}, pool <code>{os.metallb.pool || 'pending'}</code></> : 'off'}
                           <br />SR-IOV: {os.sriov?.enabled ? `${os.sriov.nics} igb NIC(s) × ${os.sriov.vfs} VFs (${os.sriov.device_type})` : 'off'}
                         </DescriptionListDescription>
                       </DescriptionListGroup>
