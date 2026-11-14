@@ -29,6 +29,7 @@ MIRROR_RUNS = f"{DATA}/runs"
 MIRROR_REGISTRY_URL = "https://mirror.openshift.com/pub/cgw/mirror-registry/latest/mirror-registry-amd64.tar.gz"
 # oc-mirror is version-independent. OpenShift 5.x client dirs (and `ocp/stable` once it moved to 5.0) don't ship it:
 # try the newest stable first, then the last 4.x minor that has it (space-separated, tried in order).
+# If mirror.openshift.com ever prunes stable-4.22, bump it to a 5.x dir that ships oc-mirror again.
 OC_MIRROR_URL = " ".join(f"https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/{d}/oc-mirror.rhel9.tar.gz"
                          for d in ("stable", "stable-4.22"))
 QUAY_UNITS = "quay-pod quay-redis quay-app"

@@ -26,7 +26,7 @@ class OperatorCatalog(BaseModel):
 
 class MirrorRequest(BaseModel):
     """What to copy into the group's registry. Re-running a request already mirrored is fast."""
-    openshift_version: Optional[str] = Field(None, pattern=r"^\d+\.\d+\.\d+(-[a-z]+\.\d+)?$")  # e.g. "4.19.10", "5.0.3"
+    openshift_version: Optional[str] = Field(None, pattern=r"^[45]\.\d+\.\d+(-[a-z]+\.\d+)?$")  # e.g. "4.19.10", "5.0.3"
     operators: List[OperatorCatalog] = []
     additional_images: List[str] = []
 

@@ -257,7 +257,7 @@ included.
 
 Known limits:
 - `insights` reports disabled (no `cloud.openshift.com` token); console links to Red Hat sites don't open from
-  the lab. The samples operator imports nothing (it detects that `registry.redhat.io` is unreachable).
+  the lab. The samples operator is `Removed` from day 1 (step 4): it would otherwise keep testing `registry.redhat.io`.
 - Updates: the release graph isn't mirrored (`graph: false`); updates stay disabled (`disable_updates`).
 - Operators from certified / community catalogs are mirrored from their index too, without the dependency
   lookup (only `redhat-operators` is read).
