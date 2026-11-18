@@ -109,7 +109,9 @@ e2e/                  Playwright browser tests against the real app (see below)
   requests would otherwise insert duplicates. Never delete user-visible data automatically (cloud images
   whose volume vanished become `missing`, they are not deleted). Exception: groups / clusters **adopted** from
   libvirt metadata (`adopted` = rebuilt, e.g. created by another instance such as an agent's dev backend) are
-  forgotten once nothing of them is left in libvirt: their spec lived there, nothing is lost.
+  forgotten once nothing of them is left in libvirt: their spec lived there, nothing is lost. OpenShift clusters of another
+  instance (no `host-kubeconfig` / `spec.json` in this DATA_DIR) are never adopted: their kubeconfig only exists there
+  (`cluster_service._foreign_openshift`); their VMs and group still show.
 - **Live updates**: libvirt events (domain lifecycle/reboot, network, pool) and task progress →
   `event_bus.publish` → `GET /api/v1/events` (SSE). Frontend subscribes with `useLiveEvents([...kinds])`;
   polling is only a slow safety net. DHCP leases have no events (NetworkDetail polls every 10 s).
