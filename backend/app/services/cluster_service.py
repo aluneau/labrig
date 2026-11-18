@@ -64,10 +64,6 @@ KUBECTL_VIEWS = {
 }
 
 
-FOREIGN_OPENSHIFT = ("Created by another VM Manager instance: its install files (kubeconfig) are not on this host, "
-                     "so this instance can't reach the cluster or follow its install. "
-                     "Manage it from the instance that created it")
-
 class Cancelled(Exception):
     pass
 
@@ -102,12 +98,15 @@ class ClusterService:
 
     @staticmethod
     def _foreign_openshift(name: str, attrs: Dict[str, str]) -> bool:
-        """An OpenShift kubeconfig only exists in the install dir of the instance that installed it (unlike
-        k3s / kubeadm, read back from a node): without it this instance can't reach the cluster nor tell
-        whether its install finished. ACM spokes get theirs from the hub."""
+        """An OpenShift cluster installed by another VM Manager instance (e.g. an agent's dev backend): its
+        kubeconfig only exists in that instance's install dir (unlike k3s / kubeadm, read back from a node),
+        so this one could neither reach it nor follow its install. spec.json is written at create: a cluster
+        this instance is still installing counts as its own. ACM spokes get their kubeconfig from the hub."""
         from app.services.openshift_service import openshift_service
-        return attrs.get("provisioner") != "acm" \
-            and not (openshift_service.root / "clusters" / name / "host-kubeconfig").exists()
+        if attrs.get("type") != "openshift" or attrs.get("provisioner") == "acm":
+            return False
+        d = openshift_service.root / "clusters" / name
+        return not (d / "host-kubeconfig").exists() and not (d / "spec.json").exists()
 
     @serialized
     def sync_clusters(self, db: Session) -> None:
@@ -129,6 +128,14 @@ class ClusterService:
             group_service.sync_groups(db)
         for name, entry in found.items():
             cluster = db.query(Cluster).filter(Cluster.name == name).first()
+            if self._foreign_openshift(name, entry["attrs"]):
+                # not a cluster this instance can manage: not adopted (its VMs and lab group still show)
+                if cluster is not None and cluster.adopted and not task_service.is_running(cluster.task_id):
+                    logger.info(f"Forgot cluster {cluster.name}: OpenShift cluster of another instance")
+                    event_bus.publish({"kind": "cluster", "id": cluster.id, "name": cluster.name, "status": "deleted"})
+                    db.delete(cluster)
+                    changed = True
+                continue
             if cluster is None:
                 group = None
                 if entry["attrs"].get("group"):
@@ -143,8 +150,6 @@ class ClusterService:
                     saved = openshift_installer.load_spec(name)
                     spec = saved or spec
                     message = None if saved else "Rebuilt from libvirt metadata (add-on settings unknown)"
-                    if self._foreign_openshift(name, entry["attrs"]):
-                        status, message = "error", FOREIGN_OPENSHIFT
                     if entry["attrs"].get("provisioner") == "acm":
                         # a spoke of an ACM hub: hub ids are per DB, the name is what the metadata keeps
                         hub = db.query(Cluster).filter(Cluster.name == entry["attrs"].get("hub")).first()
@@ -166,11 +171,6 @@ class ClusterService:
                 )
                 db.add(cluster)
                 db.flush()
-                changed = True
-            elif cluster.adopted and cluster.type == "openshift" and cluster.status == "ready" \
-                    and not task_service.is_running(cluster.task_id) and self._foreign_openshift(name, entry["attrs"]):
-                # adopted before this check existed (or its install dir went away)
-                cluster.status, cluster.status_message = "error", FOREIGN_OPENSHIFT
                 changed = True
             known = {n.name for n in cluster.nodes}
             # ctlplane-0 first: it is the API endpoint and where kubectl runs
