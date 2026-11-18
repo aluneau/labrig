@@ -64,6 +64,10 @@ KUBECTL_VIEWS = {
 }
 
 
+FOREIGN_OPENSHIFT = ("Created by another VM Manager instance: its install files (kubeconfig) are not on this host, "
+                     "so this instance can't reach the cluster or follow its install. "
+                     "Manage it from the instance that created it")
+
 class Cancelled(Exception):
     pass
 
@@ -96,6 +100,15 @@ class ClusterService:
 
     # ------------------------------------------------------------------ reading
 
+    @staticmethod
+    def _foreign_openshift(name: str, attrs: Dict[str, str]) -> bool:
+        """An OpenShift kubeconfig only exists in the install dir of the instance that installed it (unlike
+        k3s / kubeadm, read back from a node): without it this instance can't reach the cluster nor tell
+        whether its install finished. ACM spokes get theirs from the hub."""
+        from app.services.openshift_service import openshift_service
+        return attrs.get("provisioner") != "acm" \
+            and not (openshift_service.root / "clusters" / name / "host-kubeconfig").exists()
+
     @serialized
     def sync_clusters(self, db: Session) -> None:
         """Re-create clusters / nodes that libvirt knows (node metadata) but the DB doesn't.
@@ -127,19 +140,11 @@ class ClusterService:
                            "from the first control plane when needed)")
                 if ctype == "openshift":
                     from app.services.openshift_installer import openshift_installer
-                    from app.services.openshift_service import openshift_service
                     saved = openshift_installer.load_spec(name)
                     spec = saved or spec
                     message = None if saved else "Rebuilt from libvirt metadata (add-on settings unknown)"
-                    # An OpenShift kubeconfig only exists in the install dir of the instance that installed it
-                    # (unlike k3s / kubeadm, read back from a node): without it this instance can't reach the
-                    # cluster nor tell whether its install finished. ACM spokes get theirs from the hub.
-                    if entry["attrs"].get("provisioner") != "acm" \
-                            and not (openshift_service.root / "clusters" / name / "host-kubeconfig").exists():
-                        status = "error"
-                        message = ("Created by another VM Manager instance: its install files (kubeconfig) are not "
-                                   "on this host, so this instance can't reach the cluster or follow its install. "
-                                   "Manage it from the instance that created it")
+                    if self._foreign_openshift(name, entry["attrs"]):
+                        status, message = "error", FOREIGN_OPENSHIFT
                     if entry["attrs"].get("provisioner") == "acm":
                         # a spoke of an ACM hub: hub ids are per DB, the name is what the metadata keeps
                         hub = db.query(Cluster).filter(Cluster.name == entry["attrs"].get("hub")).first()
@@ -161,6 +166,11 @@ class ClusterService:
                 )
                 db.add(cluster)
                 db.flush()
+                changed = True
+            elif cluster.adopted and cluster.type == "openshift" and cluster.status == "ready" \
+                    and not task_service.is_running(cluster.task_id) and self._foreign_openshift(name, entry["attrs"]):
+                # adopted before this check existed (or its install dir went away)
+                cluster.status, cluster.status_message = "error", FOREIGN_OPENSHIFT
                 changed = True
             known = {n.name for n in cluster.nodes}
             # ctlplane-0 first: it is the API endpoint and where kubectl runs
