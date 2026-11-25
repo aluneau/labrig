@@ -916,7 +916,8 @@ class SpokeService:
     DETACHED = "baremetalhost.metal3.io/detached"
 
     def detach_bmh(self, db: Session, cluster: Cluster) -> Optional[str]:
-        """Emulated-BMC spoke, once installed: mark its BareMetalHost detached on the hub, so metal3 / Ironic stop
+        """Emulated-BMC spoke, once installed: make sure its BareMetalHost is detached on the hub (the assisted
+        service normally does it at the end of the install; an existing value is kept), so metal3 / Ironic stop
         driving the machine's power through the BMC (power-state sync powering it back on after a stop, virtual
         media re-inserts + reboots when the InfraEnv ISO changes). The app's start / stop then own the power,
         like any lab VM. Best effort: returns a plain-words problem (None = detached or nothing to do)."""
@@ -929,13 +930,14 @@ class SpokeService:
             if hub is None or hub.status != "ready":
                 return f"hub {hub.name if hub else '?'} not ready: the spoke's BareMetalHost may still be driven by it"
             out = openshift_service.oc(hub.name, hub.version, ["annotate", "bmh", machine, "-n", cluster.name,
-                                                                f"{self.DETACHED}=vm-manager", "--overwrite"], 60)
+                                                                f"{self.DETACHED}=vm-manager"], 60)
         except Exception as e:  # no kubeconfig, oc download...: never fail the install / start / stop for this
             logger.warning(f"Detaching the BareMetalHost of {cluster.name}: {e}")
             return f"could not detach its BareMetalHost on the hub: {e}"
         if out["exitcode"] != 0:
             err = (out["stderr"] or out["stdout"] or "").strip()[-200:]
-            if "NotFound" in err or "not found" in err:
+            # already detached (the assisted service does it itself once installed): keep its value, it owns it
+            if "NotFound" in err or "not found" in err or "already has a value" in err:
                 return None
             logger.warning(f"Detaching the BareMetalHost of {cluster.name} on {hub.name}: {err}")
             return f"could not detach its BareMetalHost on hub {hub.name}: {err}"
