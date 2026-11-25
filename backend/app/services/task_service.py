@@ -95,6 +95,8 @@ class TaskService:
         self.update_task(db, task_id, TaskUpdate(status="running"))
 
         def run():
+            from app.services import power_history
+            power_history.set_actor(f"task {task_id}: {task_data.name}")  # tags the VM power actions it sends
             session = SessionLocal()
             try:
                 result = func(session, self.get_task(session, task_id), *args, **kwargs)

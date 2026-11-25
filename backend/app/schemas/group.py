@@ -1039,6 +1039,26 @@ class GroupDetail(Group):
     proxy: Optional[ProxyInfo] = None  # egress mode proxy: URL + client environment
 
 
+class GroupSpecCreate(GroupSpec):
+    """POST /groups: `cidr` may be left out (or "auto"): the first free /24 of TEMPLATE_SUBNET_POOL (no libvirt
+    network nor other group overlaps it), as templates' `cidr: auto`. Updates keep requiring it."""
+    cidr: str = Field("auto", description="IPv4 subnet of the group network, e.g. 10.42.7.0/24; omitted or 'auto' = "
+                                          "the first free /24 of the host's group pool (TEMPLATE_SUBNET_POOL)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _auto_cidr(cls, data: Any) -> Any:
+        if isinstance(data, dict) and str(data.get("cidr") or "auto").strip().lower() == "auto":
+            from app.database import SessionLocal
+            from app.services.template_service import TemplateError, template_service
+            with SessionLocal() as db:
+                try:
+                    data = {**data, "cidr": template_service.free_cidr(db)}
+                except TemplateError as e:
+                    raise ValueError(str(e))
+        return data
+
+
 class GroupCreateResult(BaseModel):
     group: Group
     task_id: int

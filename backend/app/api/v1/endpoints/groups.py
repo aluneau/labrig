@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas import Task
 from app.schemas.group import (
-    DNSRecord, Group, GroupCreateResult, GroupDetail, GroupExport, GroupSpec, MemberSpec, RouterConfig,
+    DNSRecord, Group, GroupCreateResult, GroupSpecCreate, GroupDetail, GroupExport, GroupSpec, MemberSpec, RouterConfig,
 )
 from app.schemas.group import DHCPHostSpec, GroupLease, LeaseRelease
 from app.schemas.group import WireGuardPeerCreate, WireGuardPeerCreated, WireGuardSettings, WireGuardStatus
@@ -51,7 +51,7 @@ def sync_groups(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=GroupCreateResult, status_code=202)
-def create_group(spec: GroupSpec, force: bool = Query(False, description=budget.FORCE_HELP),
+def create_group(spec: GroupSpecCreate, force: bool = Query(False, description=budget.FORCE_HELP),
                  db: Session = Depends(get_db)):
     """Create network + router + members. Runs as a task (router first boot takes a few minutes).
     409 when they don't fit on the host (see POST /hosts/budget)."""

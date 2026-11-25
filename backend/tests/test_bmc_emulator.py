@@ -22,7 +22,8 @@ def emulator(tmp_path_factory):
     real = socket.getaddrinfo
     from app.services import bmc_emulator
     app, _ = bmc_emulator.build_app({"listen": "127.0.0.1", "port": 1, "libvirt_uri": "test:///default",
-                                     "auth_file": "", "allow_file": str(allow), "state_dir": str(state)})
+                                     "auth_file": "", "allow_file": str(allow), "state_dir": str(state),
+                                     "actions_file": str(tmp_path / "actions.jsonl")})
     socket.getaddrinfo = real
     app.config["SUSHY_EMULATOR_AUTH_FILE"] = None
     uuid = libvirt.openReadOnly("test:///default").lookupByName("test").UUIDString()
@@ -59,3 +60,16 @@ def test_member_reachable(client):
     assert c.get(f"/redfish/v1/Systems/{uuid}/VirtualMedia").status_code == 200
     members = json.loads(c.get("/redfish/v1/Managers").get_data(as_text=True))["Members"]
     assert [m["@odata.id"] for m in members] == [f"/redfish/v1/Managers/{uuid}"]
+
+
+def test_power_actions_logged(client):
+    """Every Redfish reset a BMC client sends lands in the action log (the app's power history reads it)"""
+    c, allow, uuid = client
+    allow.write_text(json.dumps(["test"]))
+    r = c.post(f"/redfish/v1/Systems/{uuid}/Actions/ComputerSystem.Reset", json={"ResetType": "GracefulRestart"})
+    assert r.status_code < 500
+    lines = [json.loads(x) for x in (allow.parent / "actions.jsonl").read_text().splitlines()]
+    assert lines[-1]["identity"] == uuid and lines[-1]["action"] == "Redfish reset GracefulRestart"
+    from app.services import power_history
+    items = power_history.bmc_actions(allow.parent / "actions.jsonl", ["test", uuid])
+    assert items[-1]["source"].startswith("BMC (Redfish client")

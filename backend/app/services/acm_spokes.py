@@ -345,13 +345,19 @@ class SpokeService:
              "metadata": {"name": f"{member['name']}-bmc", "namespace": name},
              "stringData": {"username": creds["username"], "password": creds["password"]}},
         ]
+        from app.services.openshift_addons import AddonRunner
         manifests = [
             {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}},
+            # day-0 MachineConfigs: guest-exec through the QEMU guest agent (diagnostics while the API is down)
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": f"{name}-manifests", "namespace": name},
+             "data": {f"{mc['metadata']['name']}.yaml": json.dumps(mc)
+                      for mc in AddonRunner.qemu_ga_machineconfigs(["master"])}},
             {"apiVersion": "hive.openshift.io/v1", "kind": "ClusterImageSet", "metadata": {"name": imageset},
              "spec": {"releaseImage": f"quay.io/openshift-release-dev/ocp-release:{version}-x86_64"}},
             {"apiVersion": "extensions.hive.openshift.io/v1beta1", "kind": "AgentClusterInstall",
              "metadata": {"name": name, "namespace": name},
              "spec": {"clusterDeploymentRef": {"name": name}, "imageSetRef": {"name": imageset},
+                      "manifestsConfigMapRefs": [{"name": f"{name}-manifests"}],
                       "networking": {"machineNetwork": [{"cidr": gspec.get("cidr")}],
                                      "clusterNetwork": [{"cidr": "10.128.0.0/14", "hostPrefix": 23}],
                                      "serviceNetwork": ["172.30.0.0/16"], "networkType": "OVNKubernetes"},
@@ -490,6 +496,8 @@ class SpokeService:
             svc._sleep(task, 30)
         step(92, "Installed: kubeconfig from the hub", "finalizing", 100)
         self.write_kubeconfig(db, hub, cluster)
+        # installed: the hub's metal3 no longer drives the machine's power (no reboots behind the app's back)
+        self.detach_bmh(db, cluster)
         step(95, "Waiting for the ManagedCluster to become Available", "finalizing", 100)
         deadline = time.monotonic() + 20 * 60
         from app.services.acm import conditions_state
@@ -904,6 +912,34 @@ class SpokeService:
         if member is None or host is None or not host["redfish_url"]:
             raise ValueError(f"{cluster.name}: its machine {machine} is gone from group {group.name}")
         return member, host["redfish_url"]
+
+    DETACHED = "baremetalhost.metal3.io/detached"
+
+    def detach_bmh(self, db: Session, cluster: Cluster) -> Optional[str]:
+        """Emulated-BMC spoke, once installed: mark its BareMetalHost detached on the hub, so metal3 / Ironic stop
+        driving the machine's power through the BMC (power-state sync powering it back on after a stop, virtual
+        media re-inserts + reboots when the InfraEnv ISO changes). The app's start / stop then own the power,
+        like any lab VM. Best effort: returns a plain-words problem (None = detached or nothing to do)."""
+        from app.services.openshift_service import openshift_service
+        machine = (provisioner(cluster) or {}).get("machine")
+        if not machine or real_bmh_id(cluster) is not None:
+            return None
+        try:
+            hub = self.hub_of(db, cluster)
+            if hub is None or hub.status != "ready":
+                return f"hub {hub.name if hub else '?'} not ready: the spoke's BareMetalHost may still be driven by it"
+            out = openshift_service.oc(hub.name, hub.version, ["annotate", "bmh", machine, "-n", cluster.name,
+                                                                f"{self.DETACHED}=vm-manager", "--overwrite"], 60)
+        except Exception as e:  # no kubeconfig, oc download...: never fail the install / start / stop for this
+            logger.warning(f"Detaching the BareMetalHost of {cluster.name}: {e}")
+            return f"could not detach its BareMetalHost on the hub: {e}"
+        if out["exitcode"] != 0:
+            err = (out["stderr"] or out["stdout"] or "").strip()[-200:]
+            if "NotFound" in err or "not found" in err:
+                return None
+            logger.warning(f"Detaching the BareMetalHost of {cluster.name} on {hub.name}: {err}")
+            return f"could not detach its BareMetalHost on hub {hub.name}: {err}"
+        return None
 
     def _await_gitops_sync(self, runner: Any, cluster: Cluster, step: Any, timeout: int = 10 * 60) -> None:
         """Wait for Argo CD to apply the spoke's CRs onto the hub (the AgentClusterInstall appears), so the

@@ -43,9 +43,9 @@ configuration below with the right URL and a token filled in.
 |---|---|
 | Start / anything | `overview`, `api_describe` (OpenAPI of any endpoint, with nested models), `api_request` (any endpoint) |
 | VMs | `list_vms`, `get_vm`, `create_vm` (cloud image `debian-13`-style or ISO), `vm_power`, `delete_vm`, `add_disk`, `remove_disk` (+ `delete_volume`), `add_nic`, `remove_nic` |
-| Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host) |
+| Inside VMs (admin) | `vm_exec`, `vm_read_file`, `vm_write_file` (QEMU guest agent: no SSH key / route), `ssh_exec` (from the host; `jump` keeps the no-host-key-check options on the jump hop, `cluster` = an OpenShift cluster's node key, user core) |
 | Lab groups | `list_groups`, `get_group` (+ leases), `create_group`, `add_group_member`, `wireguard_device` |
-| Logs / diagnostics | `vm_logs` (admin), `vm_diagnostics`, `find_pods`, `pod_logs` (admin): server-side filters + known-problem rules, see [logs.md](logs.md) |
+| Logs / diagnostics | `vm_logs` (admin), `vm_diagnostics`, `vm_power_history` (who started / stopped / rebooted a VM: app tasks, BMC clients, the guest), `find_pods`, `pod_logs` (admin): server-side filters + known-problem rules, see [logs.md](logs.md) |
 | Clusters | `list_clusters`, `get_cluster`, `create_cluster`, `cluster_power`, `cluster_upgrade` (OpenShift: status, channel, upgrade), `get_kubeconfig`, `kubectl` (admin), `oc` (admin, OpenShift), `kubeadm_files` (admin), `install_cluster_addon`, `search_operators`, `wait_for_cluster` |
 | Other | `list_cloud_images`, `list_networks`, `list_templates`, `create_from_template` (or `dry_run`), `list_tasks`, `wait_for_task` |
 
@@ -145,7 +145,9 @@ work:
   doesn't offer. Re-add the server with `--header "Authorization: Bearer vmm_…"`.
 - A tool answers *Unknown tool*: it is admin-only (`vm_exec`, `kubectl`…) and the token belongs to a viewer.
 - `vm_exec` fails with *guest agent*: the VM is still booting (the agent starts with the guest, ~30-60 s for a cloud
-  image), or it is an EL VM that isn't a cluster node / router (EL's qemu-ga forbids guest-exec): use `ssh_exec`.
+  image), or it is an EL VM that isn't a cluster node / router (EL's qemu-ga forbids guest-exec): use `ssh_exec` (a
+  machine on a group network needs `jump` through the router's uplink address; OpenShift nodes installed before guest-exec
+  was enabled on them: `cluster=<name>` for the core user's key, or `oc adm node-logs`).
 
 ## Protocol
 

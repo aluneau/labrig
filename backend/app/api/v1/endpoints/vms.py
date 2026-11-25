@@ -37,6 +37,21 @@ def get_vm(vm_id: int, db: Session = Depends(get_db)):
     return vm
 
 
+@router.get("/{vm_id}/power-history")
+def power_history(vm_id: int, db: Session = Depends(get_db)):
+    """Who started / stopped / rebooted this VM and when: the app's own actions (with the task or request that
+    asked), BMC (Redfish) actions of a BMC member (e.g. a hub's metal3 driving an ACM spoke), libvirt lifecycle
+    events (guest-initiated shutdowns and reboots). The app never powers a VM on its own: nothing here but
+    tasks, requests and BMC clients."""
+    from app.models import VM as VMModel
+    from app.services import bmc_service, power_history as ph
+    vm = db.query(VMModel).filter(VMModel.id == vm_id).first()
+    if not vm:
+        raise HTTPException(status_code=404, detail="VM not found")
+    items = ph.history(vm.name, vm.uuid, bmc_service.actions_file(db, vm.name))
+    return {"vm": vm.name, "entries": items, "summary": ph.summary(items)}
+
+
 @router.post("", response_model=VM, status_code=201)
 def create_vm(vm_data: VMCreate, force: bool = Query(False, description=budget.FORCE_HELP),
               db: Session = Depends(get_db)):

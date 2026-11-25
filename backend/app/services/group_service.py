@@ -1044,7 +1044,13 @@ class GroupService:
                    + [r.name for r in spec.reservations])
         # members together, router last
         with ThreadPoolExecutor(max_workers=8) as pool:
-            list(pool.map(lambda n: self._shutdown(n, force), members))
+            from app.services import power_history
+            who = power_history.actor()  # pool threads: tag their stops with this task too
+
+            def shut(n: str) -> None:
+                power_history.set_actor(who)
+                self._shutdown(n, force)
+            list(pool.map(shut, members))
         task_service.update_progress(db, task.id, 70)
         self._shutdown(router_vm_name(spec.name), force)
         self._publish(group, "updated")

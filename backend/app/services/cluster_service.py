@@ -96,6 +96,18 @@ class ClusterService:
 
     # ------------------------------------------------------------------ reading
 
+    @staticmethod
+    def _foreign_openshift(name: str, attrs: Dict[str, str]) -> bool:
+        """An OpenShift cluster installed by another VM Manager instance (e.g. an agent's dev backend): its
+        kubeconfig only exists in that instance's install dir (unlike k3s / kubeadm, read back from a node),
+        so this one could neither reach it nor follow its install. spec.json is written at create: a cluster
+        this instance is still installing counts as its own. ACM spokes get their kubeconfig from the hub."""
+        from app.services.openshift_service import openshift_service
+        if attrs.get("type") != "openshift" or attrs.get("provisioner") == "acm":
+            return False
+        d = openshift_service.root / "clusters" / name
+        return not (d / "host-kubeconfig").exists() and not (d / "spec.json").exists()
+
     @serialized
     def sync_clusters(self, db: Session) -> None:
         """Re-create clusters / nodes that libvirt knows (node metadata) but the DB doesn't.
@@ -116,12 +128,21 @@ class ClusterService:
             group_service.sync_groups(db)
         for name, entry in found.items():
             cluster = db.query(Cluster).filter(Cluster.name == name).first()
+            if self._foreign_openshift(name, entry["attrs"]):
+                # not a cluster this instance can manage: not adopted (its VMs and lab group still show)
+                if cluster is not None and cluster.adopted and not task_service.is_running(cluster.task_id):
+                    logger.info(f"Forgot cluster {cluster.name}: OpenShift cluster of another instance")
+                    event_bus.publish({"kind": "cluster", "id": cluster.id, "name": cluster.name, "status": "deleted"})
+                    db.delete(cluster)
+                    changed = True
+                continue
             if cluster is None:
                 group = None
                 if entry["attrs"].get("group"):
                     group = db.query(Group).filter(Group.name == entry["attrs"]["group"]).first()
                 ctype = entry["attrs"].get("type", "k3s")
                 spec = self._rebuild_spec(entry["nodes"])
+                status = "ready"
                 message = ("Rebuilt from libvirt metadata (kubeconfig and join token are read "
                            "from the first control plane when needed)")
                 if ctype == "openshift":
@@ -140,7 +161,7 @@ class ClusterService:
                 cluster = Cluster(
                     group_id=group.id if group else None,
                     group_owned=entry["attrs"].get("group_owned") == "yes" if group else None,
-                    name=name, type=ctype, status="ready", adopted=True,
+                    name=name, type=ctype, status=status, adopted=True,
                     version=entry["attrs"].get("version") or None,
                     network=entry["attrs"].get("network", "default"),
                     network_owned=entry["attrs"].get("owned") == "yes",
@@ -1109,6 +1130,8 @@ class ClusterService:
                     from app.services.openshift_installer import openshift_installer
                     if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it through its BMC
                         return spoke_service.start_real(db, task, cluster)
+                    if cluster.kubeconfig:  # installed BMC spoke: the hub must not fight the start (power sync)
+                        spoke_service.detach_bmh(db, cluster)
                     if (cluster.spec or {}).get("bare_metal"):
                         result = openshift_installer.start_bmh(db, task, cluster)
                     else:
@@ -1139,6 +1162,10 @@ class ClusterService:
                 from app.services.acm_spokes import real_bmh_id, spoke_service
                 if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it off through its BMC
                     return spoke_service.stop_real(db, task, cluster)
+                if cluster.kubeconfig:  # installed BMC spoke: else the hub's Ironic powers it back on
+                    problem = spoke_service.detach_bmh(db, cluster)
+                    if problem:
+                        self._check(task, cluster, db, None, f"Warning: {problem}")
                 if (cluster.spec or {}).get("bare_metal"):
                     from app.services.openshift_installer import openshift_installer
                     return openshift_installer.stop_bmh(db, task, cluster)

@@ -1308,6 +1308,9 @@ class OpenShiftInstaller:
     def _manifests(self, cluster: Cluster, opts: OpenShiftOptions) -> Dict[str, Dict[str, Any]]:
         """Day-1 manifests (openshift/ dir of the install): what would otherwise need a reboot"""
         result: Dict[str, Dict[str, Any]] = {}
+        if not (cluster.spec or {}).get("bare_metal"):  # lab VMs: guest-exec for diagnostics when the API is down
+            for mc in AddonRunner.qemu_ga_machineconfigs(["master", "worker"]):
+                result[f"{mc['metadata']['name']}.yaml"] = mc
         if opts.sriov.enabled and opts.sriov.device_type == "vfio-pci":
             roles = ["master"] if (cluster.spec or {}).get("workers", 0) == 0 else ["worker"]
             for mc in AddonRunner.sriov_machineconfigs(roles):
