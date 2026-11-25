@@ -924,11 +924,15 @@ class SpokeService:
         machine = (provisioner(cluster) or {}).get("machine")
         if not machine or real_bmh_id(cluster) is not None:
             return None
-        hub = self.hub_of(db, cluster)
-        if hub is None or hub.status != "ready":
-            return f"hub {hub.name if hub else '?'} not ready: the spoke's BareMetalHost may still be driven by it"
-        out = openshift_service.oc(hub.name, hub.version, ["annotate", "bmh", machine, "-n", cluster.name,
-                                                            f"{self.DETACHED}=vm-manager", "--overwrite"], 60)
+        try:
+            hub = self.hub_of(db, cluster)
+            if hub is None or hub.status != "ready":
+                return f"hub {hub.name if hub else '?'} not ready: the spoke's BareMetalHost may still be driven by it"
+            out = openshift_service.oc(hub.name, hub.version, ["annotate", "bmh", machine, "-n", cluster.name,
+                                                                f"{self.DETACHED}=vm-manager", "--overwrite"], 60)
+        except Exception as e:  # no kubeconfig, oc download...: never fail the install / start / stop for this
+            logger.warning(f"Detaching the BareMetalHost of {cluster.name}: {e}")
+            return f"could not detach its BareMetalHost on the hub: {e}"
         if out["exitcode"] != 0:
             err = (out["stderr"] or out["stdout"] or "").strip()[-200:]
             if "NotFound" in err or "not found" in err:

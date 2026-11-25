@@ -15,7 +15,15 @@ def test_power_history_tags_task_and_merges(tmp_path):
     assert items[0]["event"] == "Redfish reset On"  # oldest first
     assert items[1]["source"] == "vm-manager" and items[1]["detail"] == "task 7: Start cluster x"
     summary = power_history.summary(items)
-    assert summary["by_source"] == {"BMC": 1, "vm-manager": 1, "guest": 1}
+    assert summary["by_source"] == {"BMC": 1, "vm-manager": 1, "libvirt": 1}
+    power_history.forget("ph-vm")
+    assert power_history.history("ph-vm") == []
+
+
+def test_bmc_image_label_hides_token():
+    from app.services.bmc_emulator import _image_label
+    label = _image_label("https://10.0.0.1:6183/byapikey/eyJsecret/4.20/x86_64/full.iso?api_key=eyJx")
+    assert "eyJ" not in label and label.endswith("/full.iso")
 
 
 def test_router_serves_ntp_without_upstream():

@@ -53,6 +53,12 @@ def record(vm: str, event: str, source: str, detail: Optional[str] = None) -> No
     logger.info(f"Power history {vm}: {event} ({source}{': ' + detail if detail else ''})")
 
 
+def forget(vm: str) -> None:
+    """The VM was deleted: a new one with the same name starts with an empty history"""
+    with _lock:
+        _entries.pop(vm, None)
+
+
 def app_action(vm: str, event: str) -> None:
     record(vm, event, "vm-manager", actor())
 
@@ -69,7 +75,7 @@ def bmc_actions(path: Path, identities: List[str]) -> List[Dict[str, Any]]:
             entry = json.loads(line)
         except ValueError:
             continue
-        if entry.get("identity") in identities:
+        if entry.get("identity") in identities and int(entry.get("status") or 200) < 400:  # refused: nothing done
             result.append({"time": entry.get("time"), "event": entry.get("action") or "?",
                            "source": f"BMC (Redfish client {entry.get('client') or '?'})",
                            "detail": entry.get("detail")})
@@ -89,6 +95,6 @@ def summary(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Counts per source of the reboots / power-offs / power-ons, and the last one"""
     counts: Dict[str, int] = {}
     for e in items:
-        key = "guest" if e["source"] in ("guest", "libvirt") else e["source"].split(" (")[0]
+        key = e["source"].split(" (")[0]  # vm-manager, BMC, guest, libvirt (events, whoever caused them)
         counts[key] = counts.get(key, 0) + 1
     return {"entries": len(items), "by_source": counts, "last": items[-1] if items else None}

@@ -445,7 +445,7 @@ async def ssh_exec(ctx: Ctx, host: str, command: str, user: Optional[str] = None
     if cluster is not None:
         from app.services.openshift_service import openshift_service
         c = await _find(ctx, "clusters", cluster)
-        key = openshift_service.cluster_dir(c["name"]) / "id_ed25519"
+        key = openshift_service.root / "clusters" / c["name"] / "id_ed25519"  # cluster_dir() would create it
         if c.get("type") != "openshift" or not key.exists():
             raise ApiError(f"{c['name']}: no node SSH key (OpenShift clusters created by this instance only)")
         opts += ["-o", f"IdentityFile={key}", "-o", "IdentitiesOnly=no"]

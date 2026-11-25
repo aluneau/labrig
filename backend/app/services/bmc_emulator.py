@@ -95,6 +95,15 @@ _ACTION_PATHS = ("/Actions/ComputerSystem.Reset", "/Actions/VirtualMedia.InsertM
                  "/Actions/VirtualMedia.EjectMedia")
 
 
+def _image_label(url):
+    """host + file name of a virtual media URL: its path / query carry the hub's image-service token"""
+    from urllib.parse import urlsplit
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    return f"{parts.netloc}/…/{parts.path.rstrip('/').rsplit('/', 1)[-1]}"[:200]
+
+
 def _log_actions(app, path):
     """Every power / virtual media / boot override request a BMC client sent, one JSON line each in `path`
     (read by the app's power history: who reboots a machine shows there)"""
@@ -114,7 +123,7 @@ def _log_actions(app, path):
             action, detail = f"Redfish reset {body.get('ResetType') or '?'}", None
         elif req.method == "POST" and req.path.endswith(_ACTION_PATHS[1:]):
             action = "virtual media " + ("insert" if req.path.endswith("InsertMedia") else "eject")
-            detail = str(body.get("Image") or "")[:200] or None
+            detail = _image_label(str(body.get("Image") or "")) or None
         elif req.method == "PATCH" and "Boot" in body:
             action, detail = "boot override", json.dumps(body.get("Boot"))[:200]
         else:

@@ -396,22 +396,22 @@ class LibvirtClient:
             logger.exception("power history")
 
     def start_vm(self, name: str) -> None:
-        power_history.app_action(name, "start")
         self.connect().lookupByName(name).create()
+        power_history.app_action(name, "start")
         logger.info(f"Started VM {name}")
 
     def stop_vm(self, name: str, force: bool = False) -> None:
         domain = self.connect().lookupByName(name)
-        power_history.app_action(name, "force stop" if force else "stop (ACPI)")
         if force:
             domain.destroy()
         else:
             domain.shutdown()
+        power_history.app_action(name, "force stop" if force else "stop (ACPI)")
         logger.info(f"Stopped VM {name} (force={force})")
 
     def reboot_vm(self, name: str) -> None:
-        power_history.app_action(name, "reboot (ACPI)")
         self.connect().lookupByName(name).reboot()
+        power_history.app_action(name, "reboot (ACPI)")
         logger.info(f"Rebooted VM {name}")
 
     def suspend_vm(self, name: str) -> None:
@@ -430,6 +430,7 @@ class LibvirtClient:
             domain = conn.lookupByName(name)
         except libvirt.libvirtError:
             return False
+        power_history.forget(name)
 
         disk_paths = []
         if delete_disks:
