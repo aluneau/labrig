@@ -129,7 +129,13 @@ case "$FAMILY" in
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
       libvirt-daemon-system libvirt-clients qemu-system-x86 qemu-utils ovmf dnsmasq-base python3 python3-venv python3-libvirt \
-      dnsmasq-utils polkitd pkexec nmstate
+      dnsmasq-utils polkitd pkexec
+    # nmstate (nmstatectl, bare-metal OpenShift static networkConfig) isn't packaged on Debian 13: optional
+    if apt-cache show nmstate >/dev/null 2>&1; then
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nmstate
+    else
+      warn "nmstate isn't packaged here: bare-metal OpenShift nodes with a static networkConfig can't be validated (docs/bmh.md)"
+    fi
     ;;
 esac
 ok "packages installed"
