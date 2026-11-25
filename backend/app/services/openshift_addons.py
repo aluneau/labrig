@@ -1,6 +1,6 @@
 """OpenShift add-ons: OLM operators and the app-configured ones (LVMS, ODF, SR-IOV, MetalLB)
 
-Recipes follow the product docs and kcli's `apps/<operator>/` (Namespace + OperatorGroup +
+Recipes follow the product docs, with kcli's `apps/<operator>/` used as a reference (Namespace + OperatorGroup +
 Subscription, wait for the CSV, then the operator's CR). Everything goes through `oc` on the host
 (openshift_service.oc), with the cluster's host kubeconfig.
 """

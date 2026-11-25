@@ -291,3 +291,9 @@ then **Kubernetes / OpenShift** clusters on top of groups.
 
 `docker-compose.yml` is kept for reference but is not the supported way to run the backend (see
 Architecture). Use `scripts/setup.sh`.
+
+## Acknowledgements
+
+Thanks to Karim Boumedhel, whose [kcli](https://github.com/karmab/kcli) is the reference for OpenShift and Kubernetes
+labs on libvirt. It served as inspiration for cluster topologies and operator add-on recipes; VM Manager takes a
+different approach (agent-based installer, a router VM per lab group).
