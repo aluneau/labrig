@@ -359,7 +359,11 @@ def _agent_exec(name: str, argv: List[str], stdin: Optional[str], timeout: float
                                          timeout=timeout)
     except libvirt.libvirtError as e:
         raise ApiError(f"{name}: guest agent: {e.get_error_message() or e} (is the VM running with "
-                       f"qemu-guest-agent? EL images only allow guest-exec on cluster nodes / routers: use ssh_exec)")
+                       f"qemu-guest-agent? EL images only allow guest-exec on lab routers and cluster nodes (OpenShift: "
+                       f"clusters installed after Nov. 2026). Otherwise vm_logs / vm_diagnostics fall back "
+                       f"on the agent's info; ssh_exec only reaches machines the host routes to (NAT networks, router "
+                       f"uplinks): a node on a group network needs jump='<user>@<router uplink ip>', OpenShift nodes "
+                       f"cluster='<name>' for the core user's key)")
     except TimeoutError as e:
         raise ApiError(str(e))
 
@@ -420,24 +424,39 @@ async def vm_write_file(ctx: Ctx, vm: Ref, path: str, content: str, mode: Option
 
 @tool(admin=True)
 async def ssh_exec(ctx: Ctx, host: str, command: str, user: Optional[str] = None, port: int = 22,
-                   jump: Optional[str] = None, timeout: int = 120) -> Any:
+                   jump: Optional[str] = None, cluster: Optional[Ref] = None, timeout: int = 120) -> Any:
     """Run a command over SSH from the vm-manager host, with the service account's SSH keys (no host key
-    check: lab VMs are re-created often). For VMs reachable from the host (NAT networks, router uplinks);
-    group members on isolated networks: use vm_exec, or jump through the router.
+    check on any hop, the jump host included: lab VMs are re-created often). For VMs reachable from the host
+    (NAT networks, router uplinks); group members on isolated networks: use vm_exec, or jump through the router
+    (its cloud-init user, with a key from the group's cloud_init.ssh_keys).
 
     Args:
         host: IP address or name
         command: remote command
-        user: remote user (default: the service account name)
+        user: remote user (default: the service account name; 'core' with cluster)
         port: SSH port
-        jump: ProxyJump host, e.g. 'admin@192.168.122.50'
+        jump: jump host, e.g. 'admin@192.168.122.50' (a group router's uplink address)
+        cluster: OpenShift cluster name or id: log in with its node SSH key (user core)
         timeout: seconds
     """
     ctx.require_admin()
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10", "-p", str(port)]
+    opts = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10"]
+    if cluster is not None:
+        from app.services.openshift_service import openshift_service
+        c = await _find(ctx, "clusters", cluster)
+        key = openshift_service.cluster_dir(c["name"]) / "id_ed25519"
+        if c.get("type") != "openshift" or not key.exists():
+            raise ApiError(f"{c['name']}: no node SSH key (OpenShift clusters created by this instance only)")
+        opts += ["-o", f"IdentityFile={key}", "-o", "IdentitiesOnly=no"]
+        user = user or "core"
+    argv = ["ssh"] + opts + ["-p", str(port)]
     if jump:
-        argv += ["-J", jump]
+        # -J starts the jump's ssh without these -o options (host key check on): an explicit ProxyCommand
+        # carries them to that hop too
+        jump_host, _, jump_port = jump.rpartition(":") if jump.count(":") == 1 else (jump, "", "")
+        proxy = ["ssh"] + opts + (["-p", jump_port] if jump_port else []) + ["-W", "%h:%p", jump_host]
+        argv += ["-o", "ProxyCommand=" + " ".join(shlex.quote(a) for a in proxy)]
     argv += [f"{user}@{host}" if user else host, command]
     proc = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL,
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -482,8 +501,8 @@ async def create_group(ctx: Ctx, spec: Dict[str, Any], force_budget: bool = Fals
     Refused (HTTP 409) when router + members don't fit in the host's free RAM / disk (force_budget: only
     when the user asks to create anyway).
     Call api_describe(path_contains='/groups', method='POST') for the exact schema. Minimal example:
-    {"name": "case123", "cidr": "10.42.7.0/24", "domain": "lab", "members": [{"name": "web", "image": "debian-13"}]}
-    (cidr: a free /24, see list_groups / list_networks).
+    {"name": "case123", "domain": "lab", "members": [{"name": "web", "image": "debian-13"}]}
+    (cidr left out = the app picks the first free /24; give one only when the case needs a given subnet).
     Often easier: list_templates + create_from_template.
 
     Args:
@@ -725,6 +744,20 @@ def _oc_task(cluster_id: int, argv: List[str], kind: str) -> int:
         db.close()
 
 
+def _misnamed_clusterversion(text: str) -> bool:
+    import yaml
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except yaml.YAMLError:
+        return False
+    items = []
+    for d in docs:
+        if isinstance(d, dict):
+            items += d.get("items") or [] if d.get("kind") == "List" else [d]
+    return any(isinstance(d, dict) and d.get("kind") == "ClusterVersion"
+               and ((d.get("metadata") or {}).get("name") or "version") != "version" for d in items)
+
+
 @tool(admin=True)
 async def oc(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None, timeout: int = 120) -> Any:
     """Run `oc` against an OpenShift cluster as cluster admin, like at a customer: the app's oc for the
@@ -748,6 +781,9 @@ async def oc(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None, tim
         must-gather image>' for an operator's). These run as a task: the result (directory listing + tarball
         path on the host + download link) comes back when done within `timeout`, else a task id for
         wait_for_task. On a disconnected cluster the image must be in the mirror registry: checked first.
+    Cluster-scoped singletons keep OpenShift's names: ClusterVersion is `version` ('patch clusterversion version
+    ...'), the config.openshift.io objects (Ingress, Network, Proxy, Image, OAuth, ...) are `cluster`. Applying a
+    ClusterVersion named `cluster` creates a second, ignored object.
     Big outputs are cut in the middle (narrow with -n, -l, -o jsonpath=..., --tail). Files written by
     oc cp / rsync land in the install dir's oc-output (GET /clusters/{id}/oc-output lists them).
 
@@ -763,6 +799,10 @@ async def oc(ctx: Ctx, cluster: Ref, args: str, stdin: Optional[str] = None, tim
         argv = shlex.split(args)
     except ValueError as e:
         raise ApiError(f"args: {e} (shell quoting: wrap JSON in single quotes)")
+    if stdin and "ClusterVersion" in stdin and _misnamed_clusterversion(stdin):
+        raise ApiError("ClusterVersion is a singleton named `version`: a manifest with another name creates a "
+                       "second object the cluster ignores. Use metadata.name: version (or 'patch clusterversion "
+                       "version --type merge -p ...').")
     from app.services.kube_exec import oc_gather_kind
     kind = oc_gather_kind(argv[1:] if argv[:1] == ["oc"] else argv)
     if not kind:
@@ -1053,6 +1093,20 @@ async def vm_diagnostics(ctx: Ctx, vm: Ref) -> Any:
     """
     v = await _find(ctx, "vms", vm)
     return await ctx.api("GET", f"/vms/{v['id']}/diagnostics")
+
+
+@tool
+async def vm_power_history(ctx: Ctx, vm: Ref) -> Any:
+    """Who started, stopped or rebooted a VM and when: the app's own actions (with the task or request behind
+    them), BMC Redfish actions (a hub's metal3 / Ironic driving an ACM spoke's machine), and libvirt events
+    (guest-initiated shutdowns / reboots, crashes). The app has no background recovery: a reboot with no
+    vm-manager or BMC entry next to it came from inside the guest. Use it when a node keeps rebooting.
+
+    Args:
+        vm: VM name or id
+    """
+    v = await _find(ctx, "vms", vm)
+    return await ctx.api("GET", f"/vms/{v['id']}/power-history")
 
 
 @tool

@@ -222,6 +222,7 @@ def reconcile(db: Session) -> None:
         state.mkdir(exist_ok=True)
         config = {"listen": bmc["listen"], "port": int(bmc["port"]), "libvirt_uri": settings.LIBVIRT_URI,
                   "auth_file": str(gdir / "bmc-htpasswd"), "allow_file": str(allow), "state_dir": str(state),
+                  "actions_file": str(gdir / "bmc-actions.jsonl"),
                   "hosts": hosts, "redirects": redirects, "redirect_ports": IRONIC_PORTS,
                   "storage_pool": settings.DEFAULT_POOL_NAME}
         config["_hash"] = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -260,3 +261,12 @@ def status(group: Group) -> Dict[str, Any]:
             "username": USERNAME if names else None, "members": members, "error": problem,
             "firewall": (f"The host firewall must let the group machines reach {addr}/tcp: scripts/setup.sh opens "
                          f"BMC_HOST_PORTS ({settings.BMC_HOST_PORTS}) on the libvirt bridges") if addr else None}
+
+
+def actions_file(db: Session, vm_name: str) -> Optional[Path]:
+    """The BMC action log of the group whose BMC member is this VM (None: not a BMC member)"""
+    from app.services.group_service import member_vm_name
+    for group in db.query(Group).all():
+        if vm_name in {member_vm_name(group.name, n) for n in _bmc_members(group.spec or {})}:
+            return group_dir(group.name) / "bmc-actions.jsonl"
+    return None

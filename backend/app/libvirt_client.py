@@ -12,6 +12,7 @@ import logging
 from app import domain_xml
 from app.config import settings
 from app.events import event_bus
+from app.services import power_history
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,8 @@ class LibvirtClient:
             logger.warning(f"libvirt connection closed (reason {reason})")
             event_bus.publish({"kind": "connection", "event": "disconnected"})
 
-        def on_domain(_conn, dom, event, _detail, _opaque):
+        def on_domain(_conn, dom, event, detail, _opaque):
+            self._record_lifecycle(dom.name(), event, detail)
             try:
                 state = DOMAIN_STATES.get(dom.state()[0], "unknown")
             except libvirt.libvirtError:
@@ -162,6 +164,8 @@ class LibvirtClient:
                                "uuid": dom.UUIDString(), "name": dom.name(), "state": state})
 
         def on_reboot(_conn, dom, _opaque):
+            power_history.record(dom.name(), "rebooted", "libvirt", "reset or guest reboot (an ACPI reboot the app sent "
+                                 "shows as a vm-manager entry just before)")
             event_bus.publish({"kind": "vm", "event": "rebooted", "uuid": dom.UUIDString(),
                                "name": dom.name(), "state": "running"})
 
@@ -365,12 +369,40 @@ class LibvirtClient:
     def running_vm_names(self) -> List[str]:
         return sorted(d.name() for d in self.connect().listAllDomains(libvirt.VIR_CONNECT_LIST_DOMAINS_ACTIVE))
 
+    @staticmethod
+    def _record_lifecycle(name: str, event: int, detail: int) -> None:
+        """Power history (services/power_history): starts, shutdowns (guest or host initiated), stops"""
+        try:
+            if event == libvirt.VIR_DOMAIN_EVENT_STARTED:
+                what = {libvirt.VIR_DOMAIN_EVENT_STARTED_BOOTED: "booted",
+                        libvirt.VIR_DOMAIN_EVENT_STARTED_RESTORED: "restored",
+                        libvirt.VIR_DOMAIN_EVENT_STARTED_FROM_SNAPSHOT: "started from a snapshot"}.get(detail)
+                if what:
+                    power_history.record(name, "started", "libvirt", what)
+            elif event == libvirt.VIR_DOMAIN_EVENT_SHUTDOWN and detail in (1, 2):  # GUEST, HOST
+                power_history.record(name, "shutting down", "guest" if detail == 1 else "libvirt",
+                                     "the guest OS shut down by itself" if detail == 1
+                                     else "ACPI power button pressed by a libvirt client")
+            elif event == libvirt.VIR_DOMAIN_EVENT_STOPPED:
+                what = {libvirt.VIR_DOMAIN_EVENT_STOPPED_SHUTDOWN: "powered off",
+                        libvirt.VIR_DOMAIN_EVENT_STOPPED_DESTROYED: "forced off",
+                        libvirt.VIR_DOMAIN_EVENT_STOPPED_CRASHED: "crashed",
+                        libvirt.VIR_DOMAIN_EVENT_STOPPED_FAILED: "failed"}.get(detail)
+                if what:
+                    power_history.record(name, "stopped", "libvirt", what)
+            elif event == libvirt.VIR_DOMAIN_EVENT_CRASHED:
+                power_history.record(name, "crashed", "libvirt", "guest panic")
+        except Exception:  # never break event delivery
+            logger.exception("power history")
+
     def start_vm(self, name: str) -> None:
+        power_history.app_action(name, "start")
         self.connect().lookupByName(name).create()
         logger.info(f"Started VM {name}")
 
     def stop_vm(self, name: str, force: bool = False) -> None:
         domain = self.connect().lookupByName(name)
+        power_history.app_action(name, "force stop" if force else "stop (ACPI)")
         if force:
             domain.destroy()
         else:
@@ -378,6 +410,7 @@ class LibvirtClient:
         logger.info(f"Stopped VM {name} (force={force})")
 
     def reboot_vm(self, name: str) -> None:
+        power_history.app_action(name, "reboot (ACPI)")
         self.connect().lookupByName(name).reboot()
         logger.info(f"Rebooted VM {name}")
 

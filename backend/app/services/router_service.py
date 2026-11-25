@@ -400,8 +400,13 @@ class ELRouterBackend(RouterBackend):
     @staticmethod
     def ntp_command(spec: GroupSpec) -> str:
         """The router (synced to the public pools through its uplink) serves NTP to the lab: OpenShift's
-        installer checks the nodes' clock against it, and labs keep time without internet NTP."""
-        cmd = ""
+        installer checks the nodes' clock against it, and labs keep time without internet NTP.
+        `local stratum 8`: chronyd only serves time once synchronised; where the host's network blocks NTP
+        (UDP/123) the router never syncs, its clients get "unsynchronised" answers and RHCOS's chrony-wait.service
+        holds crio / kubelet for minutes at every boot. The router's clock is the host's (kvm-clock), so it serves
+        it as a local source when no upstream server answers (upstream wins when reachable)."""
+        cmd = ("{ grep -qx 'local stratum 8' /etc/chrony.conf || { echo 'local stratum 8' >> /etc/chrony.conf"
+               " && systemctl restart chronyd; }; true; }; ")
         for net in [spec.cidr] + ([spec.ipv6_prefix()] if spec.ipv6_prefix() else []):  # + the IPv6 /64
             allow = f"allow {net}"
             cmd += (f"{{ grep -qx '{allow}' /etc/chrony.conf || {{ echo '{allow}' >> /etc/chrony.conf"

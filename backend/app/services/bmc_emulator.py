@@ -91,6 +91,50 @@ class _Allowed:
             return self.ids
 
 
+_ACTION_PATHS = ("/Actions/ComputerSystem.Reset", "/Actions/VirtualMedia.InsertMedia",
+                 "/Actions/VirtualMedia.EjectMedia")
+
+
+def _log_actions(app, path):
+    """Every power / virtual media / boot override request a BMC client sent, one JSON line each in `path`
+    (read by the app's power history: who reboots a machine shows there)"""
+    import flask
+    if not path:
+        return
+    lock = threading.Lock()
+
+    @app.after_request
+    def _record(response):
+        req = flask.request
+        identity = (req.view_args or {}).get("identity")
+        if identity is None or req.method not in ("POST", "PATCH") or not req.path.startswith("/redfish/v1/"):
+            return response
+        body = req.get_json(silent=True) or {}
+        if req.method == "POST" and req.path.endswith(_ACTION_PATHS[0]):
+            action, detail = f"Redfish reset {body.get('ResetType') or '?'}", None
+        elif req.method == "POST" and req.path.endswith(_ACTION_PATHS[1:]):
+            action = "virtual media " + ("insert" if req.path.endswith("InsertMedia") else "eject")
+            detail = str(body.get("Image") or "")[:200] or None
+        elif req.method == "PATCH" and "Boot" in body:
+            action, detail = "boot override", json.dumps(body.get("Boot"))[:200]
+        else:
+            return response
+        entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), "identity": identity,
+                 "action": action, "detail": detail, "client": req.remote_addr, "status": response.status_code}
+        with lock:
+            try:
+                if os.path.exists(path) and os.path.getsize(path) > 1024 * 1024:  # keep the newest half
+                    with open(path) as f:
+                        lines = f.readlines()
+                    with open(path, "w") as f:
+                        f.writelines(lines[len(lines) // 2:])
+                with open(path, "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except OSError:
+                pass
+        return response
+
+
 def _guard(app, allowed_ids):
     """sushy-tools checks instance_denied on /Systems/<identity> routes only: its VirtualMedia blueprint
     (/Systems/<identity>/VirtualMedia/..., InsertMedia redefines the domain) and /Managers/<identity> (id = the
@@ -145,6 +189,7 @@ def build_app(config):
 
     app = emulator.app
     _guard(app, allowed.get)
+    _log_actions(app, config.get("actions_file"))
     app.config.update({
         "SUSHY_EMULATOR_LISTEN_IP": config["listen"],
         "SUSHY_EMULATOR_LISTEN_PORT": int(config["port"]),

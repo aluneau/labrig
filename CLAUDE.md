@@ -332,7 +332,8 @@ e2e/                  Playwright browser tests against the real app (see below)
   x86_64 RHCOS only, hub router LBs 6180/6183 for Ironic's image server, which the emulator reaches through its
   getaddrinfo redirect), records + API LB (6444+) owned `cluster:<spoke>`; kubeconfig from the hub's
   `<spoke>-admin-kubeconfig`; `delete_cluster` goes through the hub and keeps the machine; a hub with spokes can't be
-  deleted. Every cluster read carries `acm` {role hub|managed|spoke, hub_id, hub_name, state} (`acm_service.relation`).
+  deleted. Installed spokes' BMH get `baremetalhost.metal3.io/detached` (`detach_bmh`, also before start / stop): the
+  hub's Ironic must not drive their power. The emulator logs Redfish power / media actions to `bmc-actions.jsonl`. Every cluster read carries `acm` {role hub|managed|spoke, hub_id, hub_name, state} (`acm_service.relation`).
 - **Disconnected kubeadm** (docs/disconnected.md "Kubernetes (kubeadm)", `k8s_mirror.py`, `disconnected` +
   `mirror_images`, create only; k3s not: no router): registry enabled with `REGISTRY_SIZES` (4 GiB) -> on the router
   `resolve_kubeadm` (patch from stable-<minor>.txt, `kubeadm config images list`, Flannel manifest, base64 into
@@ -379,6 +380,14 @@ e2e/                  Playwright browser tests against the real app (see below)
   removed members or nodes) or a VM lacks the snapshot. VM revert of a memory snapshot uses `REVERT_RUNNING` (group
   snapshots are taken paused). `delete_vm` with kept disks deletes the snapshots first (their data is in the qcow2).
   Cluster rows are not snapshotted (same VM set = still consistent). No OpenTofu resource (imperative).
+- **Power history** (`services/power_history`, `GET /vms/{id}/power-history`, MCP `vm_power_history`): the app's own
+  start / stop / reboot calls (`libvirt_client`, tagged with the task via `set_actor` in task_service), BMC emulator
+  actions (`bmc-actions.jsonl`), libvirt lifecycle events (in memory; gaps while no connection is open). The app has no
+  background power recovery: keep it that way (every power action = a task or a request).
+- OpenShift nodes get day-0 MachineConfigs `99-<role>-vmm-qemu-ga` (`AddonRunner.qemu_ga_machineconfigs`: guest-exec
+  allowed + `virt_qemu_ga_t` permissive; BMC spokes via `manifestsConfigMapRefs`). Routers' chrony has `local stratum 8`
+  (serves time without upstream NTP: RHCOS chrony-wait otherwise stalls boots). `POST /groups` without `cidr` (or
+  `auto`) = first free /24 of `TEMPLATE_SUBNET_POOL` (`GroupSpecCreate`; PUT still needs it).
 - **Logs / diagnostics** (docs/logs.md, `log_service`, components/logs/): VM logs through guest-exec only (journal as
   `journalctl -o json` = real priority, `dmesg -T -x`, cloud-init, any file), pod logs through `kube_exec` (per container,
   + pod status lines and events: ImagePullBackOff never shows in a container log). ONE server-side filter for UI / API /

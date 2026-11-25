@@ -1130,6 +1130,8 @@ class ClusterService:
                     from app.services.openshift_installer import openshift_installer
                     if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it through its BMC
                         return spoke_service.start_real(db, task, cluster)
+                    if cluster.kubeconfig:  # installed BMC spoke: the hub must not fight the start (power sync)
+                        spoke_service.detach_bmh(db, cluster)
                     if (cluster.spec or {}).get("bare_metal"):
                         result = openshift_installer.start_bmh(db, task, cluster)
                     else:
@@ -1160,6 +1162,10 @@ class ClusterService:
                 from app.services.acm_spokes import real_bmh_id, spoke_service
                 if real_bmh_id(cluster) is not None:  # ACM spoke on a real host: power it off through its BMC
                     return spoke_service.stop_real(db, task, cluster)
+                if cluster.kubeconfig:  # installed BMC spoke: else the hub's Ironic powers it back on
+                    problem = spoke_service.detach_bmh(db, cluster)
+                    if problem:
+                        self._check(task, cluster, db, None, f"Warning: {problem}")
                 if (cluster.spec or {}).get("bare_metal"):
                     from app.services.openshift_installer import openshift_installer
                     return openshift_installer.stop_bmh(db, task, cluster)

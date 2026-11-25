@@ -301,6 +301,35 @@ class AddonRunner(MetalLBClient):
             "spec": {"kernelArguments": ["intel_iommu=on", "iommu=pt"]},
         } for role in roles]
 
+    @staticmethod
+    def qemu_ga_machineconfigs(roles: List[str]) -> List[Dict[str, Any]]:
+        """Day-1 manifests: RHCOS ships qemu-guest-agent (started when the virtio port appears) but, like EL, its
+        /etc/sysconfig/qemu-ga forbids guest-exec / guest-file-* and SELinux confines it. The app's diagnostics
+        (VM logs, MCP vm_exec) need them when a node's API is down: allow every RPC and make virt_qemu_ga_t
+        permissive (the rest stays enforcing), as on kubeadm / k3s nodes (cluster_drivers._el_guest_agent_prep)."""
+        from urllib.parse import quote
+        sysconfig = ("# vm-manager: allow guest-exec (lab diagnostics)\nFILTER_RPC_ARGS=\"\"\nBLACKLIST_RPC=\"\"\n"
+                     "FSFREEZE_HOOK_PATHNAME=/etc/qemu-ga/fsfreeze-hook\n")
+        cil = "(typepermissive virt_qemu_ga_t)\n"
+        unit = ("[Unit]\nDescription=vm-manager: guest-exec through the QEMU guest agent (lab diagnostics)\n"
+                "\n[Service]\nType=oneshot\nRemainAfterExit=yes\n"
+                "ExecStart=/bin/sh -c 'semodule -l | grep -qx qemu-ga-permissive || "
+                "semodule -i /etc/vm-manager/qemu-ga-permissive.cil; systemctl --no-block try-restart qemu-guest-agent.service'\n"
+                "\n[Install]\nWantedBy=multi-user.target\n")
+
+        def file(path: str, text: str) -> Dict[str, Any]:
+            return {"path": path, "mode": 0o644, "overwrite": True, "contents": {"source": "data:," + quote(text)}}
+        return [{
+            "apiVersion": "machineconfiguration.openshift.io/v1", "kind": "MachineConfig",
+            "metadata": {"name": f"99-{role}-vmm-qemu-ga", "labels": {"machineconfiguration.openshift.io/role": role}},
+            "spec": {"config": {
+                "ignition": {"version": "3.2.0"},
+                "storage": {"files": [file("/etc/sysconfig/qemu-ga", sysconfig),
+                                      file("/etc/vm-manager/qemu-ga-permissive.cil", cil)]},
+                "systemd": {"units": [{"name": "vmm-qemu-ga.service", "enabled": True, "contents": unit}]},
+            }},
+        } for role in roles]
+
     def sriov(self, options: Dict[str, Any], single_or_compact: bool) -> None:
         # igb (82576) isn't in the operator's supported-nic-ids: dev mode lifts the webhook and
         # the config daemon's check

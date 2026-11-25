@@ -41,6 +41,14 @@ cluster whose RAM doesn't fit next to the running VMs (no overcommit: an OOM-kil
    are approved.
 5. The ISO is ejected and deleted, updates are disabled (channel cleared), add-ons are installed.
 
+Nodes (and emulated-BMC spokes) get two day-0 MachineConfigs `99-<role>-vmm-qemu-ga`: RHCOS ships qemu-guest-agent
+but, like EL, forbids guest-exec and confines it with SELinux. They allow every RPC and make `virt_qemu_ga_t`
+permissive, so VM logs / diagnostics / MCP `vm_exec` work on a node whose API is down (clusters installed before this
+change: `oc adm node-logs`, or `ssh_exec cluster=<name>` with a jump through the router). The routers serve NTP with
+`local stratum 8`: without upstream NTP (UDP/123 blocked on the host's network) RHCOS's `chrony-wait.service` otherwise
+holds crio / kubelet for minutes at every boot. Cluster-scoped singletons keep OpenShift's names: ClusterVersion
+`version`, the config.openshift.io objects `cluster` (the MCP `oc` tool refuses a ClusterVersion named otherwise).
+
 OpenShift 5.0.x works the same way: `stable-5.0` comes from the same update service and the clients from the same mirror, so a 5.0 cluster (connected or disconnected) is created exactly like a 4.x one.
 
 Typical times on a desktop: ISO 3–5 min (first time per release: + base ISO extraction), SNO install
@@ -256,6 +264,14 @@ Ironic powers a server and boots it from a virtual-media ISO, the assisted insta
   `ufw allow in on virbr+ to any port 8180:8199 proto tcp` (firewalld: the ports in zone `libvirt`).
 - The emulator resolves the names under every lab cluster's zone (`api`, `*.apps`) to that cluster's router: it
   downloads the hub's discovery ISO itself when metal3 inserts the virtual media.
+- Every power / virtual media / boot override request a BMC client sends is logged to
+  `DATA_DIR/groups/<group>/bmc-actions.jsonl` and shows in the machine's **power history** (`GET /vms/{id}/power-history`,
+  MCP `vm_power_history`), next to the app's own power actions (with the task behind them) and libvirt events
+  (guest-initiated shutdowns / reboots). The app itself never reboots a node on its own: a reboot with no vm-manager
+  or BMC entry around it came from inside the guest.
+- Once a spoke is installed, its BareMetalHost is annotated `baremetalhost.metal3.io/detached` on the hub (again before
+  each cluster start / stop): metal3 / Ironic stop driving its power (power-state sync powering it back on after a stop,
+  virtual-media re-inserts + reboots when the InfraEnv ISO changes). Start / stop are then the app's, like any lab VM.
 - sushy-tools is pip-installed in the app's venv by `setup.sh` (on Python 3.9 / RHEL 9 pip picks 2.1.0, same
   emulator API). Without it the BMC tab says so and the rest of the app works.
 
